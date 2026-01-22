@@ -7,3 +7,4 @@ models/
 .vscode/
 result/
 .venv_tf22/
+data/

@@ -13,10 +13,10 @@ if __name__ == "__main__":
     data_dir = '../data'
     
     # ---- Patch index files ----
-    training_file = '{}/train.csv'.format(data_dir)
+    training_file = '{}/train_test.csv'.format(data_dir)
     validate_file = '{}/validate.csv'.format(data_dir)
 
-    QUICKSAVE = True
+    QUICKSAVE = False
     benchmark_file = '{}/benchmark.csv'.format(data_dir)
     
     restore = False
@@ -33,7 +33,7 @@ if __name__ == "__main__":
     # Network setting
     network_name = '4DFlowNet'
     patch_size = 16
-    res_increase = 2
+    res_increase = 1
     # Residual blocks, default (8 LR ResBlocks and 4 HR ResBlocks)
     low_resblock = 8
     hi_resblock = 4

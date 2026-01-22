@@ -27,9 +27,11 @@ The network is based on the paper "4DFlowNet: Super-Resolution 4D Flow MRI" with
     - `h5util.py`: HDF5 file I/O utilities
   - `prepare_data/`: Data preparation scripts
     - `prepare_mri_data.py`: Convert DICOM MRI data to HDF5
+    - `prepare_nifti_data.py`: Convert NIfTI velocity/magnitude data to HDF5
     - `prepare_lowres_dataset.py`: Generate low-resolution training data from high-res CFD
     - `prepare_patches.py`: Generate random patch indices for training
     - `DicomData.py`: DICOM data handling
+    - `NiftiData.py`: NIfTI data handling
     - `fft_downsampling.py`: FFT-based downsampling with noise injection
   - `utils/`: Prediction utilities
     - `ImageDataset.py`: Dataset loading for prediction
@@ -141,6 +143,21 @@ Options:
 - `--fh-mul`, `--rl-mul`, `--in-mul`: Velocity direction multipliers
 
 Requirements: Exactly 3 phase and 3 magnitude directories. Use [DicomSort](https://dicomsort.com/) to organize by SeriesDescription -> TriggerTime.
+
+#### From MRI NIfTI (Training or Prediction)
+```bash
+cd src/prepare_data
+python prepare_nifti_data.py \
+  --u [U_NIFTI] --v [V_NIFTI] --w [W_NIFTI] \
+  --mag [MAG_NIFTI] \
+  --venc [VENC_M_PER_S] \
+  --output-filename [OUTPUT.h5]
+```
+Notes:
+- Supports 3D or 4D NIfTI; use `--time-axis` if time is not the last axis.
+- Use `--mag-u/--mag-v/--mag-w` for per-component magnitudes.
+- Provide `--mask` for training (or let it be generated from magnitude via `--mask-threshold`).
+- Requires `nibabel`.
 
 ### Testing Data Pipeline
 ```bash

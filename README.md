@@ -114,6 +114,22 @@ Notes:
 * To get the required directory structure, [DicomSort](https://dicomsort.com/) is recommended. Sort by SeriesDescription -> TriggerTime.
 * In our case, VENC and velocity direction is read from the SequenceName DICOM HEADER. Code might need to be adjusted if the criteria is different.
 
+### Prepare data from NIfTI (for training or prediction)
+
+If your data is already in NIfTI (velocity components + magnitude), use:
+
+    >> python prepare_nifti_data.py \
+        --u [U_NIFTI] --v [V_NIFTI] --w [W_NIFTI] \
+        --mag [MAG_NIFTI] \
+        --venc [VENC_M_PER_S] \
+        --output-filename [OUTPUT.h5]
+
+Notes:
+*  Accepts 3D or 4D NIfTI. For 4D data, use `--time-axis` if time is not the last axis.
+*  You can pass per-component magnitudes using `--mag-u/--mag-v/--mag-w`.
+*  A `mask` dataset is required for training. Provide `--mask` or let it be generated from magnitude via `--mask-threshold`.
+*  Requires `nibabel` (install with pip).
+
 ## Prediction
 
 To run the prediction, download first the [pre-trained weights](https://auckland.figshare.com/articles/Super_Resolution_4DFlow_MRI/12253424). We have provided an example dataset under the data/ folder.

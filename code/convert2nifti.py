@@ -6,6 +6,23 @@ import pydicom
 import subprocess
 import shutil
 
+def _reorient_to_ras(data, affine):
+    """
+    Reorient a 3D/4D volume to RAS (Right-Anterior-Superior).
+    Returns (data_ras, affine_ras).
+    """
+    ornt = nib.orientations.io_orientation(affine)
+    ras_ornt = nib.orientations.axcodes2ornt(("R", "A", "S"))
+    transform = nib.orientations.ornt_transform(ornt, ras_ornt)
+
+    if np.allclose(transform, np.array([[0, 1], [1, 1], [2, 1]])):
+        return data, affine
+
+    data_ras = nib.orientations.apply_orientation(data, transform)
+    affine_ras = affine @ nib.orientations.inv_ornt_aff(transform, data.shape[:3])
+    return data_ras, affine_ras
+
+
 def lectura_directa_dicom_4d(carpeta_dicom, nifti_referencia_path, salida_path):
     """
     Read all DICOM files in the folder, skip dcm2niix, and build the 4D volume
@@ -104,9 +121,11 @@ def lectura_directa_dicom_4d(carpeta_dicom, nifti_referencia_path, salida_path):
             affine = np.eye(4)
             header = None
             
-        new_img = nib.Nifti1Image(vol_4d, affine, header)
+        # Reorient to RAS before saving
+        vol_ras, affine_ras = _reorient_to_ras(vol_4d, affine)
+        new_img = nib.Nifti1Image(vol_ras, affine_ras, header)
         nib.save(new_img, salida_path)
-        print(f"      -> Success! Saved volume {vol_4d.shape}")
+        print(f"      -> Success! Saved volume {vol_ras.shape} (RAS)")
         return True
         
     except Exception as e:
@@ -172,8 +191,15 @@ def procesar_v11_final(input_root, output_root, dcm2niix_path="dcm2niix"):
                         usar_lectura_directa = True
                     else:
                         # 7T case or simple anatomy: looks correct
-                        shutil.move(generated[0], nifti_final_path)
-                        print(f"   [OK] {serie}")
+                        # Reorient to RAS before saving
+                        img_src = nib.load(generated[0])
+                        data_src = img_src.get_fdata()
+                        affine_src = img_src.affine
+                        header_src = img_src.header
+                        data_ras, affine_ras = _reorient_to_ras(data_src, affine_src)
+                        img_ras = nib.Nifti1Image(data_ras, affine_ras, header_src)
+                        nib.save(img_ras, nifti_final_path)
+                        print(f"   [OK] {serie} (RAS)")
                 except:
                     usar_lectura_directa = True
             else:
@@ -191,8 +217,8 @@ def procesar_v11_final(input_root, output_root, dcm2niix_path="dcm2niix"):
 
 
 # --- CONFIGURATION ---
-ruta_dicom_ordenada = r"../Data/Disease Patients/sorted_patients"
-ruta_nifti_destino = r"../Data/Disease Patients/nifti_patients"
+ruta_dicom_ordenada = r"../data/sorted_patients"
+ruta_nifti_destino = r"../data/nifti_patients"
 ruta_ejecutable = "dcm2niix" # O la ruta completa si no está en PATH
 
 if __name__ == "__main__":

@@ -106,9 +106,9 @@ def predict_patient(model, input_filepath, output_filepath, patch_size, res_incr
 
 def main():
     parser = argparse.ArgumentParser(description="Batch Prediction for 4DFlowNet")
-    parser.add_argument("--input-dir", default="../data/h5_inputs", help="Directory with .h5 input files")
+    parser.add_argument("--input-dir", default="../data/h5_lr", help="Directory with .h5 input files")
     parser.add_argument("--output-dir", default="../data/predictions", help="Directory for results")
-    parser.add_argument("--model-path", default="../models/4DFlowNet/4DFlowNet.h5", help="Path to .h5 weights")
+    parser.add_argument("--model-path", default="../models/4DFlowNet_cerebro/4DFlowNet_cerebro.h5", help="Path to .h5 weights")
     
     # Model config (Must match training!)
     parser.add_argument("--patch-size", type=int, default=24) # 24 for standard 4DFlowNet? Check config

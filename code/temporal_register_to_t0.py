@@ -6,21 +6,21 @@ Temporal registration (motion correction) for a 4D NIfTI:
 - Registers every frame t -> reference frame t=0 using ANTsPy
 - Writes registered 4D NIfTI
 - Saves QC PNGs (overwrites on each run):
-  * overlays BEFORE/AFTER for selected frames
+  * overlays BEFORE/AFTER for selected frames:
+      1) alpha overlay (gray ref + hot moving)
+      2) edge overlay (ref gray + moving edges)
   * MAD plot (lower better)
   * NCC plot (higher better)
   * mid-slice abs-diff BEFORE/AFTER for a selected frame
+  * qc_summary.txt
 
 Usage:
   python temporal_register_to_t0.py \
     --input /path/to/4d.nii.gz \
     --out /path/to/out_registered.nii.gz \
     --qc_dir /path/to/qc_outputs \
-    --reg_type Rigid
-
-Notes:
-- For within-scan motion, start with --reg_type Rigid
-- If intensity drift is large, rely more on NCC + visual overlays than MAD.
+    --reg_type Rigid \
+    --verbose
 """
 
 import os
@@ -28,12 +28,14 @@ import argparse
 import numpy as np
 import ants
 
-# Use non-interactive backend for saving figures
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+# ----------------------------
+# IO / geometry helpers
+# ----------------------------
 def frame3d_from_4d(img4d: "ants.ANTsImage", t: int) -> "ants.ANTsImage":
     arr = img4d.numpy()[..., t]
     return ants.from_numpy(
@@ -44,6 +46,13 @@ def frame3d_from_4d(img4d: "ants.ANTsImage", t: int) -> "ants.ANTsImage":
     )
 
 
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+
+# ----------------------------
+# Mask + metrics
+# ----------------------------
 def make_mask_reference(ref3d: "ants.ANTsImage") -> "ants.ANTsImage":
     m = ants.get_mask(ref3d, cleanup=2)
     m = ants.iMath(m, "FillHoles")
@@ -66,13 +75,12 @@ def ncc(a_img: "ants.ANTsImage", b_img: "ants.ANTsImage", mask: "ants.ANTsImage"
     a = a_img.numpy()
     b = b_img.numpy()
     m = mask.numpy() > 0
-    if not np.any(m):
-        # fallback to full image
-        a = a.astype(np.float64).ravel()
-        b = b.astype(np.float64).ravel()
-    else:
+    if np.any(m):
         a = a[m].astype(np.float64)
         b = b[m].astype(np.float64)
+    else:
+        a = a.astype(np.float64).ravel()
+        b = b.astype(np.float64).ravel()
 
     a -= a.mean()
     b -= b.mean()
@@ -80,34 +88,48 @@ def ncc(a_img: "ants.ANTsImage", b_img: "ants.ANTsImage", mask: "ants.ANTsImage"
     return float((a @ b) / denom)
 
 
-def save_mid_slice_overlay_png(ref: "ants.ANTsImage", mov: "ants.ANTsImage", out_png: str, title: str):
-    """Save a simple mid-slice overlay using matplotlib (no ants.plot)."""
+# ----------------------------
+# Display normalization (robust)
+# ----------------------------
+def norm01(x: np.ndarray, p_lo=1, p_hi=99) -> np.ndarray:
+    vals = x[np.isfinite(x)]
+    if vals.size == 0:
+        return np.zeros_like(x, dtype=np.float32)
+    lo, hi = np.percentile(vals, [p_lo, p_hi])
+    if hi <= lo:
+        return np.zeros_like(x, dtype=np.float32)
+    y = np.clip(x, lo, hi)
+    y = (y - lo) / (hi - lo)
+    return y.astype(np.float32)
+
+
+# ----------------------------
+# QC image savers (no ants.plot)
+# ----------------------------
+def save_mid_slice_overlay_alpha_png(ref, mov, ref_mask, out_png, title, alpha=0.30):
+    """
+    Gray reference + hot moving with alpha.
+    Masks the display to focus on anatomy.
+    """
     ref_np = ref.numpy()
     mov_np = mov.numpy()
-    z = ref_np.shape[2] // 2
+    mask_np = ref_mask.numpy() > 0
 
-    # Normalize for display robustness
+    z = ref_np.shape[2] // 2
     r = ref_np[:, :, z].astype(np.float32)
     m = mov_np[:, :, z].astype(np.float32)
-
-    def norm01(x):
-        lo, hi = np.percentile(x[np.isfinite(x)], [1, 99])
-        if hi <= lo:
-            return np.zeros_like(x)
-        x = np.clip(x, lo, hi)
-        return (x - lo) / (hi - lo)
+    mk = mask_np[:, :, z]
 
     r01 = norm01(r)
     m01 = norm01(m)
 
-    # Overlay: ref as gray, moving as red tint
-    rgb = np.zeros((r01.shape[0], r01.shape[1], 3), dtype=np.float32)
-    rgb[..., 0] = m01  # red channel = moving
-    rgb[..., 1] = r01  # green channel = ref
-    rgb[..., 2] = r01  # blue channel = ref (so ref looks grayish)
+    # Apply mask to reduce background confetti
+    r01 = r01 * mk
+    m01 = m01 * mk
 
     plt.figure(figsize=(6, 6))
-    plt.imshow(rgb, interpolation="nearest")
+    plt.imshow(r01, cmap="gray", interpolation="nearest")
+    plt.imshow(m01, cmap="hot", interpolation="nearest", alpha=alpha)
     plt.title(title)
     plt.axis("off")
     plt.tight_layout()
@@ -115,14 +137,74 @@ def save_mid_slice_overlay_png(ref: "ants.ANTsImage", mov: "ants.ANTsImage", out
     plt.close()
 
 
-def save_mid_slice_absdiff_png(ref: "ants.ANTsImage", mov: "ants.ANTsImage", out_png: str, title: str):
+def save_mid_slice_edge_overlay_png(ref, mov, ref_mask, out_png, title,
+                                    alpha_max=0.95, smooth_sigma=1.0,
+                                    edge_thresh=0.20, dilate_iters=1):
+    """
+    Gray reference + moving edges overlay with TRUE transparency:
+      - edges are colored, background is transparent (no magenta fill)
+      - smoothing reduces noisy edges
+      - optional threshold + dilation to make edges readable
+    """
+    # Smooth moving (3D) for more stable edges (only QC frames)
+    try:
+        mov_s = ants.smooth_image(mov, smooth_sigma) if smooth_sigma and smooth_sigma > 0 else mov
+    except Exception:
+        mov_s = mov
+
     ref_np = ref.numpy()
-    mov_np = mov.numpy()
+    mov_np = mov_s.numpy()
+    mask_np = ref_mask.numpy() > 0
+
     z = ref_np.shape[2] // 2
-    d = np.abs(ref_np[:, :, z].astype(np.float32) - mov_np[:, :, z].astype(np.float32))
+    r = ref_np[:, :, z].astype(np.float32)
+    m = mov_np[:, :, z].astype(np.float32)
+    mk = mask_np[:, :, z]
+
+    r01 = norm01(r)  # keep full ref for context (no mask)
+    m01 = norm01(m) * mk  # compute edges only in mask
+
+    # Gradient-based edge
+    gx = np.abs(np.diff(m01, axis=1, prepend=m01[:, :1]))
+    gy = np.abs(np.diff(m01, axis=0, prepend=m01[:1, :]))
+    edge = gx + gy
+
+    # Robust normalize edge
+    vals = edge[np.isfinite(edge)]
+    if vals.size == 0:
+        edge01 = np.zeros_like(edge, dtype=np.float32)
+    else:
+        e_hi = np.percentile(vals, 99.5)
+        if e_hi <= 1e-8:
+            edge01 = np.zeros_like(edge, dtype=np.float32)
+        else:
+            edge01 = np.clip(edge / (e_hi + 1e-8), 0, 1).astype(np.float32)
+
+    # Threshold edges to avoid "noise confetti"
+    edge01 = np.where(edge01 >= edge_thresh, edge01, 0.0).astype(np.float32)
+
+    # Optional dilation (simple max-filter style) to make edges visible
+    def dilate2d(a):
+        shifts = []
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                shifts.append(np.roll(np.roll(a, dy, axis=0), dx, axis=1))
+        return np.maximum.reduce(shifts)
+
+    for _ in range(max(0, int(dilate_iters))):
+        edge01 = dilate2d(edge01)
+
+    # Build RGBA overlay: colored edges with per-pixel alpha; background fully transparent
+    # Color choice: yellow edges (RGB = [1,1,0]) tends to read well on grayscale.
+    rgba = np.zeros((edge01.shape[0], edge01.shape[1], 4), dtype=np.float32)
+    rgba[..., 0] = 1.0
+    rgba[..., 1] = 1.0
+    rgba[..., 2] = 0.0
+    rgba[..., 3] = np.clip(edge01 * alpha_max, 0, 1)
 
     plt.figure(figsize=(6, 6))
-    plt.imshow(d, cmap="gray", interpolation="nearest")
+    plt.imshow(r01, cmap="gray", interpolation="nearest")
+    plt.imshow(rgba, interpolation="nearest")
     plt.title(title)
     plt.axis("off")
     plt.tight_layout()
@@ -130,10 +212,9 @@ def save_mid_slice_absdiff_png(ref: "ants.ANTsImage", mov: "ants.ANTsImage", out
     plt.close()
 
 
-def ensure_dir(path: str):
-    os.makedirs(path, exist_ok=True)
-
-
+# ----------------------------
+# Args
+# ----------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Temporal registration of 4D NIfTI frames to t=0 using ANTsPy.")
     p.add_argument("--input", required=True, help="Input 4D NIfTI (.nii or .nii.gz)")
@@ -148,12 +229,13 @@ def parse_args():
                    help="Frame index for abs-diff QC (default: -1 means last frame)")
     p.add_argument("--interpolator", default="linear",
                    help="Interpolator for apply_transforms (linear, bSpline, nearestNeighbor, etc.)")
-    p.add_argument("--spacing_t", type=float, default=1.0,
-                   help="Output temporal spacing dt to write into 4D header (default: 1.0)")
     p.add_argument("--verbose", action="store_true", help="Verbose logging")
     return p.parse_args()
 
 
+# ----------------------------
+# Main
+# ----------------------------
 def main():
     args = parse_args()
     ensure_dir(args.qc_dir)
@@ -170,7 +252,7 @@ def main():
     ref = frame3d_from_4d(img4d, args.ref_t)
     ref_mask = make_mask_reference(ref)
 
-    # Decide QC frames from percentiles
+    # QC frames from percentiles
     qc_pcts = []
     for tok in args.qc_frames.split(","):
         tok = tok.strip()
@@ -181,7 +263,6 @@ def main():
             raise ValueError(f"qc percentile must be 0..99, got {v}")
         qc_pcts.append(v)
 
-    # Convert percentiles to indices
     qc_idx = sorted(set(int(round((p / 100.0) * (T - 1))) for p in qc_pcts))
     if args.ref_t not in qc_idx:
         qc_idx = sorted(set(qc_idx + [args.ref_t]))
@@ -197,22 +278,20 @@ def main():
         print("diff frame:", diff_t)
 
     warped_frames = [None] * T
-    fwd_transforms = [None] * T
 
-    # Metrics
     mad_before = np.zeros(T, dtype=np.float64)
     mad_after = np.zeros(T, dtype=np.float64)
     ncc_before = np.zeros(T, dtype=np.float64)
     ncc_after = np.zeros(T, dtype=np.float64)
 
-    # Reference frame (identity)
+    # Reference frame identity
     warped_frames[args.ref_t] = ref
     mad_before[args.ref_t] = 0.0
     mad_after[args.ref_t] = 0.0
     ncc_before[args.ref_t] = 1.0
     ncc_after[args.ref_t] = 1.0
 
-    # Register each frame to ref
+    # Register all other frames
     for t in range(T):
         if t == args.ref_t:
             continue
@@ -241,19 +320,18 @@ def main():
         )
 
         warped_frames[t] = mov_w
-        fwd_transforms[t] = tx
 
         mad_after[t] = mean_abs_diff(ref, mov_w, mask=ref_mask)
         ncc_after[t] = ncc(ref, mov_w, mask=ref_mask)
 
         if args.verbose:
-            print(f"t={t:03d}: MAD {mad_before[t]:.3f} -> {mad_after[t]:.3f} | NCC {ncc_before[t]:.3f} -> {ncc_after[t]:.3f}")
+            print(f"t={t:03d}: MAD {mad_before[t]:.3f} -> {mad_after[t]:.3f} | "
+                  f"NCC {ncc_before[t]:.3f} -> {ncc_after[t]:.3f}")
 
-    # Stack to 4D and write
+    # Write registered 4D
     warped_np = np.stack([warped_frames[t].numpy() for t in range(T)], axis=-1)
 
     spacing4 = list(img4d.spacing)
-    spacing4[3] = float(args.spacing_t)
 
     warped4d = ants.from_numpy(
         warped_np,
@@ -267,9 +345,9 @@ def main():
     ants.image_write(warped4d, args.out)
 
     # ----------------------------
-    # Save QC PNGs (overwrite)
+    # QC outputs (overwrite)
     # ----------------------------
-    # 1) Metrics plots
+    # Metrics plots
     plt.figure()
     plt.plot(mad_before, label="MAD before")
     plt.plot(mad_after, label="MAD after")
@@ -292,36 +370,40 @@ def main():
     plt.savefig(os.path.join(args.qc_dir, "qc_ncc.png"), dpi=150)
     plt.close()
 
-    # 2) Overlays before/after for selected frames (mid-slice RGB overlay)
+    # Overlays for selected frames: BOTH types
     for t in qc_idx:
         mov = frame3d_from_4d(img4d, t)
         mov_w = warped_frames[t]
-        save_mid_slice_overlay_png(
-            ref, mov,
-            os.path.join(args.qc_dir, f"overlay_before_t{t:03d}.png"),
-            title=f"Overlay BEFORE (ref t={args.ref_t} vs frame t={t})"
+
+        # Alpha overlay
+        save_mid_slice_overlay_alpha_png(
+            ref, mov, ref_mask,
+            os.path.join(args.qc_dir, f"alpha_before_t{t:03d}.png"),
+            title=f"ALPHA BEFORE (ref t={args.ref_t} vs frame t={t})",
+            alpha=0.30
         )
-        save_mid_slice_overlay_png(
-            ref, mov_w,
-            os.path.join(args.qc_dir, f"overlay_after_t{t:03d}.png"),
-            title=f"Overlay AFTER (ref t={args.ref_t} vs warped frame t={t})"
+        save_mid_slice_overlay_alpha_png(
+            ref, mov_w, ref_mask,
+            os.path.join(args.qc_dir, f"alpha_after_t{t:03d}.png"),
+            title=f"ALPHA AFTER (ref t={args.ref_t} vs warped t={t})",
+            alpha=0.30
         )
 
-    # 3) Abs-diff maps for a representative frame
-    mov_d = frame3d_from_4d(img4d, diff_t)
-    movw_d = warped_frames[diff_t]
-    save_mid_slice_absdiff_png(
-        ref, mov_d,
-        os.path.join(args.qc_dir, f"absdiff_before_t{diff_t:03d}.png"),
-        title=f"|ref - frame| BEFORE (t={diff_t})"
-    )
-    save_mid_slice_absdiff_png(
-        ref, movw_d,
-        os.path.join(args.qc_dir, f"absdiff_after_t{diff_t:03d}.png"),
-        title=f"|ref - warped| AFTER (t={diff_t})"
-    )
+        # Edge overlay
+        save_mid_slice_edge_overlay_png(
+            ref, mov, ref_mask,
+            os.path.join(args.qc_dir, f"edge_before_t{t:03d}.png"),
+            title=f"EDGE BEFORE (ref t={args.ref_t} vs frame t={t})",
+            alpha_max=0.85
+        )
+        save_mid_slice_edge_overlay_png(
+            ref, mov_w, ref_mask,
+            os.path.join(args.qc_dir, f"edge_after_t{t:03d}.png"),
+            title=f"EDGE AFTER (ref t={args.ref_t} vs warped t={t})",
+            alpha_max=0.85
+        )
 
-    # 4) Save a small text summary (overwrites)
+    # Summary text
     summary_path = os.path.join(args.qc_dir, "qc_summary.txt")
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write(f"Input: {args.input}\n")
@@ -338,14 +420,22 @@ def main():
                 f"{ncc_before.min():.6f} / {np.median(ncc_before):.6f} / {ncc_before.max():.6f}\n")
         f.write("NCC after:  min/median/max = "
                 f"{ncc_after.min():.6f} / {np.median(ncc_after):.6f} / {ncc_after.max():.6f}\n\n")
-        f.write("QC frames (overlays saved for these indices): " + ",".join(map(str, qc_idx)) + "\n")
-        f.write(f"Abs-diff frame: {diff_t}\n")
+        f.write("QC frames indices: " + ",".join(map(str, qc_idx)) + "\n")
+        f.write(f"Abs-diff frame: {diff_t}\n\n")
+        f.write("QC files written (overwritten each run):\n")
+        f.write("  qc_mad.png\n")
+        f.write("  qc_ncc.png\n")
+        f.write("  alpha_before_t*.png / alpha_after_t*.png\n")
+        f.write("  edge_before_t*.png  / edge_after_t*.png\n")
+        f.write("  absdiff_before_t*.png / absdiff_after_t*.png\n")
+        f.write("  qc_summary.txt\n")
 
     if args.verbose:
         print("QC written to:", args.qc_dir)
         print(" - qc_mad.png")
         print(" - qc_ncc.png")
-        print(" - overlay_before_t*.png / overlay_after_t*.png")
+        print(" - alpha_before_t*.png / alpha_after_t*.png")
+        print(" - edge_before_t*.png  / edge_after_t*.png")
         print(" - absdiff_before_t*.png / absdiff_after_t*.png")
         print(" - qc_summary.txt")
 

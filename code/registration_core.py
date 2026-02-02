@@ -3,7 +3,7 @@
 registration_core.py
 
 Core logic for temporal registration of 4D NIfTI frames using ANTsPy.
-Refactored from temporal_register_to_t0.py for reusability.
+It focuses on registering all time frames t -> t=0 (reference).
 """
 
 import os
@@ -11,18 +11,16 @@ import numpy as np
 import ants
 import matplotlib
 
-# Set non-interactive backend for plots
+# Set non-interactive backend for plots to avoid crashes on servers
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 def frame3d_from_4d(img4d: "ants.ANTsImage", t: int) -> "ants.ANTsImage":
+    # Extract 3D frame respecting spatial metadata
     arr = img4d.numpy()[..., t]
     return ants.from_numpy(
         arr,
@@ -32,149 +30,59 @@ def frame3d_from_4d(img4d: "ants.ANTsImage", t: int) -> "ants.ANTsImage":
     )
 
 def make_mask_reference(ref3d: "ants.ANTsImage") -> "ants.ANTsImage":
+    # Simple mask generation for the reference frame
     m = ants.get_mask(ref3d, cleanup=2)
     m = ants.iMath(m, "FillHoles")
     m = ants.iMath(m, "GetLargestComponent")
     return m
 
-def mean_abs_diff(a_img, b_img, mask=None) -> float:
-    a = a_img.numpy()
-    b = b_img.numpy()
-    if mask is None:
-        return float(np.mean(np.abs(a - b)))
-    m = mask.numpy() > 0
-    if not np.any(m):
-        return float(np.mean(np.abs(a - b)))
-    return float(np.mean(np.abs(a[m] - b[m])))
-
-def ncc(a_img, b_img, mask) -> float:
-    a = a_img.numpy()
-    b = b_img.numpy()
-    m = mask.numpy() > 0
-    if np.any(m):
-        a = a[m].astype(np.float64)
-        b = b[m].astype(np.float64)
-    else:
-        a = a.astype(np.float64).ravel()
-        b = b.astype(np.float64).ravel()
-
-    a -= a.mean()
-    b -= b.mean()
-    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
-    return float((a @ b) / denom)
-
-def norm01(x: np.ndarray, p_lo=1, p_hi=99) -> np.ndarray:
-    vals = x[np.isfinite(x)]
-    if vals.size == 0:
-        return np.zeros_like(x, dtype=np.float32)
-    lo, hi = np.percentile(vals, [p_lo, p_hi])
-    if hi <= lo:
-        return np.zeros_like(x, dtype=np.float32)
-    y = np.clip(x, lo, hi)
-    y = (y - lo) / (hi - lo)
-    return y.astype(np.float32)
-
-# ----------------------------
-# Plotting Helpers
-# ----------------------------
-def _save_alpha_png(ref, mov, ref_mask, out_png, title, alpha=0.30):
-    ref_np = ref.numpy()
-    mov_np = mov.numpy()
-    mask_np = ref_mask.numpy() > 0
-    
-    # Mid-slice Z
-    z = ref_np.shape[2] // 2
-    r = ref_np[:, :, z].astype(np.float32)
-    m = mov_np[:, :, z].astype(np.float32)
-    mk = mask_np[:, :, z]
-
-    r01 = norm01(r) * mk
-    m01 = norm01(m) * mk
-
-    plt.figure(figsize=(6, 6))
-    plt.imshow(r01, cmap="gray", interpolation="nearest")
-    plt.imshow(m01, cmap="hot", interpolation="nearest", alpha=alpha)
-    plt.title(title)
-    plt.axis("off")
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=150)
-    plt.close()
-
-def _save_edge_png(ref, mov, ref_mask, out_png, title, alpha_max=0.95):
-    # Simplified version of the original edge plotter for brevity in core lib
-    ref_np = ref.numpy()
-    mov_np = mov.numpy()
-    mask_np = ref_mask.numpy() > 0
-
-    z = ref_np.shape[2] // 2
-    r = ref_np[:, :, z].astype(np.float32)
-    m = mov_np[:, :, z].astype(np.float32)
-    mk = mask_np[:, :, z]
-
-    r01 = norm01(r) 
-    m01 = norm01(m) * mk
-
-    gx = np.abs(np.diff(m01, axis=1, prepend=m01[:, :1]))
-    gy = np.abs(np.diff(m01, axis=0, prepend=m01[:1, :]))
-    edge = gx + gy
-    
-    # Threshold basic
-    edge = np.where(edge > 0.2, edge, 0)
-    
-    # Create RGBA
-    rgba = np.zeros((edge.shape[0], edge.shape[1], 4), dtype=np.float32)
-    rgba[..., 0] = 1.0; rgba[..., 1] = 1.0; rgba[..., 2] = 0.0 # Yellow
-    rgba[..., 3] = np.clip(edge * alpha_max, 0, 1)
-
-    plt.figure(figsize=(6, 6))
-    plt.imshow(r01, cmap="gray", interpolation="nearest")
-    plt.imshow(rgba, interpolation="nearest")
-    plt.title(title)
-    plt.axis("off")
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=150)
-    plt.close()
-
-# ----------------------------
-# Main Processing Logic
-# ----------------------------
-def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid", interpolator="linear", qc_frames_str="0,1,50,99"):
+def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"):
     """
-    Registers a single 4D NIfTI file.
-    Returns True if successful, False otherwise.
+    Registers a 4D NIfTI file frame-by-frame to a reference time point.
+    
+    Args:
+        input_path (str): Path to input 4D NIfTI.
+        output_path (str): Path to save registered 4D NIfTI.
+        qc_dir (str): Folder to save QC images.
+        ref_t (int): Index of the reference frame (default 0).
+        reg_type (str): ANTs registration type (Rigid, Affine, SyN).
+    
+    Returns:
+        bool: True if successful.
     """
     try:
         ensure_dir(os.path.dirname(output_path))
         ensure_dir(qc_dir)
 
-        # 1. Load Data
+        # 1. Load Image
         img4d = ants.image_read(input_path, dimension=4, reorient=False)
         T = img4d.shape[3]
+        
+        if T <= 1:
+            print(f"Skipping {os.path.basename(input_path)}: Not a 4D image (T={T})")
+            return False
 
         if ref_t < 0 or ref_t >= T:
-             # Fallback to T=0 if ref is invalid
              ref_t = 0
         
+        # 2. Setup Reference
         ref = frame3d_from_4d(img4d, ref_t)
         ref_mask = make_mask_reference(ref)
 
-        # 2. Registration Loop
+        # 3. Registration Loop
         warped_frames = [None] * T
-        warped_frames[ref_t] = ref # Identity
+        warped_frames[ref_t] = ref # Identity for reference
         
-        # Metrics containers
-        mad_vals = [] 
-        ncc_vals = []
-
+        # For simplicity in this step, we are not saving the transforms to disk,
+        # just applying them to create the motion-corrected magnitude image.
+        
         for t in range(T):
             if t == ref_t:
-                mad_vals.append(0)
-                ncc_vals.append(1)
                 continue
             
             mov = frame3d_from_4d(img4d, t)
             
-            # Register
+            # Register t -> ref
             reg = ants.registration(
                 fixed=ref,
                 moving=mov,
@@ -188,16 +96,12 @@ def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"
                 fixed=ref,
                 moving=mov,
                 transformlist=reg["fwdtransforms"],
-                interpolator=interpolator
+                interpolator="linear"
             )
             
             warped_frames[t] = mov_w
-            
-            # Compute basic metrics for QC
-            mad_vals.append(mean_abs_diff(ref, mov_w, mask=ref_mask))
-            ncc_vals.append(ncc(ref, mov_w, mask=ref_mask))
 
-        # 3. Reassemble 4D
+        # 4. Reassemble 4D Volume
         warped_np = np.stack([warped_frames[t].numpy() for t in range(T)], axis=-1)
         spacing4 = list(img4d.spacing)
         
@@ -208,28 +112,34 @@ def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"
             direction=img4d.direction
         )
         
+        # 5. Save Output
         ants.image_write(warped4d, output_path)
 
-        # 4. Generate Basic QC (Plots)
-        # Parse QC frames indices
-        qc_pcts = [int(x) for x in qc_frames_str.split(",") if x.strip().isdigit()]
-        qc_idx = sorted(set(int(round((p / 100.0) * (T - 1))) for p in qc_pcts))
-
-        for t_idx in qc_idx:
-            mov_w = warped_frames[t_idx] if warped_frames[t_idx] else ref
-            fname = f"qc_overlap_t{t_idx:03d}.png"
-            _save_alpha_png(ref, mov_w, ref_mask, os.path.join(qc_dir, fname), title=f"QC Reg t={t_idx}")
-
-        # Metrics Plot
-        plt.figure()
-        plt.plot(ncc_vals, label="NCC after reg")
-        plt.title(f"Registration Stability (Mean NCC: {np.mean(ncc_vals):.4f})")
-        plt.xlabel("Frame")
-        plt.savefig(os.path.join(qc_dir, "qc_metrics.png"))
+        # 6. Basic QC Plot (Middle slices comparison for a sample frame)
+        # Check the middle frame (or last) vs reference
+        qc_t = T // 2
+        if qc_t == ref_t: qc_t = T - 1
+        
+        ref_slice = ref.numpy()[:, :, ref.shape[2]//2]
+        mov_slice = warped_frames[qc_t].numpy()[:, :, ref.shape[2]//2]
+        
+        plt.figure(figsize=(10, 5))
+        plt.subplot(1, 2, 1)
+        plt.imshow(ref_slice, cmap='gray')
+        plt.title(f"Reference (t={ref_t})")
+        plt.axis('off')
+        
+        plt.subplot(1, 2, 2)
+        plt.imshow(mov_slice, cmap='gray')
+        plt.title(f"Registered Frame (t={qc_t})")
+        plt.axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(qc_dir, f"qc_registration_t{qc_t}.png"))
         plt.close()
 
         return True
     
     except Exception as e:
-        print(f"Error registering {input_path}: {str(e)}")
+        print(f"\nError processing {input_path}: {str(e)}")
         return False

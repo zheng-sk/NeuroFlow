@@ -102,7 +102,7 @@ def main():
         # Step A: Register Magnitude
         # ----------------------------
         # Only print inside if not using tqdm, or use pbar.write
-        if not isinstance(pbar, tqdm):
+        if type(pbar).__name__ != 'tqdm':
              print(f"\nProcessing {short_name}...")
 
         transforms = register_4d_nifti(

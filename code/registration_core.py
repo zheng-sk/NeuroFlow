@@ -155,8 +155,16 @@ def apply_transforms_to_file(input_path, output_path, transforms_map, ref_img_pa
             print(f"Warning: Frame count mismatch for {os.path.basename(input_path)}. Img={T}, Transforms={len(transforms_map)}")
             return False
 
-        # Reference geometry from frame 0 of THIS image (to keep valid header info)
-        ref_geom = frame3d_from_4d(img4d, 0)
+        # Properly resolve fixed reference geometry.
+        # Ideally, we must use the SAME geometry used during registration (magnitude t=0)
+        # to ensure all outputs are resampled to that exact grid.
+        if ref_img_path and os.path.exists(ref_img_path):
+             mag4d = ants.image_read(ref_img_path, dimension=4, reorient=False)
+             # assuming ref_t=0 for registration always
+             ref_geom = frame3d_from_4d(mag4d, 0)
+        else:
+             # Fallback (less safe if headers differ)
+             ref_geom = frame3d_from_4d(img4d, 0)
         
         warped_frames = []
         
@@ -164,8 +172,10 @@ def apply_transforms_to_file(input_path, output_path, transforms_map, ref_img_pa
             mov = frame3d_from_4d(img4d, t)
             tx_list = transforms_map[t]
             
-            if not tx_list: # Identity
-                warped_frames.append(mov)
+            if not tx_list: 
+                # Identity -> Just resample to match the target grid perfectly
+                mov_w = ants.resample_image_to_target(mov, ref_geom, interp_type=1)
+                warped_frames.append(mov_w)
             else:
                 mov_w = ants.apply_transforms(
                     fixed=ref_geom,
@@ -177,12 +187,19 @@ def apply_transforms_to_file(input_path, output_path, transforms_map, ref_img_pa
 
         # Save
         warped_np = np.stack([w.numpy() for w in warped_frames], axis=-1)
+        # Use ref_geom parameters for output to maintain consistency
         out_img = ants.from_numpy(
             warped_np,
-            origin=img4d.origin,
-            spacing=img4d.spacing,
-            direction=img4d.direction
+            origin=ref_geom.origin,
+            spacing=(*ref_geom.spacing, img4d.spacing[3]), # Combine spatial 3D + temporal
+            direction=img4d.direction # Direction is usually 4x4, let's keep original 4D direction
+            # Note: ANTsPy handling of 4D direction vs 3D can be tricky. 
+            # Ideally we want the spatial part to match ref_geom.
         )
+        # Safer reconstruction simply using original 4D header but copying data, 
+        # IF we assume no rotation of the grid happened (which is true for temporal reg to t=0).
+        # But if we want to be strict on grid:
+        
         ants.image_write(out_img, output_path)
         return True
 
@@ -193,18 +210,13 @@ def apply_transforms_to_file(input_path, output_path, transforms_map, ref_img_pa
 def apply_transforms_to_velocity_triplet(vx_path, vy_path, vz_path,
                                         out_vx, out_vy, out_vz,
                                         transforms_map, fixed_ref_mag_path,
-                                        ref_t=0, interpolator="Linear",
+                                        ref_t=0, interpolator="linear",
                                         ants_apply="antsApplyTransforms"):
     """
-    Aplica transforms temporales (t -> ref_t) a un campo vectorial (Vx,Vy,Vz) usando antsApplyTransforms -e 1.
-    Esto reorienta vectores correctamente (rigid/affine).
+    Aplica transforms temporales (t -> ref_t) a un campo vectorial (Vx,Vy,Vz).
+    Usa imagetype=1 en ANTsPy para reorientar vectores correctamente.
     """
     try:
-        # Verify if antsApplyTransforms is available
-        if shutil.which(ants_apply) is None:
-            print(f"ERROR: '{ants_apply}' not found in PATH. Velocity vector correction requires CLI tool.")
-            return False
-
         ensure_dir(os.path.dirname(out_vx))
 
         vx4d = ants.image_read(vx_path, dimension=4, reorient=False)
@@ -234,7 +246,7 @@ def apply_transforms_to_velocity_triplet(vx_path, vy_path, vz_path,
             tx_list = transforms_map[t]
 
             if not tx_list:
-                # identidad: solo resample a fixed grid por consistencia (opcional)
+                # identidad: solo resample a fixed grid por consistencia
                 out_vx_frames.append(ants.resample_image_to_target(vx, fixed_ref, interp_type=1))
                 out_vy_frames.append(ants.resample_image_to_target(vy, fixed_ref, interp_type=1))
                 out_vz_frames.append(ants.resample_image_to_target(vz, fixed_ref, interp_type=1))
@@ -243,40 +255,28 @@ def apply_transforms_to_velocity_triplet(vx_path, vy_path, vz_path,
             # merge to vector image (3 components)
             vvec = ants.merge_channels([vx, vy, vz])
 
-            with tempfile.TemporaryDirectory() as td:
-                f_ref = os.path.join(td, "fixed.nii.gz")
-                f_in  = os.path.join(td, "vvec_in.nii.gz")
-                f_out = os.path.join(td, "vvec_out.nii.gz")
+            # Apply transforms with imagetype=1 (Vector)
+            # This handles reorientation correctly for vectors without needing CLI
+            vvec_w = ants.apply_transforms(
+                fixed=fixed_ref,
+                moving=vvec,
+                transformlist=tx_list,
+                interpolator=interpolator,
+                imagetype=1, # Vector
+                verbose=False
+            )
 
-                ants.image_write(fixed_ref, f_ref)
-                ants.image_write(vvec, f_in)
+            # Split channels
+            comps = ants.split_channels(vvec_w)
+            if len(comps) != 3:
+                print(f"Error: Expected 3 components after warp, got {len(comps)}")
+                return False
+            
+            vx_w, vy_w, vz_w = comps
 
-                cmd = [ants_apply, "-d", "3", "-e", "1", "-i", f_in, "-r", f_ref,
-                    "-o", f_out, "-n", interpolator]
-                
-                # IMPORTANT: antsApplyTransforms applies transforms in reverse order of command line appearance
-                # But ANTsPy returns forward transforms. Usually for resampling we use them directly.
-                # However, CLI standard argument order mimics ANTsPy 'transformlist'.
-                for tx in tx_list:
-                    cmd += ["-t", tx]
-
-                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-                vvec_w = ants.image_read(f_out)
-                
-                # Split channels returns list of images
-                # IMPORTANT: Check if split_channels returns (imgs...)
-                comps = ants.split_channels(vvec_w)
-                if len(comps) != 3:
-                    # Fallback in case something weird happened, but e=1 should preserve components
-                    print(f"Error: Expected 3 components after warp, got {len(comps)}")
-                    return False
-                
-                vx_w, vy_w, vz_w = comps
-
-                out_vx_frames.append(vx_w)
-                out_vy_frames.append(vy_w)
-                out_vz_frames.append(vz_w)
+            out_vx_frames.append(vx_w)
+            out_vy_frames.append(vy_w)
+            out_vz_frames.append(vz_w)
 
         # reassemble 4D outputs (keep original temporal spacing/header from inputs)
         def stack4d(frames, template4d):
@@ -290,9 +290,6 @@ def apply_transforms_to_velocity_triplet(vx_path, vy_path, vz_path,
 
         return True
 
-    except subprocess.CalledProcessError as e:
-        print(f"ANTs CLI Error: {e.stderr.decode()}")
-        return False
     except Exception as e:
         print(f"Error applying vector transforms: {str(e)}")
         import traceback

@@ -9,3 +9,5 @@ result/
 .venv_tf22/
 data/
 pytorch_venv/
+*.sh
+*.out

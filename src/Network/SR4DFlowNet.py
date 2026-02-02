@@ -52,12 +52,12 @@ def conv3d(x, kernel_size, filters, padding='SYMMETRIC', activation=None, initia
 
 def resnet_block(x, block_name='ResBlock', channel_nr=64, scale = 1, pad='SAME'):
     tmp = conv3d(x, kernel_size=3, filters=channel_nr, padding=pad, activation=None, use_bias=False, initialization=None)
-    tmp = tf.keras.layers.LeakyReLU(negative_slope=0.2)(tmp)
+    tmp = tf.keras.layers.LeakyReLU(alpha=0.2)(tmp)
 
     tmp = conv3d(tmp, kernel_size=3, filters=channel_nr, padding=pad, activation=None, use_bias=False, initialization=None)
 
     tmp = x + tmp * scale
-    tmp = tf.keras.layers.LeakyReLU(negative_slope=0.2)(tmp)
+    tmp = tf.keras.layers.LeakyReLU(alpha=0.2)(tmp)
 
     return tmp
 

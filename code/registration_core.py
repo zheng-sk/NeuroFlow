@@ -7,6 +7,9 @@ It focuses on registering all time frames t -> t=0 (reference).
 """
 
 import os
+import shutil
+import subprocess
+import tempfile
 import numpy as np
 import ants
 import matplotlib
@@ -48,7 +51,7 @@ def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"
         reg_type (str): ANTs registration type (Rigid, Affine, SyN).
     
     Returns:
-        bool: True if successful.
+        list or None: A list of transforms per frame (transforms_map), or None if failed.
     """
     try:
         ensure_dir(os.path.dirname(output_path))
@@ -60,7 +63,7 @@ def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"
         
         if T <= 1:
             print(f"Skipping {os.path.basename(input_path)}: Not a 4D image (T={T})")
-            return False
+            return None
 
         if ref_t < 0 or ref_t >= T:
              ref_t = 0
@@ -69,7 +72,7 @@ def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"
         ref = frame3d_from_4d(img4d, ref_t)
         ref_mask = make_mask_reference(ref)
 
-
+        # 3. Registration Loop
         warped_frames = [None] * T
         warped_frames[ref_t] = ref 
         
@@ -110,6 +113,7 @@ def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"
 
         # 4. Reassemble 4D Volume
         warped_np = np.stack([warped_frames[t].numpy() for t in range(T)], axis=-1)
+        # spacing needs to handle 4D (x,y,z,t) vs 3D (x,y,z)
         spacing4 = list(img4d.spacing)
         
         warped4d = ants.from_numpy(
@@ -132,12 +136,14 @@ def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"
     
     except Exception as e:
         print(f"Error processing {input_path}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def apply_transforms_to_file(input_path, output_path, transforms_map, ref_img_path=None):
     """
-    Applies a list of temporal transforms to another 4D file (e.g. Velocity).
-    transforms_map: list where index t contains transform files for frame t.
+    Applies a list of temporal transforms to another 4D file (e.g. Phase scalars, CD).
+    Scalar mode.
     """
     try:
         ensure_dir(os.path.dirname(output_path))
@@ -182,6 +188,115 @@ def apply_transforms_to_file(input_path, output_path, transforms_map, ref_img_pa
 
     except Exception as e:
         print(f"Error applying transforms to {input_path}: {e}")
+        return False
+
+def apply_transforms_to_velocity_triplet(vx_path, vy_path, vz_path,
+                                        out_vx, out_vy, out_vz,
+                                        transforms_map, fixed_ref_mag_path,
+                                        ref_t=0, interpolator="Linear",
+                                        ants_apply="antsApplyTransforms"):
+    """
+    Aplica transforms temporales (t -> ref_t) a un campo vectorial (Vx,Vy,Vz) usando antsApplyTransforms -e 1.
+    Esto reorienta vectores correctamente (rigid/affine).
+    """
+    try:
+        # Verify if antsApplyTransforms is available
+        if shutil.which(ants_apply) is None:
+            print(f"ERROR: '{ants_apply}' not found in PATH. Velocity vector correction requires CLI tool.")
+            return False
+
+        ensure_dir(os.path.dirname(out_vx))
+
+        vx4d = ants.image_read(vx_path, dimension=4, reorient=False)
+        vy4d = ants.image_read(vy_path, dimension=4, reorient=False)
+        vz4d = ants.image_read(vz_path, dimension=4, reorient=False)
+
+        T = vx4d.shape[3]
+        if not (vy4d.shape[3] == T and vz4d.shape[3] == T):
+             print("Error: Velocity components have different frame counts.")
+             return False
+             
+        if len(transforms_map) != T:
+             print(f"Error: Transforms map size ({len(transforms_map)}) != Frames ({T})")
+             return False
+
+        # fixed geometry: usar MAG(ref_t) para que TODO quede exactamente en el mismo grid
+        mag4d = ants.image_read(fixed_ref_mag_path, dimension=4, reorient=False)
+        fixed_ref = frame3d_from_4d(mag4d, ref_t)
+
+        out_vx_frames, out_vy_frames, out_vz_frames = [], [], []
+
+        for t in range(T):
+            vx = frame3d_from_4d(vx4d, t)
+            vy = frame3d_from_4d(vy4d, t)
+            vz = frame3d_from_4d(vz4d, t)
+
+            tx_list = transforms_map[t]
+
+            if not tx_list:
+                # identidad: solo resample a fixed grid por consistencia (opcional)
+                out_vx_frames.append(ants.resample_image_to_target(vx, fixed_ref, interp_type=1))
+                out_vy_frames.append(ants.resample_image_to_target(vy, fixed_ref, interp_type=1))
+                out_vz_frames.append(ants.resample_image_to_target(vz, fixed_ref, interp_type=1))
+                continue
+
+            # merge to vector image (3 components)
+            vvec = ants.merge_channels([vx, vy, vz])
+
+            with tempfile.TemporaryDirectory() as td:
+                f_ref = os.path.join(td, "fixed.nii.gz")
+                f_in  = os.path.join(td, "vvec_in.nii.gz")
+                f_out = os.path.join(td, "vvec_out.nii.gz")
+
+                ants.image_write(fixed_ref, f_ref)
+                ants.image_write(vvec, f_in)
+
+                cmd = [ants_apply, "-d", "3", "-e", "1", "-i", f_in, "-r", f_ref,
+                    "-o", f_out, "-n", interpolator]
+                
+                # IMPORTANT: antsApplyTransforms applies transforms in reverse order of command line appearance
+                # But ANTsPy returns forward transforms. Usually for resampling we use them directly.
+                # However, CLI standard argument order mimics ANTsPy 'transformlist'.
+                for tx in tx_list:
+                    cmd += ["-t", tx]
+
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                vvec_w = ants.image_read(f_out)
+                
+                # Split channels returns list of images
+                # IMPORTANT: Check if split_channels returns (imgs...)
+                comps = ants.split_channels(vvec_w)
+                if len(comps) != 3:
+                    # Fallback in case something weird happened, but e=1 should preserve components
+                    print(f"Error: Expected 3 components after warp, got {len(comps)}")
+                    return False
+                
+                vx_w, vy_w, vz_w = comps
+
+                out_vx_frames.append(vx_w)
+                out_vy_frames.append(vy_w)
+                out_vz_frames.append(vz_w)
+
+        # reassemble 4D outputs (keep original temporal spacing/header from inputs)
+        def stack4d(frames, template4d):
+            arr = np.stack([f.numpy() for f in frames], axis=-1)
+            # Use template spacing for 4D consistency
+            return ants.from_numpy(arr, origin=template4d.origin, spacing=template4d.spacing, direction=template4d.direction)
+
+        ants.image_write(stack4d(out_vx_frames, vx4d), out_vx)
+        ants.image_write(stack4d(out_vy_frames, vy4d), out_vy)
+        ants.image_write(stack4d(out_vz_frames, vz4d), out_vz)
+
+        return True
+
+    except subprocess.CalledProcessError as e:
+        print(f"ANTs CLI Error: {e.stderr.decode()}")
+        return False
+    except Exception as e:
+        print(f"Error applying vector transforms: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def _save_qc_plot(ref, mov, qc_dir, t_ref, t_mov):

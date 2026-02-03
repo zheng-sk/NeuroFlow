@@ -1,87 +1,82 @@
 #!/usr/bin/env python3
 """
-batch_temporal_register.py
+Batch temporal registration for 4D NIfTI files.
 
-Batch processes a folder of 4D NIfTI images, performing temporal registration
-on each one relative to its first frame (t=0).
-
-Usage:
-    python batch_temporal_register.py \
-        --input-dir ../data/nifti_patients \
-        --output-dir ../data/registered_patients \
-        --pattern "*.nii.gz" \
-        --recursive
+This script scans an input directory, runs temporal registration on each 4D file
+(relative to frame t=0 by default), and writes outputs while preserving the
+input folder structure.
 """
 
-import os
 import argparse
 import glob
-import time
-from concurrent.futures import ProcessPoolExecutor # If parallelization is desired later
-try:
-    from tqdm import tqdm
-except ImportError:
-    # A simple fallback if tqdm is not installed
-    def tqdm(iterable, desc=""):
-        print(f"--- {desc} ---")
-        return iterable
+import os
 
 from registration_core import register_4d_nifti
 
-def main():
-    parser = argparse.ArgumentParser(description="Batch Temporal Registration for 4D NIfTI data.")
-    parser.add_argument("--input-dir", required=True, help="Root directory containing input NIfTIs")
-    parser.add_argument("--output-dir", required=True, help="Root directory to save registered NIfTIs")
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **_kwargs):
+        return iterable
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Batch temporal registration for 4D NIfTI files.")
+    parser.add_argument("--input-dir", required=True, help="Root directory containing input NIfTI files")
+    parser.add_argument("--output-dir", required=True, help="Root directory for registered outputs")
     parser.add_argument("--pattern", default="*.nii.gz", help="File pattern to match (default: *.nii.gz)")
-    parser.add_argument("--reg-type", default="Rigid", help="ANTs registration type (Rigid, Affine, SyN)")
-    parser.add_argument("--recursive", action="store_true", help="Search recursively in subdirectories")
-    parser.add_argument("--ref-t", type=int, default=0, help="Reference time frame index (default: 0)")
-    
-    args = parser.parse_args()
+    parser.add_argument("--reg-type", default="Rigid", help="ANTs transform type (Rigid, Affine, SyN, ...)")
+    parser.add_argument("--recursive", action="store_true", help="Search recursively under input directory")
+    parser.add_argument("--ref-t", type=int, default=0, help="Reference frame index (default: 0)")
+    parser.add_argument(
+        "--qc-frames",
+        default="0,50,99",
+        help="Percentiles to sample for QC overlays (default: 0,50,99)",
+    )
+    parser.add_argument("--interpolator", default="linear", help="Interpolator for warping frames")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose registration logs")
+    return parser.parse_args()
 
-    # 1. Find files
-    search_path = os.path.join(args.input_dir, "**", args.pattern) if args.recursive else os.path.join(args.input_dir, args.pattern)
-    files = glob.glob(search_path, recursive=args.recursive)
+
+def find_files(input_dir: str, pattern: str, recursive: bool) -> list[str]:
+    search_path = os.path.join(input_dir, "**", pattern) if recursive else os.path.join(input_dir, pattern)
+    files = glob.glob(search_path, recursive=recursive)
     files.sort()
+    return files
 
+
+def main() -> None:
+    args = parse_args()
+
+    files = find_files(args.input_dir, args.pattern, args.recursive)
     if not files:
         print(f"No files found matching '{args.pattern}' in {args.input_dir}")
         return
 
-    print(f"Found {len(files)} files to process.")
+    print(f"Found {len(files)} files")
     print(f"Output directory: {args.output_dir}")
-    print(f"Method: {args.reg_type} | Reference Frame: t={args.ref_t}")
+    print(f"Registration: {args.reg_type} | ref_t={args.ref_t}")
 
-    # 2. Process loop
     success_count = 0
     fail_count = 0
-    
-    # Using tqdm for progress tracking
-    pbar = tqdm(files, desc="Registering 4D Patients", unit="file")
-    
-    for input_path in pbar:
-        # Construct output path preserving relative structure
-        rel_path = os.path.relpath(input_path, args.input_dir)
-        output_path = os.path.join(args.output_dir, rel_path)
-        
-        # Directory for QC images specific to this file
-        # Example: registered_patients/Patient001/QC_FileName/
-        qc_subdir_name = f"QC_{os.path.basename(input_path).replace('.nii.gz', '').replace('.nii', '')}"
-        qc_dir_path = os.path.join(os.path.dirname(output_path), qc_subdir_name)
 
-        # Update progress bar description
-        pbar.set_postfix({"current": os.path.basename(input_path)[:20]})
-        
-        # Execute registration
-        # Note: We pass reg_type and other parameters
+    for input_path in tqdm(files, desc="Registering files", unit="file"):
+        relative_path = os.path.relpath(input_path, args.input_dir)
+        output_path = os.path.join(args.output_dir, relative_path)
+
+        base = os.path.basename(input_path)
+        stem = base[:-7] if base.endswith(".nii.gz") else os.path.splitext(base)[0]
+        qc_dir = os.path.join(os.path.dirname(output_path), f"QC_{stem}")
+
         ok = register_4d_nifti(
             input_path=input_path,
             output_path=output_path,
-            qc_dir=qc_dir_path,
+            qc_dir=qc_dir,
             ref_t=args.ref_t,
             reg_type=args.reg_type,
-            interpolator="linear",
-            qc_frames_str="0,50,99" # Sample default frames for QC
+            interpolator=args.interpolator,
+            qc_frames_str=args.qc_frames,
+            verbose=args.verbose,
         )
 
         if ok:
@@ -89,12 +84,11 @@ def main():
         else:
             fail_count += 1
 
-    print("\n" + "="*40)
-    print("BATCH PROCESSING COMPLETE")
-    print("="*40)
-    print(f"Total Files: {len(files)}")
-    print(f"Successful : {success_count}")
-    print(f"Failed     : {fail_count}")
+    print("\nBatch temporal registration complete")
+    print(f"Total: {len(files)}")
+    print(f"Success: {success_count}")
+    print(f"Failed: {fail_count}")
+
 
 if __name__ == "__main__":
     main()

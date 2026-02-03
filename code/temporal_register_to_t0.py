@@ -212,6 +212,23 @@ def save_mid_slice_edge_overlay_png(ref, mov, ref_mask, out_png, title,
     plt.close()
 
 
+def save_mid_slice_absdiff_png(ref, mov, out_png, title):
+    """Save a middle-slice absolute-difference heatmap."""
+    ref_np = ref.numpy()
+    mov_np = mov.numpy()
+    z = ref_np.shape[2] // 2
+    diff = np.abs(ref_np[:, :, z].astype(np.float32) - mov_np[:, :, z].astype(np.float32))
+    diff01 = norm01(diff)
+
+    plt.figure(figsize=(6, 6))
+    plt.imshow(diff01, cmap="magma", interpolation="nearest")
+    plt.title(title)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150)
+    plt.close()
+
+
 # ----------------------------
 # Args
 # ----------------------------
@@ -402,6 +419,20 @@ def main():
             title=f"EDGE AFTER (ref t={args.ref_t} vs warped t={t})",
             alpha_max=0.85
         )
+
+    # Absolute difference for selected frame
+    mov_diff = frame3d_from_4d(img4d, diff_t)
+    mov_diff_w = warped_frames[diff_t]
+    save_mid_slice_absdiff_png(
+        ref, mov_diff,
+        os.path.join(args.qc_dir, f"absdiff_before_t{diff_t:03d}.png"),
+        title=f"ABSDIFF BEFORE (ref t={args.ref_t} vs frame t={diff_t})",
+    )
+    save_mid_slice_absdiff_png(
+        ref, mov_diff_w,
+        os.path.join(args.qc_dir, f"absdiff_after_t{diff_t:03d}.png"),
+        title=f"ABSDIFF AFTER (ref t={args.ref_t} vs warped t={diff_t})",
+    )
 
     # Summary text
     summary_path = os.path.join(args.qc_dir, "qc_summary.txt")

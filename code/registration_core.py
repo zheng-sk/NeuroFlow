@@ -1,308 +1,325 @@
 #!/usr/bin/env python3
 """
-registration_core.py
+Core temporal-registration utilities for 4D NIfTI files using ANTsPy.
 
-Core logic for temporal registration of 4D NIfTI frames using ANTsPy.
-It focuses on registering all time frames t -> t=0 (reference).
+Main flow:
+1) Estimate transforms from a 4D magnitude sequence (frame t -> reference frame).
+2) Reuse transforms for scalar files or velocity triplets.
 """
 
 import os
-import shutil
-import subprocess
-import tempfile
-import numpy as np
+import traceback
+
 import ants
 import matplotlib
+import numpy as np
 
-# Set non-interactive backend for plots to avoid crashes on servers
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def ensure_dir(path: str):
+def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
+
 def frame3d_from_4d(img4d: "ants.ANTsImage", t: int) -> "ants.ANTsImage":
-    # Extract 3D frame respecting spatial metadata
-    arr = img4d.numpy()[..., t]
+    """Extract a 3D frame from a 4D ANTs image while preserving geometry metadata."""
+    array = img4d.numpy()[..., t]
     return ants.from_numpy(
-        arr,
+        array,
         spacing=img4d.spacing[:3],
         origin=img4d.origin[:3],
         direction=img4d.direction[:3, :3],
     )
 
-def make_mask_reference(ref3d: "ants.ANTsImage") -> "ants.ANTsImage":
-    # Simple mask generation for the reference frame
-    m = ants.get_mask(ref3d, cleanup=2)
-    m = ants.iMath(m, "FillHoles")
-    m = ants.iMath(m, "GetLargestComponent")
-    return m
 
-def register_4d_nifti(input_path, output_path, qc_dir, ref_t=0, reg_type="Rigid"):
+def make_mask_reference(ref3d: "ants.ANTsImage") -> "ants.ANTsImage":
+    """Build a robust foreground mask from the reference frame."""
+    mask = ants.get_mask(ref3d, cleanup=2)
+    mask = ants.iMath(mask, "FillHoles")
+    mask = ants.iMath(mask, "GetLargestComponent")
+    return mask
+
+
+def _parse_qc_frames(qc_frames_str: str, total_frames: int, ref_t: int) -> list[int]:
+    percentiles = []
+    for token in qc_frames_str.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        value = int(token)
+        if value < 0 or value > 99:
+            raise ValueError(f"QC percentile must be in [0, 99], got: {value}")
+        percentiles.append(value)
+
+    indices = sorted(set(int(round((p / 100.0) * (total_frames - 1))) for p in percentiles))
+    if ref_t not in indices:
+        indices.append(ref_t)
+    return sorted(set(indices))
+
+
+def register_4d_nifti(
+    input_path: str,
+    output_path: str,
+    qc_dir: str,
+    ref_t: int = 0,
+    reg_type: str = "Rigid",
+    interpolator: str = "linear",
+    qc_frames_str: str = "0,50,99",
+    verbose: bool = False,
+):
     """
-    Registers a 4D NIfTI file frame-by-frame to a reference time point.
-    
-    Args:
-        input_path (str): Path to input 4D NIfTI.
-        output_path (str): Path to save registered 4D NIfTI.
-        qc_dir (str): Folder to save QC images.
-        ref_t (int): Index of the reference frame (default 0).
-        reg_type (str): ANTs registration type (Rigid, Affine, SyN).
-    
-    Returns:
-        list or None: A list of transforms per frame (transforms_map), or None if failed.
+    Register each time frame of a 4D NIfTI to a reference frame.
+
+    Returns a per-frame transform map, or None on failure.
     """
     try:
         ensure_dir(os.path.dirname(output_path))
         ensure_dir(qc_dir)
 
-        # 1. Load Image
-        img4d = ants.image_read(input_path, dimension=4, reorient=False)
-        T = img4d.shape[3]
-        
-        if T <= 1:
-            print(f"Skipping {os.path.basename(input_path)}: Not a 4D image (T={T})")
+        image_4d = ants.image_read(input_path, dimension=4, reorient=False)
+        total_frames = image_4d.shape[3]
+
+        if total_frames <= 1:
+            print(f"Skipping {os.path.basename(input_path)}: expected 4D data, got T={total_frames}")
             return None
 
-        if ref_t < 0 or ref_t >= T:
-             ref_t = 0
-        
-        # 2. Setup Reference
-        ref = frame3d_from_4d(img4d, ref_t)
-        ref_mask = make_mask_reference(ref)
+        if ref_t < 0 or ref_t >= total_frames:
+            ref_t = 0
 
-        # 3. Registration Loop
-        warped_frames = [None] * T
-        warped_frames[ref_t] = ref 
-        
-        # Store transform lists for each time point
-        transforms_map = [None] * T
-        transforms_map[ref_t] = [] # Identity
-        
-        for t in range(T):
+        reference = frame3d_from_4d(image_4d, ref_t)
+        reference_mask = make_mask_reference(reference)
+
+        warped_frames = [None] * total_frames
+        warped_frames[ref_t] = reference
+
+        transforms_map = [None] * total_frames
+        transforms_map[ref_t] = []
+
+        for t in range(total_frames):
             if t == ref_t:
                 continue
-            
-            mov = frame3d_from_4d(img4d, t)
-            
-            # Register t -> ref
-            reg = ants.registration(
-                fixed=ref,
-                moving=mov,
+
+            moving = frame3d_from_4d(image_4d, t)
+            registration = ants.registration(
+                fixed=reference,
+                moving=moving,
                 type_of_transform=reg_type,
-                mask=ref_mask,
-                verbose=False
+                mask=reference_mask,
+                moving_mask=None,
+                mask_all_stages=True,
+                verbose=verbose,
             )
-            
-            # Save transforms 
-            # Note: reg['fwdtransforms'] are temporary files.
-            # To be safe for subsequent files, we should ideally rely on them existing,
-            # or copy them. ANTsPy usually keeps them until process exit.
-            transforms_map[t] = reg["fwdtransforms"]
-            
-            # Apply transform
-            mov_w = ants.apply_transforms(
-                fixed=ref,
-                moving=mov,
-                transformlist=reg["fwdtransforms"],
-                interpolator="linear"
-            )
-            
-            warped_frames[t] = mov_w
 
-        # 4. Reassemble 4D Volume
-        warped_np = np.stack([warped_frames[t].numpy() for t in range(T)], axis=-1)
-        # spacing needs to handle 4D (x,y,z,t) vs 3D (x,y,z)
-        spacing4 = list(img4d.spacing)
-        
-        warped4d = ants.from_numpy(
+            transforms_map[t] = registration["fwdtransforms"]
+            warped = ants.apply_transforms(
+                fixed=reference,
+                moving=moving,
+                transformlist=registration["fwdtransforms"],
+                interpolator=interpolator,
+            )
+            warped_frames[t] = warped
+
+        warped_np = np.stack([warped_frames[t].numpy() for t in range(total_frames)], axis=-1)
+        warped_4d = ants.from_numpy(
             warped_np,
-            origin=img4d.origin,
-            spacing=tuple(spacing4),
-            direction=img4d.direction
+            origin=image_4d.origin,
+            spacing=tuple(image_4d.spacing),
+            direction=image_4d.direction,
         )
-        
-        # 5. Save Output
-        ants.image_write(warped4d, output_path)
+        ants.image_write(warped_4d, output_path)
 
-        # 6. Basic QC
-        qc_t = T // 2
-        if qc_t == ref_t: qc_t = T - 1
-        
-        _save_qc_plot(ref, warped_frames[qc_t], qc_dir, ref_t, qc_t)
+        qc_indices = _parse_qc_frames(qc_frames_str, total_frames, ref_t)
+        _save_qc_examples(reference, image_4d, warped_frames, qc_indices, ref_t, qc_dir)
 
         return transforms_map
-    
-    except Exception as e:
-        print(f"Error processing {input_path}: {str(e)}")
-        import traceback
+
+    except Exception as exc:
+        print(f"Error registering {input_path}: {exc}")
         traceback.print_exc()
         return None
 
-def apply_transforms_to_file(input_path, output_path, transforms_map, ref_img_path=None):
-    """
-    Applies a list of temporal transforms to another 4D file (e.g. Phase scalars, CD).
-    Scalar mode.
-    """
+
+def apply_transforms_to_file(
+    input_path: str,
+    output_path: str,
+    transforms_map,
+    ref_img_path: str | None = None,
+    ref_t: int = 0,
+    interpolator: str = "linear",
+) -> bool:
+    """Apply temporal transforms to a scalar 4D image."""
     try:
         ensure_dir(os.path.dirname(output_path))
-        
-        img4d = ants.image_read(input_path, dimension=4, reorient=False)
-        T = img4d.shape[3]
-        
-        if T != len(transforms_map):
-            print(f"Warning: Frame count mismatch for {os.path.basename(input_path)}. Img={T}, Transforms={len(transforms_map)}")
+
+        image_4d = ants.image_read(input_path, dimension=4, reorient=False)
+        total_frames = image_4d.shape[3]
+
+        if total_frames != len(transforms_map):
+            print(
+                f"Warning: frame mismatch for {os.path.basename(input_path)} "
+                f"(image={total_frames}, transforms={len(transforms_map)})"
+            )
             return False
 
-        # Properly resolve fixed reference geometry.
-        # Ideally, we must use the SAME geometry used during registration (magnitude t=0)
-        # to ensure all outputs are resampled to that exact grid.
         if ref_img_path and os.path.exists(ref_img_path):
-             mag4d = ants.image_read(ref_img_path, dimension=4, reorient=False)
-             # assuming ref_t=0 for registration always
-             ref_geom = frame3d_from_4d(mag4d, 0)
+            ref_source_4d = ants.image_read(ref_img_path, dimension=4, reorient=False)
+            fixed_reference = frame3d_from_4d(ref_source_4d, ref_t)
         else:
-             # Fallback (less safe if headers differ)
-             ref_geom = frame3d_from_4d(img4d, 0)
-        
-        warped_frames = []
-        
-        for t in range(T):
-            mov = frame3d_from_4d(img4d, t)
-            tx_list = transforms_map[t]
-            
-            if not tx_list: 
-                # Identity -> Just resample to match the target grid perfectly
-                mov_w = ants.resample_image_to_target(mov, ref_geom, interp_type=1)
-                warped_frames.append(mov_w)
-            else:
-                mov_w = ants.apply_transforms(
-                    fixed=ref_geom,
-                    moving=mov,
-                    transformlist=tx_list,
-                    interpolator="linear"
-                )
-                warped_frames.append(mov_w)
+            fixed_reference = frame3d_from_4d(image_4d, ref_t)
 
-        # Save
-        warped_np = np.stack([w.numpy() for w in warped_frames], axis=-1)
-        # Use ref_geom parameters for output to maintain consistency
-        out_img = ants.from_numpy(
+        warped_frames = []
+        for t in range(total_frames):
+            moving = frame3d_from_4d(image_4d, t)
+            transform_list = transforms_map[t]
+
+            if not transform_list:
+                warped = ants.resample_image_to_target(moving, fixed_reference, interp_type=1)
+            else:
+                warped = ants.apply_transforms(
+                    fixed=fixed_reference,
+                    moving=moving,
+                    transformlist=transform_list,
+                    interpolator=interpolator,
+                )
+            warped_frames.append(warped)
+
+        warped_np = np.stack([frame.numpy() for frame in warped_frames], axis=-1)
+        out_image = ants.from_numpy(
             warped_np,
-            origin=ref_geom.origin,
-            spacing=(*ref_geom.spacing, img4d.spacing[3]), # Combine spatial 3D + temporal
-            direction=img4d.direction # Direction is usually 4x4, let's keep original 4D direction
-            # Note: ANTsPy handling of 4D direction vs 3D can be tricky. 
-            # Ideally we want the spatial part to match ref_geom.
+            origin=image_4d.origin,
+            spacing=tuple(image_4d.spacing),
+            direction=image_4d.direction,
         )
-        # Safer reconstruction simply using original 4D header but copying data, 
-        # IF we assume no rotation of the grid happened (which is true for temporal reg to t=0).
-        # But if we want to be strict on grid:
-        
-        ants.image_write(out_img, output_path)
+        ants.image_write(out_image, output_path)
         return True
 
-    except Exception as e:
-        print(f"Error applying transforms to {input_path}: {e}")
+    except Exception as exc:
+        print(f"Error applying transforms to {input_path}: {exc}")
         return False
 
-def apply_transforms_to_velocity_triplet(vx_path, vy_path, vz_path,
-                                        out_vx, out_vy, out_vz,
-                                        transforms_map, fixed_ref_mag_path,
-                                        ref_t=0, interpolator="linear",
-                                        ants_apply="antsApplyTransforms"):
+
+def apply_transforms_to_velocity_triplet(
+    vx_path: str,
+    vy_path: str,
+    vz_path: str,
+    out_vx: str,
+    out_vy: str,
+    out_vz: str,
+    transforms_map,
+    fixed_ref_mag_path: str,
+    ref_t: int = 0,
+    interpolator: str = "linear",
+) -> bool:
     """
-    Aplica transforms temporales (t -> ref_t) a un campo vectorial (Vx,Vy,Vz).
-    Usa imagetype=1 en ANTsPy para reorientar vectores correctamente.
+    Apply temporal transforms to a velocity vector field triplet (Vx, Vy, Vz).
+
+    Uses vector mode (imagetype=1) so ANTs reorients vectors correctly.
     """
     try:
         ensure_dir(os.path.dirname(out_vx))
 
-        vx4d = ants.image_read(vx_path, dimension=4, reorient=False)
-        vy4d = ants.image_read(vy_path, dimension=4, reorient=False)
-        vz4d = ants.image_read(vz_path, dimension=4, reorient=False)
+        vx_4d = ants.image_read(vx_path, dimension=4, reorient=False)
+        vy_4d = ants.image_read(vy_path, dimension=4, reorient=False)
+        vz_4d = ants.image_read(vz_path, dimension=4, reorient=False)
 
-        T = vx4d.shape[3]
-        if not (vy4d.shape[3] == T and vz4d.shape[3] == T):
-             print("Error: Velocity components have different frame counts.")
-             return False
-             
-        if len(transforms_map) != T:
-             print(f"Error: Transforms map size ({len(transforms_map)}) != Frames ({T})")
-             return False
+        total_frames = vx_4d.shape[3]
+        if vy_4d.shape[3] != total_frames or vz_4d.shape[3] != total_frames:
+            print("Error: velocity components have different frame counts.")
+            return False
 
-        # fixed geometry: usar MAG(ref_t) para que TODO quede exactamente en el mismo grid
-        mag4d = ants.image_read(fixed_ref_mag_path, dimension=4, reorient=False)
-        fixed_ref = frame3d_from_4d(mag4d, ref_t)
+        if len(transforms_map) != total_frames:
+            print(f"Error: transforms map size ({len(transforms_map)}) != frame count ({total_frames})")
+            return False
 
-        out_vx_frames, out_vy_frames, out_vz_frames = [], [], []
+        magnitude_4d = ants.image_read(fixed_ref_mag_path, dimension=4, reorient=False)
+        fixed_reference = frame3d_from_4d(magnitude_4d, ref_t)
 
-        for t in range(T):
-            vx = frame3d_from_4d(vx4d, t)
-            vy = frame3d_from_4d(vy4d, t)
-            vz = frame3d_from_4d(vz4d, t)
+        warped_vx = []
+        warped_vy = []
+        warped_vz = []
 
-            tx_list = transforms_map[t]
+        for t in range(total_frames):
+            vx = frame3d_from_4d(vx_4d, t)
+            vy = frame3d_from_4d(vy_4d, t)
+            vz = frame3d_from_4d(vz_4d, t)
+            transform_list = transforms_map[t]
 
-            if not tx_list:
-                # identidad: solo resample a fixed grid por consistencia
-                out_vx_frames.append(ants.resample_image_to_target(vx, fixed_ref, interp_type=1))
-                out_vy_frames.append(ants.resample_image_to_target(vy, fixed_ref, interp_type=1))
-                out_vz_frames.append(ants.resample_image_to_target(vz, fixed_ref, interp_type=1))
+            if not transform_list:
+                warped_vx.append(ants.resample_image_to_target(vx, fixed_reference, interp_type=1))
+                warped_vy.append(ants.resample_image_to_target(vy, fixed_reference, interp_type=1))
+                warped_vz.append(ants.resample_image_to_target(vz, fixed_reference, interp_type=1))
                 continue
 
-            # merge to vector image (3 components)
-            vvec = ants.merge_channels([vx, vy, vz])
-
-            # Apply transforms with imagetype=1 (Vector)
-            # This handles reorientation correctly for vectors without needing CLI
-            vvec_w = ants.apply_transforms(
-                fixed=fixed_ref,
-                moving=vvec,
-                transformlist=tx_list,
+            vector_image = ants.merge_channels([vx, vy, vz])
+            warped_vector = ants.apply_transforms(
+                fixed=fixed_reference,
+                moving=vector_image,
+                transformlist=transform_list,
                 interpolator=interpolator,
-                imagetype=1, # Vector
-                verbose=False
+                imagetype=1,
+                verbose=False,
             )
 
-            # Split channels
-            comps = ants.split_channels(vvec_w)
-            if len(comps) != 3:
-                print(f"Error: Expected 3 components after warp, got {len(comps)}")
+            channels = ants.split_channels(warped_vector)
+            if len(channels) != 3:
+                print(f"Error: expected 3 vector components after warp, got {len(channels)}")
                 return False
-            
-            vx_w, vy_w, vz_w = comps
 
-            out_vx_frames.append(vx_w)
-            out_vy_frames.append(vy_w)
-            out_vz_frames.append(vz_w)
+            warped_vx.append(channels[0])
+            warped_vy.append(channels[1])
+            warped_vz.append(channels[2])
 
-        # reassemble 4D outputs (keep original temporal spacing/header from inputs)
-        def stack4d(frames, template4d):
-            arr = np.stack([f.numpy() for f in frames], axis=-1)
-            # Use template spacing for 4D consistency
-            return ants.from_numpy(arr, origin=template4d.origin, spacing=template4d.spacing, direction=template4d.direction)
+        def stack_4d(frames, template_4d):
+            array = np.stack([frame.numpy() for frame in frames], axis=-1)
+            return ants.from_numpy(
+                array,
+                origin=template_4d.origin,
+                spacing=template_4d.spacing,
+                direction=template_4d.direction,
+            )
 
-        ants.image_write(stack4d(out_vx_frames, vx4d), out_vx)
-        ants.image_write(stack4d(out_vy_frames, vy4d), out_vy)
-        ants.image_write(stack4d(out_vz_frames, vz4d), out_vz)
-
+        ants.image_write(stack_4d(warped_vx, vx_4d), out_vx)
+        ants.image_write(stack_4d(warped_vy, vy_4d), out_vy)
+        ants.image_write(stack_4d(warped_vz, vz_4d), out_vz)
         return True
 
-    except Exception as e:
-        print(f"Error applying vector transforms: {str(e)}")
-        import traceback
+    except Exception as exc:
+        print(f"Error applying vector transforms: {exc}")
         traceback.print_exc()
         return False
 
-def _save_qc_plot(ref, mov, qc_dir, t_ref, t_mov):
-    ref_slice = ref.numpy()[:, :, ref.shape[2]//2]
-    mov_slice = mov.numpy()[:, :, ref.shape[2]//2]
-    
-    plt.figure(figsize=(10, 5))
-    plt.subplot(1, 2, 1); plt.imshow(ref_slice, cmap='gray'); plt.title(f"Reference (t={t_ref})"); plt.axis('off')
-    plt.subplot(1, 2, 2); plt.imshow(mov_slice, cmap='gray'); plt.title(f"Registered (t={t_mov})"); plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(os.path.join(qc_dir, f"qc_registration_t{t_mov}.png"))
-    plt.close()
+
+def _save_qc_examples(
+    reference: "ants.ANTsImage",
+    original_4d: "ants.ANTsImage",
+    warped_frames,
+    qc_indices: list[int],
+    ref_t: int,
+    qc_dir: str,
+) -> None:
+    reference_slice = reference.numpy()[:, :, reference.shape[2] // 2]
+
+    for t in qc_indices:
+        moving_slice = frame3d_from_4d(original_4d, t).numpy()[:, :, reference.shape[2] // 2]
+        warped_slice = warped_frames[t].numpy()[:, :, reference.shape[2] // 2]
+
+        plt.figure(figsize=(12, 4))
+        plt.subplot(1, 3, 1)
+        plt.imshow(reference_slice, cmap="gray")
+        plt.title(f"Reference (t={ref_t})")
+        plt.axis("off")
+
+        plt.subplot(1, 3, 2)
+        plt.imshow(moving_slice, cmap="gray")
+        plt.title(f"Before (t={t})")
+        plt.axis("off")
+
+        plt.subplot(1, 3, 3)
+        plt.imshow(warped_slice, cmap="gray")
+        plt.title(f"After (t={t})")
+        plt.axis("off")
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(qc_dir, f"qc_t{t:03d}.png"), dpi=150)
+        plt.close()

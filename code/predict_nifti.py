@@ -1,0 +1,317 @@
+import argparse
+import os
+import sys
+from typing import Tuple
+
+import nibabel as nib
+import numpy as np
+import torch
+from monai.inferers import sliding_window_inference
+
+# Add src to python path so we can import modules
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
+
+from Network.SR4DFlowNet import SR4DFlowNet
+
+
+def load_nifti(path: str) -> Tuple[np.ndarray, nib.Nifti1Image]:
+    img = nib.load(path)
+    data = img.get_fdata(dtype=np.float32)
+    return data, img
+
+
+def ensure_time_first(data: np.ndarray, time_axis: int):
+    if data.ndim == 3:
+        return data[np.newaxis, ...]
+    if data.ndim != 4:
+        raise ValueError(f"Expected 3D/4D NIfTI, got shape {data.shape}")
+    if time_axis < 0:
+        time_axis = data.ndim + time_axis
+    if time_axis != 0:
+        data = np.moveaxis(data, time_axis, 0)
+    return data
+
+
+def load_model(model_path, res_increase, low_resblock, hi_resblock, device):
+    model = SR4DFlowNet(res_increase, low_resblock=low_resblock, hi_resblock=hi_resblock).to(device)
+    checkpoint = torch.load(model_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
+    model.eval()
+    return model
+
+
+def adjust_affine_for_upsample(affine: np.ndarray, res_increase: int):
+    new_affine = affine.copy()
+    new_affine[:3, :3] = new_affine[:3, :3] / float(res_increase)
+    return new_affine
+
+
+def _legacy_compute_padding(shape_xyz, patch_size: int):
+    effective_patch_size = patch_size - 4
+    if effective_patch_size <= 0:
+        raise ValueError("Legacy overlap mode requires patch_size > 4.")
+
+    side_pad = (patch_size - effective_patch_size) // 2
+    padded = [shape_xyz[0] + 2 * side_pad, shape_xyz[1] + 2 * side_pad, shape_xyz[2] + 2 * side_pad]
+
+    end_pads = []
+    for dim in padded:
+        res = dim % effective_patch_size
+        if res > (2 * side_pad):
+            pad = patch_size - res
+        else:
+            pad = (2 * side_pad) - res
+        end_pads.append(pad)
+    return side_pad, effective_patch_size, tuple(end_pads)
+
+
+def _legacy_pad_channel(img: np.ndarray, side_pad: int, end_pads):
+    img = np.pad(img, ((side_pad, side_pad), (side_pad, side_pad), (side_pad, side_pad)), mode="constant")
+    img = np.pad(img, ((0, end_pads[0]), (0, end_pads[1]), (0, end_pads[2])), mode="constant")
+    return img
+
+
+def _legacy_extract_patches(img: np.ndarray, patch_size: int, effective_patch_size: int):
+    all_pads = patch_size - effective_patch_size
+    nr_x = (img.shape[0] - all_pads) // effective_patch_size
+    nr_y = (img.shape[1] - all_pads) // effective_patch_size
+    nr_z = (img.shape[2] - all_pads) // effective_patch_size
+
+    patches = []
+    for i in range(nr_x):
+        x_start = i * effective_patch_size
+        for j in range(nr_y):
+            y_start = j * effective_patch_size
+            for k in range(nr_z):
+                z_start = k * effective_patch_size
+                patches.append(img[x_start : x_start + patch_size, y_start : y_start + patch_size, z_start : z_start + patch_size])
+    return np.asarray(patches, dtype=np.float32), nr_x, nr_y, nr_z
+
+
+def _legacy_patchup_with_overlap(patches: np.ndarray, nr_x: int, nr_y: int, nr_z: int, patch_size: int, res_increase: int, end_pads):
+    effective_patch_size = patch_size - 4
+    side_pad = (patch_size - effective_patch_size) // 2
+    side_pad_hr = side_pad * res_increase
+
+    hr_patch_size = patches.shape[1]
+    n = hr_patch_size - side_pad_hr
+    patches = patches[:, side_pad_hr:n, side_pad_hr:n, side_pad_hr:n]
+
+    z_stacks = []
+    for k in range(len(patches) // nr_z):
+        z_start = k * nr_z
+        z_stacks.append(np.concatenate(patches[z_start : z_start + nr_z], axis=2))
+
+    y_stacks = []
+    for j in range(len(z_stacks) // nr_y):
+        y_start = j * nr_y
+        y_stacks.append(np.concatenate(z_stacks[y_start : y_start + nr_y], axis=1))
+
+    results = np.concatenate(y_stacks, axis=0)
+
+    padding_hr = (end_pads[0] * res_increase, end_pads[1] * res_increase, end_pads[2] * res_increase)
+    if padding_hr[0] > 0:
+        results = results[:-padding_hr[0], :, :]
+    if padding_hr[1] > 0:
+        results = results[:, :-padding_hr[1], :]
+    if padding_hr[2] > 0:
+        results = results[:, :, :-padding_hr[2]]
+    return results
+
+
+def _legacy_overlap_predict(model, lr_input: np.ndarray, patch_size: int, res_increase: int, batch_size: int, device):
+    # lr_input shape: [6, X, Y, Z]
+    side_pad, effective_patch_size, end_pads = _legacy_compute_padding(lr_input.shape[1:], patch_size)
+
+    channel_patches = []
+    nr_x = nr_y = nr_z = None
+    for c in range(lr_input.shape[0]):
+        padded = _legacy_pad_channel(lr_input[c], side_pad=side_pad, end_pads=end_pads)
+        patches, x, y, z = _legacy_extract_patches(padded, patch_size=patch_size, effective_patch_size=effective_patch_size)
+        channel_patches.append(patches)
+        if nr_x is None:
+            nr_x, nr_y, nr_z = x, y, z
+
+    total_patches = channel_patches[0].shape[0]
+    pred_batches = []
+    for start in range(0, total_patches, batch_size):
+        end = min(start + batch_size, total_patches)
+        with torch.no_grad():
+            u = torch.from_numpy(channel_patches[0][start:end]).unsqueeze(1).to(device)
+            v = torch.from_numpy(channel_patches[1][start:end]).unsqueeze(1).to(device)
+            w = torch.from_numpy(channel_patches[2][start:end]).unsqueeze(1).to(device)
+            um = torch.from_numpy(channel_patches[3][start:end]).unsqueeze(1).to(device)
+            vm = torch.from_numpy(channel_patches[4][start:end]).unsqueeze(1).to(device)
+            wm = torch.from_numpy(channel_patches[5][start:end]).unsqueeze(1).to(device)
+            pred = model(u, v, w, um, vm, wm).cpu().numpy()
+        pred_batches.append(pred)
+
+    pred_all = np.concatenate(pred_batches, axis=0)  # [N, 3, hp, hp, hp]
+    pred_u = _legacy_patchup_with_overlap(
+        pred_all[:, 0], nr_x=nr_x, nr_y=nr_y, nr_z=nr_z, patch_size=patch_size, res_increase=res_increase, end_pads=end_pads
+    )
+    pred_v = _legacy_patchup_with_overlap(
+        pred_all[:, 1], nr_x=nr_x, nr_y=nr_y, nr_z=nr_z, patch_size=patch_size, res_increase=res_increase, end_pads=end_pads
+    )
+    pred_w = _legacy_patchup_with_overlap(
+        pred_all[:, 2], nr_x=nr_x, nr_y=nr_y, nr_z=nr_z, patch_size=patch_size, res_increase=res_increase, end_pads=end_pads
+    )
+    return np.stack([pred_u, pred_v, pred_w], axis=0).astype(np.float32)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Predict 4DFlowNet output directly from NIfTI input.")
+    parser.add_argument("--u", type=str, required=True, help="Input LR velocity U NIfTI (3D/4D).")
+    parser.add_argument("--v", type=str, required=True, help="Input LR velocity V NIfTI (3D/4D).")
+    parser.add_argument("--w", type=str, required=True, help="Input LR velocity W NIfTI (3D/4D).")
+    parser.add_argument("--mag-u", type=str, default="", help="Input LR magnitude U NIfTI.")
+    parser.add_argument("--mag-v", type=str, default="", help="Input LR magnitude V NIfTI.")
+    parser.add_argument("--mag-w", type=str, default="", help="Input LR magnitude W NIfTI.")
+    parser.add_argument("--mag", type=str, default="", help="Single LR magnitude NIfTI used for all components.")
+    parser.add_argument("--model-path", type=str, required=True, help="Checkpoint path (.pt).")
+    parser.add_argument("--output-prefix", type=str, required=True, help="Output prefix (without _u/_v/_w suffix).")
+    parser.add_argument("--patch-size", type=int, default=16, help="LR inference patch size.")
+    parser.add_argument("--res-increase", type=int, default=2, help="Upsampling ratio.")
+    parser.add_argument("--sw-batch-size", type=int, default=2, help="Sliding window batch size.")
+    parser.add_argument("--overlap", type=float, default=0.25, help="Sliding-window overlap [0,1).")
+    parser.add_argument(
+        "--legacy-overlap-inference",
+        action="store_true",
+        help="Use legacy PatchGenerator-style overlap/trim reconstruction instead of MONAI sliding window.",
+    )
+    parser.add_argument("--venc", type=float, default=0.0, help="Optional venc override for normalization/denormalization.")
+    parser.add_argument("--mag-scale", type=float, default=4095.0, help="Magnitude normalization divisor.")
+    parser.add_argument("--round-small-values", action="store_true", help="Zero values under venc/2048.")
+    parser.add_argument("--time-axis", type=int, default=-1, help="Time axis for 4D NIfTI (default last axis).")
+    parser.add_argument("--low-resblock", type=int, default=8, help="Number of low-res residual blocks.")
+    parser.add_argument("--hi-resblock", type=int, default=4, help="Number of high-res residual blocks.")
+    args = parser.parse_args()
+
+    u, u_img = load_nifti(args.u)
+    v, _ = load_nifti(args.v)
+    w, _ = load_nifti(args.w)
+
+    u = ensure_time_first(u, args.time_axis)
+    v = ensure_time_first(v, args.time_axis)
+    w = ensure_time_first(w, args.time_axis)
+    if u.shape != v.shape or u.shape != w.shape:
+        raise ValueError("U/V/W shape mismatch")
+
+    mag_u = mag_v = mag_w = None
+    if args.mag_u:
+        mag_u, _ = load_nifti(args.mag_u)
+        mag_u = ensure_time_first(mag_u, args.time_axis)
+    if args.mag_v:
+        mag_v, _ = load_nifti(args.mag_v)
+        mag_v = ensure_time_first(mag_v, args.time_axis)
+    if args.mag_w:
+        mag_w, _ = load_nifti(args.mag_w)
+        mag_w = ensure_time_first(mag_w, args.time_axis)
+
+    if args.mag and (mag_u is None or mag_v is None or mag_w is None):
+        mag_all, _ = load_nifti(args.mag)
+        mag_all = ensure_time_first(mag_all, args.time_axis)
+        if mag_u is None:
+            mag_u = mag_all
+        if mag_v is None:
+            mag_v = mag_all
+        if mag_w is None:
+            mag_w = mag_all
+
+    if mag_u is None or mag_v is None or mag_w is None:
+        raise ValueError("Magnitude is required. Provide --mag or --mag-u/--mag-v/--mag-w")
+    if mag_u.shape != u.shape or mag_v.shape != u.shape or mag_w.shape != u.shape:
+        raise ValueError("Magnitude and velocity shapes must match")
+
+    venc = float(args.venc)
+    if venc <= 0:
+        venc = float(np.max(np.abs(np.stack([u, v, w], axis=0))))
+        if venc <= 0:
+            venc = 1.0
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = load_model(args.model_path, args.res_increase, args.low_resblock, args.hi_resblock, device)
+
+    def predictor_fn(x):
+        u_t, v_t, w_t, um_t, vm_t, wm_t = torch.chunk(x, 6, dim=1)
+        return model(u_t, v_t, w_t, um_t, vm_t, wm_t)
+
+    pred_frames = []
+    roi_size = (args.patch_size, args.patch_size, args.patch_size)
+
+    for t in range(u.shape[0]):
+        lr_input = np.stack(
+            [
+                u[t] / venc,
+                v[t] / venc,
+                w[t] / venc,
+                mag_u[t] / args.mag_scale,
+                mag_v[t] / args.mag_scale,
+                mag_w[t] / args.mag_scale,
+            ],
+            axis=0,
+        ).astype(np.float32)
+        if args.legacy_overlap_inference:
+            pred_np = _legacy_overlap_predict(
+                model=model,
+                lr_input=lr_input,
+                patch_size=args.patch_size,
+                res_increase=args.res_increase,
+                batch_size=args.sw_batch_size,
+                device=device,
+            )
+        else:
+            lr_tensor = torch.from_numpy(lr_input).unsqueeze(0).to(device)
+            with torch.no_grad():
+                pred = sliding_window_inference(
+                    inputs=lr_tensor,
+                    roi_size=roi_size,
+                    sw_batch_size=args.sw_batch_size,
+                    predictor=predictor_fn,
+                    overlap=args.overlap,
+                    mode="gaussian",
+                )
+            pred_np = pred.squeeze(0).cpu().numpy()
+
+        pred_np = pred_np * venc
+
+        if args.round_small_values:
+            threshold = venc / 2048.0
+            pred_np[np.abs(pred_np) < threshold] = 0
+        pred_frames.append(pred_np)
+        print(f"Processed frame {t + 1}/{u.shape[0]}")
+
+    pred_stack = np.stack(pred_frames, axis=0)  # [T, 3, X, Y, Z]
+    u_out = np.moveaxis(pred_stack[:, 0], 0, -1)  # [X, Y, Z, T]
+    v_out = np.moveaxis(pred_stack[:, 1], 0, -1)
+    w_out = np.moveaxis(pred_stack[:, 2], 0, -1)
+
+    out_affine = adjust_affine_for_upsample(u_img.affine, args.res_increase)
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_prefix)), exist_ok=True)
+
+    u_path = f"{args.output_prefix}_u.nii.gz"
+    v_path = f"{args.output_prefix}_v.nii.gz"
+    w_path = f"{args.output_prefix}_w.nii.gz"
+    uvw_path = f"{args.output_prefix}_uvw.nii.gz"
+
+    nib.save(nib.Nifti1Image(u_out.astype(np.float32), out_affine), u_path)
+    nib.save(nib.Nifti1Image(v_out.astype(np.float32), out_affine), v_path)
+    nib.save(nib.Nifti1Image(w_out.astype(np.float32), out_affine), w_path)
+
+    # Combined vector-field NIfTI. Shape: [X, Y, Z, T, 3]
+    uvw_out = np.moveaxis(pred_stack, 1, -1).astype(np.float32)
+    uvw_out = np.moveaxis(uvw_out, 0, 3)
+    nib.save(nib.Nifti1Image(uvw_out, out_affine), uvw_path)
+
+    print("Prediction saved:")
+    print(" ", u_path)
+    print(" ", v_path)
+    print(" ", w_path)
+    print(" ", uvw_path)
+
+
+if __name__ == "__main__":
+    main()

@@ -28,6 +28,7 @@ The network is based on the paper "4DFlowNet: Super-Resolution 4D Flow MRI" with
   - `prepare_data/`: Data preparation scripts
     - `prepare_mri_data.py`: Convert DICOM MRI data to HDF5
     - `prepare_nifti_data.py`: Convert NIfTI velocity/magnitude data to HDF5
+    - `generate_nifti_case_csv.py`: Convert legacy patch CSV splits into NIfTI case CSVs
     - `prepare_lowres_dataset.py`: Generate low-resolution training data from high-res CFD
     - `prepare_patches.py`: Generate random patch indices for training
     - `DicomData.py`: DICOM data handling
@@ -37,6 +38,7 @@ The network is based on the paper "4DFlowNet: Super-Resolution 4D Flow MRI" with
     - `ImageDataset.py`: Dataset loading for prediction
     - `prediction_utils.py`: Utilities for saving predictions
   - `trainer.py`: Main training entry point
+  - `trainer_nifti.py`: Direct NIfTI training entry point (no HDF5)
   - `predictor.py`: Main prediction entry point
   - `test_iterator.py`: Test data iterator functionality
 - `data/`: Training/validation datasets and patch index CSV files
@@ -103,6 +105,41 @@ Configuration in `predictor.py`:
 - Set `model_path` to pre-trained checkpoint (e.g., `../models/4DFlowNet/4DFlowNet-best.pt`)
 - Parameters must match training: `patch_size`, `res_increase`, `low_resblock`, `hi_resblock`
 - `round_small_values = True` zeros out velocities below 1 pixel value (venc/2048)
+
+### Direct NIfTI Training (no HDF5)
+```bash
+cd src
+python trainer_nifti.py --train-csv /path/train_nifti.csv --val-csv /path/val_nifti.csv
+```
+
+Legacy-compatible patch sampling flags:
+- `--legacy-minimum-coverage 0.2`
+- `--legacy-max-sampling-attempts 100`
+- `--legacy-disallow-empty-fallback` (optional strict mode)
+
+Generate train/val NIfTI case CSVs from existing `data/train.csv` and `data/validate.csv`:
+```bash
+python src/prepare_data/generate_nifti_case_csv.py \
+  --legacy-train-csv data/train.csv \
+  --legacy-val-csv data/validate.csv \
+  --output-train-csv data/train_nifti.csv \
+  --output-val-csv data/validate_nifti.csv \
+  --lr-root /path/to/lr_nifti \
+  --hr-root /path/to/hr_nifti
+```
+
+CSV columns:
+- `lr_u,lr_v,lr_w,lr_mag_u,lr_mag_v,lr_mag_w,hr_u,hr_v,hr_w,mask,venc`
+- Paths may be absolute or relative to CSV path.
+- `mask` and `venc` are optional.
+
+### Direct NIfTI Prediction
+```bash
+python code/predict_nifti.py --u ... --v ... --w ... --mag-u ... --mag-v ... --mag-w ... --model-path ... --output-prefix ...
+```
+
+Legacy-compatible prediction patching:
+- Add `--legacy-overlap-inference` to use overlap/trim reconstruction similar to the original PatchGenerator pipeline.
 
 ### Data Preparation Workflow
 

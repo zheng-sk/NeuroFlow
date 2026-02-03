@@ -115,6 +115,17 @@ python trainer_nifti.py \
   --epochs 60
 ```
 
+By default, `trainer_nifti.py` assumes velocity inputs are raw phase-like values and performs legacy-compatible conversion:
+
+- `vel = (raw - 2048) / 2048 * venc`
+- U/V sign inversion, W unchanged
+
+If your NIfTI velocity is already physical (m/s), disable this with:
+
+```bash
+--already-velocity-input
+```
+
 Legacy-compatible patch sampling (coverage-aware) can be enabled with:
 
 ```bash
@@ -176,6 +187,9 @@ The NIfTI training/validation dataloader in `src/Network/NiftiPatchDataset.py` a
    - Stacks LR velocity into `lr_vel` (3 channels).  
    - Stacks HR velocity into `hr_vel` (3 channels).  
    - Stacks LR magnitude into `lr_mag` (3 channels).  
+   - By default, converts raw phase-like velocity to physical velocity using legacy formula and sign convention:
+     - `vel = (raw - 2048) / 2048 * venc`
+     - U/V are sign-inverted, W is unchanged
    - Applies normalization:
      - velocity: divide by `venc` (CSV value, or estimated from LR velocity max abs if `venc <= 0`)
      - magnitude: divide by `mag_scale` (default 4095)
@@ -252,6 +266,7 @@ Prediction (`code/predict_nifti.py`):
 | `overlap` | Sliding-window overlap ratio | 0.25 |
 | `legacy-overlap-inference` | Use legacy overlap/trim patch reconstruction | off |
 | `round-small-values` | Zero values below `venc/2048` | off |
+| `already-velocity-input` | Disable default raw phase-to-velocity conversion | off |
 
 ## Legacy HDF5 workflow (optional, not recommended)
 

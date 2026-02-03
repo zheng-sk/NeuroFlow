@@ -49,6 +49,13 @@ def adjust_affine_for_upsample(affine: np.ndarray, res_increase: int):
     return new_affine
 
 
+def raw_to_velocity(data: np.ndarray, venc: float, raw_center: float, raw_scale: float, invert_sign: bool):
+    out = (data.astype(np.float32) - float(raw_center)) / float(raw_scale) * float(venc)
+    if invert_sign:
+        out = -out
+    return out
+
+
 def _legacy_compute_padding(shape_xyz, patch_size: int):
     effective_patch_size = patch_size - 4
     if effective_patch_size <= 0:
@@ -183,6 +190,21 @@ def main():
         help="Use legacy PatchGenerator-style overlap/trim reconstruction instead of MONAI sliding window.",
     )
     parser.add_argument("--venc", type=float, default=0.0, help="Optional venc override for normalization/denormalization.")
+    parser.add_argument(
+        "--raw-phase-input",
+        dest="raw_phase_input",
+        action="store_true",
+        default=True,
+        help="Assume velocity NIfTI values are raw phase-like and convert before normalization.",
+    )
+    parser.add_argument(
+        "--already-velocity-input",
+        dest="raw_phase_input",
+        action="store_false",
+        help="Disable raw-phase conversion (input velocity already physical).",
+    )
+    parser.add_argument("--raw-center", type=float, default=2048.0, help="Raw phase center value.")
+    parser.add_argument("--raw-scale", type=float, default=2048.0, help="Raw phase scaling denominator.")
     parser.add_argument("--mag-scale", type=float, default=4095.0, help="Magnitude normalization divisor.")
     parser.add_argument("--round-small-values", action="store_true", help="Zero values under venc/2048.")
     parser.add_argument("--time-axis", type=int, default=-1, help="Time axis for 4D NIfTI (default last axis).")
@@ -231,6 +253,12 @@ def main():
         venc = float(np.max(np.abs(np.stack([u, v, w], axis=0))))
         if venc <= 0:
             venc = 1.0
+
+    if args.raw_phase_input:
+        # Legacy-compatible semantic conversion: U/V sign inversion, W unchanged.
+        u = raw_to_velocity(u, venc=venc, raw_center=args.raw_center, raw_scale=args.raw_scale, invert_sign=True)
+        v = raw_to_velocity(v, venc=venc, raw_center=args.raw_center, raw_scale=args.raw_scale, invert_sign=True)
+        w = raw_to_velocity(w, venc=venc, raw_center=args.raw_center, raw_scale=args.raw_scale, invert_sign=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(args.model_path, args.res_increase, args.low_resblock, args.hi_resblock, device)

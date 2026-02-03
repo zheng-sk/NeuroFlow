@@ -21,6 +21,22 @@ def main():
     parser.add_argument("--mag-scale", type=float, default=4095.0, help="Magnitude normalization divisor.")
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold.")
     parser.add_argument(
+        "--raw-phase-input",
+        dest="raw_phase_input",
+        action="store_true",
+        default=True,
+        help="Assume velocity NIfTI values are raw phase-like and convert to velocity before normalization.",
+    )
+    parser.add_argument(
+        "--already-velocity-input",
+        dest="raw_phase_input",
+        action="store_false",
+        help="Disable raw-phase conversion (input velocity is already physical).",
+    )
+    parser.add_argument("--raw-center", type=float, default=2048.0, help="Raw phase center value.")
+    parser.add_argument("--raw-scale", type=float, default=2048.0, help="Raw phase scaling denominator.")
+    parser.add_argument("--time-axis", type=int, default=-1, help="Time axis for 4D NIfTI (default last axis).")
+    parser.add_argument(
         "--legacy-minimum-coverage",
         type=float,
         default=0.0,
@@ -54,6 +70,10 @@ def main():
         num_workers=args.num_workers,
         mag_scale=args.mag_scale,
         mask_threshold=args.mask_threshold,
+        raw_phase_input=args.raw_phase_input,
+        raw_center=args.raw_center,
+        raw_scale=args.raw_scale,
+        time_axis=args.time_axis,
         minimum_coverage=args.legacy_minimum_coverage,
         max_sampling_attempts=args.legacy_max_sampling_attempts,
         allow_empty_fallback=not args.legacy_disallow_empty_fallback,
@@ -69,6 +89,10 @@ def main():
         num_workers=args.num_workers,
         mag_scale=args.mag_scale,
         mask_threshold=args.mask_threshold,
+        raw_phase_input=args.raw_phase_input,
+        raw_center=args.raw_center,
+        raw_scale=args.raw_scale,
+        time_axis=args.time_axis,
         minimum_coverage=0.0,
         max_sampling_attempts=args.legacy_max_sampling_attempts,
         allow_empty_fallback=True,

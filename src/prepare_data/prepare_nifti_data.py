@@ -24,6 +24,35 @@ def ensure_time_first(data, time_axis):
     return data
 
 
+def convert_raw_to_velocity_if_needed(data, venc, invert_sign=False, name="Component"):
+    """
+    Checks if data is raw DICOM intensity (approx 0..4096, centered at 2048).
+    If so, converts to physical velocity (m/s).
+    Also applies semantic sign inversion (LPS->RAS) if requested.
+    """
+    # Heuristic: Raw phase is unsigned ~12bit (0-4096), mean around 2048.
+    # Velocity data usually is centered at 0 and small range (-VENC to +VENC).
+    mn, mx = np.min(data), np.max(data)
+    
+    is_raw = (mn >= 0) and (mx > 1000) and (mx <= 4096*2) # *2 margin just in case
+    
+    if is_raw and venc is not None:
+        print(f"   [{name}] Raw intensity detected ({mn:.0f}..{mx:.0f}). Converting to m/s with VENC={venc}...")
+        # Formula: (val - 2048) / 2048 * VENC
+        data = (data.astype(np.float32) - 2048.0) / 2048.0 * venc
+        
+        if invert_sign:
+            print(f"   [{name}] applying LPS->RAS sign inversion (-1).")
+            data = -data
+    else:
+        # If not raw, maybe we still need sign inversion?
+        # Usually if data is already physical, user might have handled it.
+        # But to be safe, if we are in this pipeline, we might enforce sign if requested.
+        pass
+        
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--u', type=str, required=True, help='NIfTI for velocity U (3D or 4D)')
@@ -102,6 +131,14 @@ def main():
         venc_v = float(np.max(np.abs(v_data)))
     if venc_w is None:
         venc_w = float(np.max(np.abs(w_data)))
+
+    # --- Pre-processing: Convert Raw Phase to m/s AND apply LPS->RAS sign flip ---
+    # We assume U and V correspond to Vx and Vy which need sign inversion in RAS,
+    # while W corresponds to Vz which usually does not.
+    u_data = convert_raw_to_velocity_if_needed(u_data, venc_u, invert_sign=True, name="U")
+    v_data = convert_raw_to_velocity_if_needed(v_data, venc_v, invert_sign=True, name="V")
+    w_data = convert_raw_to_velocity_if_needed(w_data, venc_w, invert_sign=False, name="W")
+    # -----------------------------------------------------------------------------
 
     if not os.path.isdir(args.output_dir):
         os.makedirs(args.output_dir)

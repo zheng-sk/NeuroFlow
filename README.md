@@ -1,7 +1,18 @@
 # 4DFlowNet
 Super Resolution 4D Flow MRI using Residual Neural Network
 
-This is an implementation of the paper [4DFlowNet: Super-Resolution 4D Flow MRI](https://www.frontiersin.org/articles/10.3389/fphy.2020.00138/full) using Tensorflow 2.2.0 with Keras.
+This is an implementation of the paper [4DFlowNet: Super-Resolution 4D Flow MRI](https://www.frontiersin.org/articles/10.3389/fphy.2020.00138/full).
+
+## Framework migration status
+
+- Legacy branch implementation: TensorFlow/Keras.
+- Current migration branch implementation: PyTorch + MONAI (`requirements_torch_monai.txt`).
+
+Install dependencies for the migration branch:
+
+```bash
+pip install -r requirements_torch_monai.txt
+```
 
 ## Updates 4DFlowNet v2.0
 - Loss function has been updated (MSE fluid + MSE non fluid)
@@ -75,6 +86,8 @@ To run a training for 4DFlowNet:
     3. Adjust hyperparameters. The default values from the paper are already provided in the code.
     4. Run trainer.py
 
+Model checkpoints are saved as `.pt` files (`*-best.pt`, `*-latest.pt`).
+
 Adjustable parameters:
 
 |Param  | Description   | Default|
@@ -139,6 +152,8 @@ To run the prediction, download first the [pre-trained weights](https://auckland
     3. Put your dataset under the data/ folder
     4. Go to src/ and open predictor.py and configure the input_filename and output_filename if necessary
     5. Run predictor.py
+
+For the migration branch, `predictor.py` and `code/batch_predict.py` load PyTorch checkpoints (`.pt`).
 
 Adjustable parameters:
 

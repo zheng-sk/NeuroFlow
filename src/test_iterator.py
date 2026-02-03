@@ -1,5 +1,4 @@
 import numpy as np
-import tensorflow as tf
 import time
 import h5py
 from Network.PatchHandler3D import PatchHandler3D
@@ -28,8 +27,7 @@ if __name__ == "__main__":
     # Load data file and indexes
     trainset = load_indexes(training_file)
     
-    # ----------------- TensorFlow stuff -------------------
-    # TRAIN dataset iterator
+    # ----------------- MONAI/PyTorch DataLoader -------------------
     z = PatchHandler3D(data_dir, patch_size, res_increase, batch_size)
     trainset = z.initialize_dataset(trainset, shuffle=True, n_parallel=2)
 

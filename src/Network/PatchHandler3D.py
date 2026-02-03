@@ -1,8 +1,25 @@
-import tensorflow as tf
-import numpy as np
 import h5py
+import numpy as np
+import torch
+from monai.data import DataLoader
+from torch.utils.data import Dataset
 
-class PatchHandler3D():
+
+class _PatchDataset(Dataset):
+    def __init__(self, handler, indexes):
+        self.handler = handler
+        self.indexes = np.asarray(indexes)
+        if self.indexes.ndim == 1:
+            self.indexes = self.indexes.reshape(1, -1)
+
+    def __len__(self):
+        return len(self.indexes)
+
+    def __getitem__(self, idx):
+        return self.handler.load_patches_from_index_file(self.indexes[idx])
+
+
+class PatchHandler3D:
     # constructor
     def __init__(self, data_dir, patch_size, res_increase, batch_size, mask_threshold=0.6):
         self.patch_size = patch_size
@@ -11,74 +28,122 @@ class PatchHandler3D():
         self.mask_threshold = mask_threshold
 
         self.data_directory = data_dir
-        self.hr_colnames = ['u','v','w']
-        self.lr_colnames = ['u','v','w']
-        self.venc_colnames = ['venc_u','venc_v','venc_w']
-        self.mag_colnames  = ['mag_u','mag_v','mag_w']
-        self.mask_colname  = 'mask'
+        self.hr_colnames = ["u", "v", "w"]
+        self.lr_colnames = ["u", "v", "w"]
+        self.venc_colnames = ["venc_u", "venc_v", "venc_w"]
+        self.mag_colnames = ["mag_u", "mag_v", "mag_w"]
+        self.mask_colname = "mask"
 
     def initialize_dataset(self, indexes, shuffle, n_parallel=None):
-        '''
-            Input pipeline.
-            This function accepts a list of filenames with index and patch locations to read.
-        '''
-        ds = tf.data.Dataset.from_tensor_slices((indexes))
-        print("Total dataset:", len(indexes), 'shuffle', shuffle)
+        """
+        Create a MONAI/PyTorch DataLoader using patch indexes from CSV.
+        """
+        dataset = _PatchDataset(self, indexes)
+        print("Total dataset:", len(dataset), "shuffle", shuffle)
 
-        if shuffle:
-            # Set a buffer equal to dataset size to ensure randomness
-            ds = ds.shuffle(buffer_size=len(indexes)) 
+        num_workers = 0 if n_parallel is None else int(n_parallel)
+        loader = DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+        return loader
 
-        ds = ds.map(self.load_data_using_patch_index, num_parallel_calls=n_parallel)
-        ds = ds.batch(batch_size=self.batch_size)
-        
-        # prefetch, n=number of items
-        ds = ds.prefetch(self.batch_size)
-        
-        return ds
-    
-    def load_data_using_patch_index(self, indexes):
-        return tf.py_function(func=self.load_patches_from_index_file, 
-            # U-LR, HR, MAG, V-LR, HR, MAG, W-LR, HR, MAG, venc, MASK
-            inp=[indexes], 
-                Tout=[tf.float32, tf.float32, tf.float32,
-                    tf.float32, tf.float32, tf.float32,
-                    tf.float32, tf.float32, tf.float32,
-                    tf.float32, tf.float32])
+    @staticmethod
+    def _to_text(value):
+        if isinstance(value, (bytes, np.bytes_)):
+            return value.decode()
+        return str(value)
+
+    @staticmethod
+    def _to_int(value):
+        if isinstance(value, (bytes, np.bytes_)):
+            value = value.decode()
+        return int(float(value))
 
     def load_patches_from_index_file(self, indexes):
-        # Do typecasting, we need to make sure everything has the correct data type
-        # Solution for tf2: https://stackoverflow.com/questions/56122670/how-to-get-string-value-out-of-tf-tensor-which-dtype-is-string
-        lr_hd5path = '{}/{}'.format(self.data_directory, bytes.decode(indexes[0].numpy()))
-        hd5path    = '{}/{}'.format(self.data_directory, bytes.decode(indexes[1].numpy()))
-        
-        idx = int(indexes[2])
-        x_start, y_start, z_start = int(indexes[3]), int(indexes[4]), int(indexes[5])
-        is_rotate = int(indexes[6])
-        rotation_plane = int(indexes[7])
-        rotation_degree_idx = int(indexes[8])
+        lr_hd5path = f"{self.data_directory}/{self._to_text(indexes[0])}"
+        hd5path = f"{self.data_directory}/{self._to_text(indexes[1])}"
+
+        idx = self._to_int(indexes[2])
+        x_start, y_start, z_start = self._to_int(indexes[3]), self._to_int(indexes[4]), self._to_int(indexes[5])
+        is_rotate = self._to_int(indexes[6])
+        rotation_plane = self._to_int(indexes[7])
+        rotation_degree_idx = self._to_int(indexes[8])
 
         patch_size = self.patch_size
         hr_patch_size = self.patch_size * self.res_increase
-        
-        # ============ get the patch ============ 
-        patch_index  = np.index_exp[idx, x_start:x_start+patch_size, y_start:y_start+patch_size, z_start:z_start+patch_size]
-        hr_patch_index = np.index_exp[idx, x_start*self.res_increase :x_start*self.res_increase +hr_patch_size ,y_start*self.res_increase :y_start*self.res_increase +hr_patch_size , z_start*self.res_increase :z_start*self.res_increase +hr_patch_size ]
-        mask_index = np.index_exp[0, x_start*self.res_increase :x_start*self.res_increase +hr_patch_size ,y_start*self.res_increase :y_start*self.res_increase +hr_patch_size , z_start*self.res_increase :z_start*self.res_increase +hr_patch_size ]
-        u_patch, u_hr_patch, mag_u_patch, v_patch, v_hr_patch, mag_v_patch, w_patch, w_hr_patch, mag_w_patch, venc, mask_patch = self.load_vectorfield(hd5path, lr_hd5path, idx, mask_index, patch_index, hr_patch_index)
-        
-        # ============ apply rotation ============ 
+
+        # ============ get the patch ============
+        patch_index = np.index_exp[
+            idx,
+            x_start : x_start + patch_size,
+            y_start : y_start + patch_size,
+            z_start : z_start + patch_size,
+        ]
+        hr_patch_index = np.index_exp[
+            idx,
+            x_start * self.res_increase : x_start * self.res_increase + hr_patch_size,
+            y_start * self.res_increase : y_start * self.res_increase + hr_patch_size,
+            z_start * self.res_increase : z_start * self.res_increase + hr_patch_size,
+        ]
+        mask_index = np.index_exp[
+            0,
+            x_start * self.res_increase : x_start * self.res_increase + hr_patch_size,
+            y_start * self.res_increase : y_start * self.res_increase + hr_patch_size,
+            z_start * self.res_increase : z_start * self.res_increase + hr_patch_size,
+        ]
+        (
+            u_patch,
+            u_hr_patch,
+            mag_u_patch,
+            v_patch,
+            v_hr_patch,
+            mag_v_patch,
+            w_patch,
+            w_hr_patch,
+            mag_w_patch,
+            venc,
+            mask_patch,
+        ) = self.load_vectorfield(hd5path, lr_hd5path, idx, mask_index, patch_index, hr_patch_index)
+
+        # ============ apply rotation ============
         if is_rotate > 0:
             u_patch, v_patch, w_patch = self.apply_rotation(u_patch, v_patch, w_patch, rotation_degree_idx, rotation_plane, True)
-            u_hr_patch, v_hr_patch, w_hr_patch = self.apply_rotation(u_hr_patch, v_hr_patch, w_hr_patch, rotation_degree_idx, rotation_plane, True)
-            mag_u_patch, mag_v_patch, mag_w_patch = self.apply_rotation(mag_u_patch, mag_v_patch, mag_w_patch, rotation_degree_idx, rotation_plane, False)
+            u_hr_patch, v_hr_patch, w_hr_patch = self.apply_rotation(
+                u_hr_patch,
+                v_hr_patch,
+                w_hr_patch,
+                rotation_degree_idx,
+                rotation_plane,
+                True,
+            )
+            mag_u_patch, mag_v_patch, mag_w_patch = self.apply_rotation(
+                mag_u_patch,
+                mag_v_patch,
+                mag_w_patch,
+                rotation_degree_idx,
+                rotation_plane,
+                False,
+            )
             mask_patch = self.rotate_object(mask_patch, rotation_degree_idx, rotation_plane)
-            
-        # Expand dims (for InputLayer)
-        return u_patch[...,tf.newaxis], v_patch[...,tf.newaxis], w_patch[...,tf.newaxis], \
-                    mag_u_patch[...,tf.newaxis], mag_v_patch[...,tf.newaxis], mag_w_patch[...,tf.newaxis], \
-                    u_hr_patch[...,tf.newaxis], v_hr_patch[...,tf.newaxis], w_hr_patch[...,tf.newaxis], \
-                    venc, mask_patch
+
+        # Expand dims (for channel-first input shape in torch)
+        return (
+            torch.from_numpy(np.ascontiguousarray(u_patch[None, ...])).float(),
+            torch.from_numpy(np.ascontiguousarray(v_patch[None, ...])).float(),
+            torch.from_numpy(np.ascontiguousarray(w_patch[None, ...])).float(),
+            torch.from_numpy(np.ascontiguousarray(mag_u_patch[None, ...])).float(),
+            torch.from_numpy(np.ascontiguousarray(mag_v_patch[None, ...])).float(),
+            torch.from_numpy(np.ascontiguousarray(mag_w_patch[None, ...])).float(),
+            torch.from_numpy(np.ascontiguousarray(u_hr_patch[None, ...])).float(),
+            torch.from_numpy(np.ascontiguousarray(v_hr_patch[None, ...])).float(),
+            torch.from_numpy(np.ascontiguousarray(w_hr_patch[None, ...])).float(),
+            torch.tensor(venc, dtype=torch.float32),
+            torch.from_numpy(np.ascontiguousarray(mask_patch)).float(),
+        )
                     
     def rotate_object(self, img, rotation_idx, plane_nr):
         if plane_nr==1:
@@ -154,10 +219,19 @@ class PatchHandler3D():
         mag_images = mag_images / 4095. # Magnitude 0 .. 1
 
         # U-LR, HR, MAG, V-LR, HR, MAG, w-LR, HR, MAG, venc, MASK
-        return lowres_images[0].astype('float32'), hires_images[0].astype('float32'), mag_images[0].astype('float32'), \
-            lowres_images[1].astype('float32'), hires_images[1].astype('float32'), mag_images[1].astype('float32'), \
-            lowres_images[2].astype('float32'), hires_images[2].astype('float32'), mag_images[2].astype('float32'),\
-            global_venc.astype('float32'), mask.astype('float32')
+        return (
+            lowres_images[0].astype("float32"),
+            hires_images[0].astype("float32"),
+            mag_images[0].astype("float32"),
+            lowres_images[1].astype("float32"),
+            hires_images[1].astype("float32"),
+            mag_images[1].astype("float32"),
+            lowres_images[2].astype("float32"),
+            hires_images[2].astype("float32"),
+            mag_images[2].astype("float32"),
+            np.float32(global_venc),
+            mask.astype("float32"),
+        )
     
     def _normalize(self, u, venc):
         return u / venc

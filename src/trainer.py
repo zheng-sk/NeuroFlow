@@ -22,7 +22,7 @@ if __name__ == "__main__":
     restore = False
     if restore:
         model_dir = "../models/4DFlowNet"
-        model_file = "4DFlowNet-best.keras"
+        model_file = "4DFlowNet-best.pt"
 
     # Hyperparameters optimisation variables
     initial_learning_rate = 2e-4
@@ -42,8 +42,7 @@ if __name__ == "__main__":
     trainset = load_indexes(training_file)
     valset = load_indexes(validate_file)
     
-    # ----------------- TensorFlow stuff -------------------
-    # TRAIN dataset iterator
+    # ----------------- MONAI/PyTorch DataLoader -------------------
     z = PatchHandler3D(data_dir, patch_size, res_increase, batch_size, mask_threshold)
     trainset = z.initialize_dataset(trainset, shuffle=True, n_parallel=None)
 
@@ -68,6 +67,6 @@ if __name__ == "__main__":
     if restore:
         print(f"Restoring model {model_file}...")
         network.restore_model(model_dir, model_file)
-        print("Learning rate", network.optimizer.lr.numpy())
+        print("Learning rate", network.optimizer.param_groups[0]["lr"])
 
     network.train_network(trainset, valset, n_epoch=epochs, testset=testset)

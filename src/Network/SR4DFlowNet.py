@@ -1,112 +1,141 @@
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-def upsample3d(res_increase):
-    """
-        Bilinear-like 3D upsampling wrapped in a Keras layer to work with KerasTensors
-    """
-    def _upsample(input_tensor):
-        shape = tf.shape(input_tensor)
-        x_size = shape[1]
-        y_size = shape[2]
-        z_size = shape[3]
-        c_size = shape[4]
 
-        if res_increase == 1:
-            return input_tensor
-
-        # resize y-z
-        yz = tf.reshape(input_tensor, [-1, y_size, z_size, c_size])
-        yz = tf.image.resize(yz, [y_size * res_increase, z_size * res_increase], method='bilinear')
-        resume_b_x = tf.reshape(yz, [-1, x_size, y_size * res_increase, z_size * res_increase, c_size])
-
-        # reorient and resize y-x
-        reoriented = tf.transpose(resume_b_x, [0, 3, 2, 1, 4])
-        yx = tf.reshape(reoriented, [-1, y_size * res_increase, x_size, c_size])
-        yx = tf.image.resize(yx, [y_size * res_increase, x_size * res_increase], method='bilinear')
-        resume_b_z = tf.reshape(yx, [-1, z_size * res_increase, y_size * res_increase, x_size * res_increase, c_size])
-
-        output_tensor = tf.transpose(resume_b_z, [0, 3, 2, 1, 4])
-        return output_tensor
-
-    return tf.keras.layers.Lambda(_upsample, name=f'upsample3d_x{res_increase}')
-
-def conv3d(x, kernel_size, filters, padding='SYMMETRIC', activation=None, initialization=None, use_bias=True):
-    """
-        Based on: https://github.com/gitlimlab/CycleGAN-Tensorflow/blob/master/ops.py
-        For tf padding, refer to: https://www.tensorflow.org/api_docs/python/tf/pad
-    """
-    reg_l2 = tf.keras.regularizers.l2(5e-7)
-
-    if padding == 'SYMMETRIC' or padding == 'REFLECT':
-        p = (kernel_size - 1) // 2
-        # wrap tf.pad in a Keras layer to avoid KerasTensor errors
-        x = tf.keras.layers.Lambda(lambda t: tf.pad(t, [[0,0],[p,p],[p,p],[p,p],[0,0]], padding))(x)
-        x = tf.keras.layers.Conv3D(filters, kernel_size, activation=activation, padding='VALID',
-                                   kernel_initializer=initialization, use_bias=use_bias, kernel_regularizer=reg_l2)(x)
-    else:
-        assert padding in ['SAME', 'VALID']
-        x = tf.keras.layers.Conv3D(filters, kernel_size, activation=activation, padding=padding,
-                                   kernel_initializer=initialization, use_bias=use_bias, kernel_regularizer=reg_l2)(x)
-    return x
-    
-
-def resnet_block(x, block_name='ResBlock', channel_nr=64, scale = 1, pad='SAME'):
-    tmp = conv3d(x, kernel_size=3, filters=channel_nr, padding=pad, activation=None, use_bias=False, initialization=None)
-    tmp = tf.keras.layers.LeakyReLU(alpha=0.2)(tmp)
-
-    tmp = conv3d(tmp, kernel_size=3, filters=channel_nr, padding=pad, activation=None, use_bias=False, initialization=None)
-
-    tmp = x + tmp * scale
-    tmp = tf.keras.layers.LeakyReLU(alpha=0.2)(tmp)
-
-    return tmp
-
-class SR4DFlowNet():
+class Upsample3D(nn.Module):
     def __init__(self, res_increase):
+        super().__init__()
         self.res_increase = res_increase
 
-    def build_network(self, u, v, w, u_mag, v_mag, w_mag, low_resblock=8, hi_resblock=4, channel_nr=64):
-        channel_nr = 64
+    def forward(self, x):
+        if self.res_increase == 1:
+            return x
+        return F.interpolate(
+            x,
+            scale_factor=self.res_increase,
+            mode="trilinear",
+            align_corners=False,
+        )
 
-        speed = (u ** 2 + v ** 2 + w ** 2) ** 0.5
-        mag = (u_mag ** 2 + v_mag ** 2 + w_mag ** 2) ** 0.5
+
+class Conv3dBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, padding="SYMMETRIC", activation=None, use_bias=True):
+        super().__init__()
+        self.padding = padding.upper()
+        self.kernel_size = kernel_size
+
+        if self.padding in ("SYMMETRIC", "REFLECT"):
+            conv_padding = 0
+        elif self.padding == "SAME":
+            conv_padding = (kernel_size - 1) // 2
+        elif self.padding == "VALID":
+            conv_padding = 0
+        else:
+            raise ValueError(f"Unsupported padding type: {padding}")
+
+        self.conv = nn.Conv3d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=conv_padding,
+            bias=use_bias,
+        )
+        self.activation = nn.ReLU(inplace=True) if activation == "relu" else None
+
+    def forward(self, x):
+        if self.padding in ("SYMMETRIC", "REFLECT"):
+            p = (self.kernel_size - 1) // 2
+            # PyTorch has no "symmetric" mode; replicate is the closest border-preserving option.
+            pad_mode = "replicate" if self.padding == "SYMMETRIC" else "reflect"
+            x = F.pad(x, (p, p, p, p, p, p), mode=pad_mode)
+
+        x = self.conv(x)
+
+        if self.activation is not None:
+            x = self.activation(x)
+        return x
+
+
+class ResnetBlock(nn.Module):
+    def __init__(self, channel_nr=64, scale=1.0, pad="SAME"):
+        super().__init__()
+        self.scale = scale
+        self.conv1 = Conv3dBlock(channel_nr, channel_nr, kernel_size=3, padding=pad, activation=None, use_bias=False)
+        self.conv2 = Conv3dBlock(channel_nr, channel_nr, kernel_size=3, padding=pad, activation=None, use_bias=False)
+        self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        tmp = self.conv1(x)
+        tmp = self.act(tmp)
+        tmp = self.conv2(tmp)
+        tmp = x + (tmp * self.scale)
+        return self.act(tmp)
+
+
+class SR4DFlowNet(nn.Module):
+    def __init__(self, res_increase, low_resblock=8, hi_resblock=4, channel_nr=64):
+        super().__init__()
+        self.res_increase = res_increase
+        self.channel_nr = channel_nr
+
+        self.pc_path = nn.Sequential(
+            Conv3dBlock(3, channel_nr, 3, "SYMMETRIC", "relu"),
+            Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
+        )
+        self.phase_path = nn.Sequential(
+            Conv3dBlock(3, channel_nr, 3, "SYMMETRIC", "relu"),
+            Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
+        )
+        self.merge_path = nn.Sequential(
+            Conv3dBlock(channel_nr * 2, channel_nr, 1, "SYMMETRIC", "relu"),
+            Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
+        )
+
+        self.low_res_blocks = nn.ModuleList(
+            [ResnetBlock(channel_nr=channel_nr, scale=1.0, pad="SYMMETRIC") for _ in range(low_resblock)]
+        )
+        self.upsample = Upsample3D(res_increase)
+        self.hi_res_blocks = nn.ModuleList(
+            [ResnetBlock(channel_nr=channel_nr, scale=1.0, pad="SYMMETRIC") for _ in range(hi_resblock)]
+        )
+
+        self.u_path = nn.Sequential(
+            Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
+            Conv3dBlock(channel_nr, 1, 3, "SYMMETRIC", None),
+        )
+        self.v_path = nn.Sequential(
+            Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
+            Conv3dBlock(channel_nr, 1, 3, "SYMMETRIC", None),
+        )
+        self.w_path = nn.Sequential(
+            Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
+            Conv3dBlock(channel_nr, 1, 3, "SYMMETRIC", None),
+        )
+
+    def forward(self, u, v, w, u_mag, v_mag, w_mag):
+        speed = torch.sqrt(u**2 + v**2 + w**2)
+        mag = torch.sqrt(u_mag**2 + v_mag**2 + w_mag**2)
         pcmr = mag * speed
 
-        phase = tf.keras.layers.concatenate([u,v,w])
-        pc    = tf.keras.layers.concatenate([pcmr, mag, speed])
-        
-        pc = conv3d(pc,3,channel_nr, 'SYMMETRIC', 'relu')
-        pc = conv3d(pc,3,channel_nr, 'SYMMETRIC', 'relu')
+        phase = torch.cat([u, v, w], dim=1)
+        pc = torch.cat([pcmr, mag, speed], dim=1)
 
-        phase = conv3d(phase,3,channel_nr, 'SYMMETRIC', 'relu')
-        phase = conv3d(phase,3,channel_nr, 'SYMMETRIC', 'relu')
+        pc = self.pc_path(pc)
+        phase = self.phase_path(phase)
 
-        concat_layer = tf.keras.layers.concatenate([phase, pc])
-        concat_layer = conv3d(concat_layer, 1, channel_nr, 'SYMMETRIC', 'relu')
-        concat_layer = conv3d(concat_layer, 3, channel_nr, 'SYMMETRIC', 'relu')
-        
-        # res blocks
-        rb = concat_layer
-        for i in range(low_resblock):
-            rb = resnet_block(rb, "ResBlock", channel_nr, pad='SYMMETRIC')
+        concat_layer = torch.cat([phase, pc], dim=1)
+        rb = self.merge_path(concat_layer)
 
-        rb = upsample3d(self.res_increase)(rb)
-            
-        # refinement in HR
-        for i in range(hi_resblock):
-            rb = resnet_block(rb, "ResBlock", channel_nr, pad='SYMMETRIC')
+        for block in self.low_res_blocks:
+            rb = block(rb)
 
-        # 3 separate path version
-        u_path = conv3d(rb, 3, channel_nr, 'SYMMETRIC', 'relu')
-        u_path = conv3d(u_path, 3, 1, 'SYMMETRIC', None)
+        rb = self.upsample(rb)
 
-        v_path = conv3d(rb, 3, channel_nr, 'SYMMETRIC', 'relu')
-        v_path = conv3d(v_path, 3, 1, 'SYMMETRIC', None)
+        for block in self.hi_res_blocks:
+            rb = block(rb)
 
-        w_path = conv3d(rb, 3, channel_nr, 'SYMMETRIC', 'relu')
-        w_path = conv3d(w_path, 3, 1, 'SYMMETRIC', None)
-        
-
-        b_out = tf.keras.layers.concatenate([u_path, v_path, w_path])
-
-        return b_out
+        u_path = self.u_path(rb)
+        v_path = self.v_path(rb)
+        w_path = self.w_path(rb)
+        return torch.cat([u_path, v_path, w_path], dim=1)

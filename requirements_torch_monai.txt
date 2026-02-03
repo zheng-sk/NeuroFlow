@@ -1,0 +1,21 @@
+# Core deep learning stack (install latest stable at install time)
+torch
+torchvision
+torchaudio
+monai
+tensorboard
+
+# Medical imaging + data IO
+antspyx
+h5py
+nibabel
+pydicom
+
+# Scientific Python
+numpy
+scipy
+pandas
+scikit-learn
+statsmodels
+matplotlib
+PyYAML

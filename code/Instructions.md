@@ -21,6 +21,7 @@ code/
 3. **Temporal registration (motion correction)**
    - Per folder/patient: `code/registration/batch_register_magnitude.py`
    - Per 4D file: `code/registration/temporal_register_to_t0.py`
+   - Progress/timing options: `--show-frame-progress`, `--verbose`, `--timing-report <csv_path>`
 4. **Inter-scan 7T -> 3T registration**
    - Per case: `code/registration/register_7T_to_3T_with_qc.py`
    - Batch over a folder: `code/registration/batch_register_7T_to_3T.py`
@@ -28,6 +29,7 @@ code/
    - One command over a folder: `code/registration/batch_full_register_7T_to_3T.py`
    - Saves final registered images and brain masks (`BrainMasks/`), and can auto-clean intermediates/QC
    - Optional `--final-only` validates that all final 4D registered outputs exist per case before cleanup
+   - Optional temporal telemetry: `--show-temporal-frame-progress` and `--temporal-timing-report <csv_path>`
 6. **(Optional) NIfTI -> H5**
    - Script: `code/conversion/nifti_to_h5.py`
 7. **(Optional) Batch inference**
@@ -60,7 +62,9 @@ python code/preprocessing/calculate_mag.py \
 python code/registration/batch_register_magnitude.py \
   --input-dir data/processed_inputs \
   --output-dir data/registered_patients \
-  --reg-type Rigid
+  --reg-type Rigid \
+  --show-frame-progress \
+  --timing-report data/reports/temporal_timing.csv
 
 # 3b) Temporal registration per file
 python code/registration/temporal_register_to_t0.py \
@@ -89,6 +93,8 @@ python code/registration/batch_register_7T_to_3T.py \
 python code/registration/batch_full_register_7T_to_3T.py \
   --input-dir data/processed_inputs \
   --output-dir data/registered_7T_in_3T \
+  --show-temporal-frame-progress \
+  --temporal-timing-report data/reports/temporal_timing.csv \
   --final-only \
   --fixed-suffix _3T \
   --moving-suffix _7T

@@ -44,6 +44,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase-z-name", default="input_phase_z_raw.nii.gz")
 
     parser.add_argument("--temporal-reg-type", default="Rigid", help="Temporal registration transform type")
+    parser.add_argument(
+        "--show-temporal-frame-progress",
+        action="store_true",
+        help="Show per-frame progress messages during temporal registration",
+    )
+    parser.add_argument(
+        "--temporal-timing-report",
+        default=None,
+        help="Optional CSV path for temporal per-patient timing report",
+    )
     parser.add_argument("--interscan-reg-type", default="antsRegistrationSyN[a]")
     parser.add_argument("--mask-method", choices=["ants", "hdbet"], default="ants")
     parser.add_argument("--device", default="cpu", help="For HD-BET: cpu/mps/cuda")
@@ -170,6 +180,12 @@ def main() -> None:
         "--reg-type",
         args.temporal_reg_type,
     ]
+    if args.show_temporal_frame_progress:
+        temporal_cmd.append("--show-frame-progress")
+    if args.temporal_timing_report:
+        temporal_cmd.extend(["--timing-report", args.temporal_timing_report])
+    if args.verbose:
+        temporal_cmd.append("--verbose")
 
     print("== Stage 1/2: Temporal registration ==")
     rc = run_command(temporal_cmd, args.dry_run)

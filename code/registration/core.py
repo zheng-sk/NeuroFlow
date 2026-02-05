@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import time
 import traceback
 
 import ants
@@ -25,6 +26,8 @@ def register_4d_nifti(
     interpolator: str = "linear",
     qc_frames_str: str = "0,50,99",
     verbose: bool = False,
+    show_frame_progress: bool = False,
+    progress_label: str | None = None,
 ):
     """Register each frame of a 4D NIfTI to one reference frame and return transforms."""
     try:
@@ -45,6 +48,7 @@ def register_4d_nifti(
 
         warped_frames = [None] * total_frames
         warped_frames[ref_t] = reference
+        registered_count = 1
 
         transforms_map = [None] * total_frames
         transforms_map[ref_t] = []
@@ -52,6 +56,8 @@ def register_4d_nifti(
         for t in range(total_frames):
             if t == ref_t:
                 continue
+
+            frame_start = time.perf_counter()
 
             moving = frame3d_from_4d(image_4d, t)
             registration = ants.registration(
@@ -71,6 +77,15 @@ def register_4d_nifti(
                 transformlist=registration["fwdtransforms"],
                 interpolator=interpolator,
             )
+            registered_count += 1
+
+            if show_frame_progress:
+                elapsed = time.perf_counter() - frame_start
+                prefix = progress_label or os.path.basename(input_path)
+                print(
+                    f"[TEMPORAL] {prefix}: frame {t + 1}/{total_frames} "
+                    f"(completed {registered_count}/{total_frames}) in {elapsed:.2f}s"
+                )
 
         ants.image_write(stack_4d(warped_frames, image_4d), output_path)
 

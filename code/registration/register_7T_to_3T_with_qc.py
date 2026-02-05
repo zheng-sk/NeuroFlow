@@ -350,6 +350,16 @@ def parse_args():
     p.add_argument("--verbose", action="store_true")
 
     p.add_argument("--qc_frames", default="0,50,99", help="Which time frames to QC as comma-separated indices (e.g., 0,10,20)")
+    p.add_argument(
+        "--save_brain_masks",
+        action="store_true",
+        help="Persist the 3T and 7T brain masks estimated for registration",
+    )
+    p.add_argument(
+        "--brain_mask_dir",
+        default=None,
+        help="Directory where brain masks are saved (default: <out_dir>/BrainMasks)",
+    )
     return p.parse_args()
 
 
@@ -399,6 +409,12 @@ def main():
     else:
         fixed_mask  = mask_from_ants(fixed_ref)
         moving_mask = mask_from_ants(moving_ref)
+
+    if args.save_brain_masks:
+        mask_dir = args.brain_mask_dir or os.path.join(args.out_dir, "BrainMasks")
+        ensure_dir(mask_dir)
+        ants.image_write(fixed_mask, os.path.join(mask_dir, "fixed_3T_mask_ref.nii.gz"))
+        ants.image_write(moving_mask, os.path.join(mask_dir, "moving_7T_mask_ref.nii.gz"))
 
     # Preprocess for estimation only
     fixed_n4 = ants.n4_bias_field_correction(fixed_ref,  mask=fixed_mask,  shrink_factor=4, rescale_intensities=True)
@@ -470,6 +486,10 @@ def main():
     fixed_geom = frame3d_from_4d(fixed4d, 0)  # exact 3T grid to write into
     fixed_ref_geom = ants.resample_image_to_target(fixed_ref, fixed_geom, interp_type=1)
     mask_fixed_geom = ants.resample_image_to_target(fixed_mask, fixed_geom, interp_type=0)
+
+    if args.save_brain_masks:
+        mask_dir = args.brain_mask_dir or os.path.join(args.out_dir, "BrainMasks")
+        ants.image_write(mask_fixed_geom, os.path.join(mask_dir, "fixed_3T_mask_output_grid.nii.gz"))
 
     mad_before_list = []
     mad_after_list  = []
@@ -601,6 +621,13 @@ def main():
         for pth in txlist_persist:
             f.write(pth + "\n")
         f.write("\n")
+
+        if args.save_brain_masks:
+            mask_dir = args.brain_mask_dir or os.path.join(args.out_dir, "BrainMasks")
+            f.write("=== Brain masks ===\n")
+            f.write(os.path.join(mask_dir, "fixed_3T_mask_ref.nii.gz") + "\n")
+            f.write(os.path.join(mask_dir, "moving_7T_mask_ref.nii.gz") + "\n")
+            f.write(os.path.join(mask_dir, "fixed_3T_mask_output_grid.nii.gz") + "\n\n")
 
         f.write("=== Per-frame QC (MAG) ===\n")
         f.write(f"MAD before: min/median/max = {np.min(mad_before_list):.6f} / {np.median(mad_before_list):.6f} / {np.max(mad_before_list):.6f}\n")

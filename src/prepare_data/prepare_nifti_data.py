@@ -30,17 +30,27 @@ def convert_raw_to_velocity_if_needed(data, venc, invert_sign=False, name="Compo
     If so, converts to physical velocity (m/s).
     Also applies semantic sign inversion (LPS->RAS) if requested.
     """
-    # Heuristic: Raw phase is unsigned ~12bit (0-4096), mean around 2048.
-    # Velocity data usually is centered at 0 and small range (-VENC to +VENC).
+    # Heuristic:
+    # - Unsigned raw phase: ~0..4096, centered near 2048
+    # - Signed raw phase:   ~-4096..4096 (or ~-2048..2048), centered near 0
+    # Velocity data is usually already around (-VENC..+VENC).
     mn, mx = np.min(data), np.max(data)
-    
-    is_raw = (mn >= 0) and (mx > 1000) and (mx <= 4096*2) # *2 margin just in case
-    
-    if is_raw and venc is not None:
+
+    is_unsigned_raw = (mn >= 0) and (mx > 1000) and (mx <= 8192)
+    max_abs = max(abs(float(mn)), abs(float(mx)))
+    centered_ratio = abs(float(mx + mn)) / (max_abs + 1e-6)
+    is_signed_raw = (mn < -500) and (mx > 500) and (max_abs <= 8192) and (centered_ratio < 0.25)
+
+    if (is_unsigned_raw or is_signed_raw) and venc is not None:
         print(f"   [{name}] Raw intensity detected ({mn:.0f}..{mx:.0f}). Converting to m/s with VENC={venc}...")
-        # Formula: (val - 2048) / 2048 * VENC
-        data = (data.astype(np.float32) - 2048.0) / 2048.0 * venc
-        
+        if is_unsigned_raw:
+            # Formula for unsigned raw phase: (val - 2048) / 2048 * VENC
+            data = (data.astype(np.float32) - 2048.0) / 2048.0 * venc
+        else:
+            # Signed raw phase can be either ~[-4096,4096] or ~[-2048,2048].
+            scale = 4096.0 if max_abs > 3000 else 2048.0
+            data = data.astype(np.float32) / scale * venc
+
         if invert_sign:
             print(f"   [{name}] applying LPS->RAS sign inversion (-1).")
             data = -data

@@ -358,7 +358,11 @@ class NiftiInferenceDataset:
     def _looks_like_raw_phase(values: np.ndarray) -> bool:
         mn = float(np.min(values))
         mx = float(np.max(values))
-        return mn >= 0.0 and mx > 1000.0 and mx <= 8192.0
+        is_unsigned_raw = mn >= 0.0 and mx > 1000.0 and mx <= 8192.0
+        max_abs = max(abs(mn), abs(mx))
+        centered_ratio = abs(mx + mn) / (max_abs + 1e-6)
+        is_signed_raw = mn < -500.0 and mx > 500.0 and max_abs <= 8192.0 and centered_ratio < 0.25
+        return is_unsigned_raw or is_signed_raw
 
     def _convert_raw_if_needed(self, values: np.ndarray, venc_component: float, invert_sign: bool, label: str) -> np.ndarray:
         if not self.auto_convert_raw_phase:
@@ -367,7 +371,15 @@ class NiftiInferenceDataset:
             return values
         if venc_component is None or venc_component <= 0:
             raise ValueError(f"Cannot convert raw phase for {label}: invalid VENC ({venc_component}).")
-        converted = (values.astype(np.float32) - 2048.0) / 2048.0 * float(venc_component)
+        mn = float(np.min(values))
+        mx = float(np.max(values))
+        is_unsigned_raw = mn >= 0.0
+        if is_unsigned_raw:
+            converted = (values.astype(np.float32) - 2048.0) / 2048.0 * float(venc_component)
+        else:
+            max_abs = max(abs(mn), abs(mx))
+            scale = 4096.0 if max_abs > 3000.0 else 2048.0
+            converted = values.astype(np.float32) / scale * float(venc_component)
         if invert_sign:
             converted = -converted
         return converted

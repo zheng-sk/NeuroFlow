@@ -110,7 +110,11 @@ def discover_files(input_root: str, names: list[str], recursive: bool) -> list[s
 
 
 def guess_mode(min_value: float, max_value: float) -> str:
-    if min_value >= 0.0 and max_value > 1000.0 and max_value <= 8192.0:
+    is_unsigned_raw = min_value >= 0.0 and max_value > 1000.0 and max_value <= 8192.0
+    max_abs = max(abs(min_value), abs(max_value))
+    centered_ratio = abs(max_value + min_value) / (max_abs + 1e-6)
+    is_signed_raw = min_value < -500.0 and max_value > 500.0 and max_abs <= 8192.0 and centered_ratio < 0.25
+    if is_unsigned_raw or is_signed_raw:
         return "raw"
     return "velocity"
 

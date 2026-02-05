@@ -55,6 +55,12 @@ code/
    - Device controls: `--device auto|cpu|gpu` and `--gpu-memory-limit-mb <int>`
    - Apple Metal safety: CPU fallback on GPU errors is enabled by default (disable with `--no-cpu-fallback-on-gpu-error`)
 
+## Raw phase conversion behavior
+
+- **H5 workflow (`nifti_to_h5`)**: raw phase to m/s conversion is applied during NIfTI -> H5 conversion in `src/prepare_data/prepare_nifti_data.py`.
+- **Direct NIfTI inference workflow**: raw phase to m/s conversion is applied at prediction time only when `--auto-convert-raw-phase` is enabled.
+- Both workflows support **unsigned raw phase** (`~0..4096`) and **signed raw phase** (`~-4096..4096` / `~-2048..2048`), using VENC.
+
 ## Legacy compatible entrypoints
 
 You can still use the old script names in `code/`:
@@ -144,71 +150,117 @@ python code/registration/check_phase_ranges.py \
   --csv-report data/reports/phase_range_check.csv \
   --verbose
 
-# 8) Batch inference from H5 (legacy/original workflow)
+# 7b) Validate signed raw phase ranges (e.g., approximately -4096..4096)
+python code/registration/check_phase_ranges.py \
+  --input-root data/paired_dataset/hr_7t_in_3t \
+  --recursive \
+  --expected-mode raw \
+  --raw-min -4096 \
+  --raw-max 4096 \
+  --csv-report data/reports/phase_range_check_raw_signed.csv
+
+# 8) Prepare H5 inputs from paired LR NIfTI (for H5 prediction workflow)
+python code/conversion/nifti_to_h5.py \
+  --input-root data/paired_dataset/lr_3t \
+  --output-dir data/paired_dataset/h5_lr \
+  --venc 0.90
+
+# 9) H5 prediction (batch, CUDA GPU)
 python code/inference/batch_predict.py \
   --input-format h5 \
   --output-format h5 \
-  --input-dir data/h5_lr \
-  --output-dir data/predictions_h5 \
+  --input-dir data/paired_dataset/h5_lr \
+  --h5-pattern "*_3T.h5" \
+  --output-dir data/predictions_h5_3t_gpu \
+  --batch-size 8 \
+  --res-increase 2 \
   --show-patch-progress \
-  --timing-report data/reports/predict_h5_timing.csv
+  --verbose \
+  --timing-report data/reports/predict_h5_3t_gpu.csv \
+  --device gpu
 
-# 9) Batch inference directly from NIfTI (no H5 conversion)
+# 10) H5 prediction (batch, CPU fallback-safe)
+python code/inference/batch_predict.py \
+  --input-format h5 \
+  --output-format h5 \
+  --input-dir data/paired_dataset/h5_lr \
+  --h5-pattern "*_3T.h5" \
+  --output-dir data/predictions_h5_3t_cpu \
+  --batch-size 2 \
+  --res-increase 2 \
+  --show-patch-progress \
+  --verbose \
+  --timing-report data/reports/predict_h5_3t_cpu.csv \
+  --device cpu
+
+# 11) Direct NIfTI prediction (batch, 3T only, CUDA GPU, SR x2)
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \
-  --input-dir data/registered_7T_in_3T/_temporal_registered \
-  --output-dir data/predictions_nifti \
+  --input-dir data/paired_dataset/lr_3t \
+  --output-dir data/predictions_nifti_3t_gpu_sr2 \
   --recursive \
-  --case-suffix _3T \
+  --case-suffix '' \
   --u-name Vx.nii.gz \
   --v-name Vy.nii.gz \
   --w-name Vz.nii.gz \
   --mag-name input_mag_raw.nii.gz \
+  --batch-size 4 \
+  --res-increase 2 \
   --show-patch-progress \
-  --timing-report data/reports/predict_nifti_timing.csv \
-  --device auto \
+  --verbose \
+  --timing-report data/reports/predict_nifti_3t_gpu_sr2.csv \
+  --device gpu
+
+# 12) Direct NIfTI prediction (batch, 3T only, same-resolution mode SR x1)
+python code/inference/batch_predict.py \
+  --input-format nifti \
+  --output-format nifti \
+  --input-dir data/paired_dataset/lr_3t \
+  --output-dir data/predictions_nifti_3t_gpu_sr1 \
+  --recursive \
+  --case-suffix '' \
+  --u-name Vx.nii.gz \
+  --v-name Vy.nii.gz \
+  --w-name Vz.nii.gz \
+  --mag-name input_mag_raw.nii.gz \
+  --batch-size 4 \
+  --res-increase 1 \
+  --show-patch-progress \
+  --verbose \
+  --timing-report data/reports/predict_nifti_3t_gpu_sr1.csv \
+  --device gpu
+
+# 13) Direct NIfTI prediction with raw-phase conversion enabled (use only for raw phase inputs)
+python code/inference/batch_predict.py \
+  --input-format nifti \
+  --output-format nifti \
+  --input-dir data/paired_dataset/lr_3t \
+  --output-dir data/predictions_nifti_3t_gpu_raw \
+  --recursive \
+  --case-suffix '' \
+  --u-name Vx.nii.gz \
+  --v-name Vy.nii.gz \
+  --w-name Vz.nii.gz \
+  --mag-name input_mag_raw.nii.gz \
+  --batch-size 4 \
+  --res-increase 2 \
+  --show-patch-progress \
+  --timing-report data/reports/predict_nifti_3t_gpu_raw.csv \
+  --device gpu \
+  --auto-convert-raw-phase \
   --venc 0.90
 
-# 10) Single-case test in direct NIfTI mode (no --recursive)
+# 14) Single-case direct NIfTI prediction (quick debug)
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \
   --input-dir data/registered_7T_in_3T/_temporal_registered/001_20240313_3T \
   --output-dir data/predictions_nifti_single \
+  --batch-size 1 \
+  --res-increase 2 \
   --show-patch-progress \
   --verbose \
-  --device auto \
-  --venc 0.90
-
-# 11) If Apple Metal GPU crashes (InnocentVictim), force CPU
-python code/inference/batch_predict.py \
-  --input-format nifti \
-  --output-format nifti \
-  --input-dir data/registered_7T_in_3T/_temporal_registered/001_20240313_3T \
-  --output-dir data/predictions_nifti_single_cpu \
-  --batch-size 1 \
-  --device cpu \
-  --venc 0.90
-
-# 12) Apple Metal with conservative GPU memory limit
-python code/inference/batch_predict.py \
-  --input-format nifti \
-  --output-format nifti \
-  --input-dir data/registered_7T_in_3T/_temporal_registered/001_20240313_3T \
-  --output-dir data/predictions_nifti_single_gpu \
-  --batch-size 1 \
-  --device gpu \
-  --gpu-memory-limit-mb 4096 \
-  --venc 0.90
-
-# 13) Disable automatic CPU fallback (debug only)
-python code/inference/batch_predict.py \
-  --input-format nifti \
-  --output-format nifti \
-  --input-dir data/registered_7T_in_3T/_temporal_registered/001_20240313_3T \
-  --output-dir data/predictions_nifti_single_gpu_nofallback \
-  --device gpu \
-  --no-cpu-fallback-on-gpu-error \
-  --venc 0.90
+  --timing-report data/reports/predict_nifti_single.csv \
+  --device gpu
 ```

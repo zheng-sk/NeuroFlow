@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import platform
 import sys
 import tempfile
 import time
@@ -78,8 +79,42 @@ def resolve_model_path(model_path: Path) -> Path | None:
     return fallback
 
 
+def is_metal_gpu_error(message: str) -> bool:
+    markers = (
+        "kIOGPUCommandBufferCallbackError",
+        "Metal Performance Shaders operations encoded on it may not have completed",
+        "GPU Address Fault Error",
+        "command buffer exited with error status",
+    )
+    return any(marker in message for marker in markers)
+
+
+class ModelExecutor:
+    """Wraps model prediction with optional GPU->CPU fallback on Apple Metal faults."""
+
+    def __init__(self, primary_model: tf.keras.Model, cpu_fallback_model: tf.keras.Model | None = None):
+        self._model = primary_model
+        self._cpu_fallback_model = cpu_fallback_model
+        self.using_cpu_fallback = False
+
+    def predict(self, inputs) -> np.ndarray:
+        try:
+            outputs = self._model(inputs, training=False)
+            return outputs.numpy() if hasattr(outputs, "numpy") else np.asarray(outputs)
+        except Exception as exc:
+            message = str(exc)
+            if self._cpu_fallback_model is not None and is_metal_gpu_error(message):
+                print("Warning: Metal GPU error detected. Switching to CPU fallback model and continuing.")
+                self._model = self._cpu_fallback_model
+                self._cpu_fallback_model = None
+                self.using_cpu_fallback = True
+                outputs = self._model(inputs, training=False)
+                return outputs.numpy() if hasattr(outputs, "numpy") else np.asarray(outputs)
+            raise
+
+
 def infer_frame_components(
-    model: tf.keras.Model,
+    model_executor: ModelExecutor,
     patch_generator: PatchGenerator,
     dataset,
     batch_size: int,
@@ -102,7 +137,7 @@ def infer_frame_components(
     for start in iterator:
         patch_slice = np.index_exp[start : start + batch_size]
         prediction_chunks.append(
-            model.predict(
+            model_executor.predict(
                 [
                     velocities[0][patch_slice],
                     velocities[1][patch_slice],
@@ -110,8 +145,7 @@ def infer_frame_components(
                     magnitudes[0][patch_slice],
                     magnitudes[1][patch_slice],
                     magnitudes[2][patch_slice],
-                ],
-                verbose=0,
+                ]
             )
         )
 
@@ -135,7 +169,7 @@ def infer_frame_components(
 
 
 def predict_patient_h5(
-    model: tf.keras.Model,
+    model_executor: ModelExecutor,
     input_filepath: str,
     output_filepath: str,
     patch_size: int,
@@ -163,7 +197,7 @@ def predict_patient_h5(
         print(f"   Frame {frame_idx + 1}/{num_frames} ...")
         dataset.load_vectorfield(input_filepath, frame_idx)
         comp_u, comp_v, comp_w = infer_frame_components(
-            model=model,
+            model_executor=model_executor,
             patch_generator=patch_generator,
             dataset=dataset,
             batch_size=batch_size,
@@ -436,6 +470,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR, help="Input root directory")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory for results")
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH, help="Path to model weights (.h5)")
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "gpu"],
+        default="auto",
+        help="TensorFlow execution device preference (auto uses GPU when available)",
+    )
+    parser.add_argument(
+        "--gpu-memory-limit-mb",
+        type=int,
+        default=None,
+        help="Optional GPU logical memory limit in MB (useful on Apple Metal if GPU resets)",
+    )
+    parser.add_argument(
+        "--no-cpu-fallback-on-gpu-error",
+        action="store_false",
+        dest="cpu_fallback_on_gpu_error",
+        help="Disable automatic CPU fallback if Apple Metal GPU fails during prediction",
+    )
+    parser.set_defaults(cpu_fallback_on_gpu_error=True)
 
     parser.add_argument("--input-format", choices=["h5", "nifti"], default="h5")
     parser.add_argument(
@@ -461,23 +514,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recursive", action="store_true", help="Recursively discover NIfTI cases")
     parser.add_argument(
         "--u-name",
-        default="phaseX_7T_in_3T.nii.gz",
+        default="Vx.nii.gz",
         help="Velocity U filename inside each NIfTI case folder",
     )
     parser.add_argument(
         "--v-name",
-        default="phaseY_7T_in_3T.nii.gz",
+        default="Vy.nii.gz",
         help="Velocity V filename inside each NIfTI case folder",
     )
     parser.add_argument(
         "--w-name",
-        default="phaseZ_7T_in_3T.nii.gz",
+        default="Vz.nii.gz",
         help="Velocity W filename inside each NIfTI case folder",
     )
     parser.add_argument(
         "--mag-name",
-        default="mag_7T_in_3T.nii.gz",
+        default="input_mag_raw.nii.gz",
         help="Shared magnitude filename for all components",
+    )
+    parser.add_argument(
+        "--case-suffix",
+        default="_3T",
+        help="Only process NIfTI case folders ending with this suffix (empty string = no filter)",
     )
     parser.add_argument("--mag-u-name", default=None, help="Per-component magnitude U filename (overrides --mag-name)")
     parser.add_argument("--mag-v-name", default=None, help="Per-component magnitude V filename (overrides --mag-name)")
@@ -503,6 +561,78 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def configure_tensorflow(device_mode: str, gpu_memory_limit_mb: int | None) -> None:
+    """Configure TensorFlow device usage before model creation."""
+    gpus = tf.config.list_physical_devices("GPU")
+
+    if device_mode == "cpu":
+        if gpus:
+            tf.config.set_visible_devices([], "GPU")
+        print("TensorFlow device mode: CPU")
+        return
+
+    if device_mode == "gpu":
+        if not gpus:
+            raise SystemExit("Requested --device gpu but no GPU was detected by TensorFlow.")
+        print(f"TensorFlow device mode: GPU ({len(gpus)} detected)")
+    else:
+        if gpus:
+            print(f"TensorFlow device mode: AUTO -> GPU ({len(gpus)} detected)")
+        else:
+            print("TensorFlow device mode: AUTO -> CPU (no GPU detected)")
+
+    if gpus and gpu_memory_limit_mb is not None:
+        try:
+            tf.config.set_logical_device_configuration(
+                gpus[0],
+                [tf.config.LogicalDeviceConfiguration(memory_limit=gpu_memory_limit_mb)],
+            )
+            print(f"Configured GPU memory limit: {gpu_memory_limit_mb} MB")
+        except Exception as exc:  # pragma: no cover - depends on backend support
+            print(f"Warning: could not set GPU memory limit ({exc})")
+
+
+def build_model_with_weights(
+    model_path: Path,
+    patch_size: int,
+    res_increase: int,
+    force_cpu: bool = False,
+) -> tf.keras.Model:
+    if force_cpu:
+        with tf.device("/CPU:0"):
+            model = prepare_network(patch_size, res_increase, 8, 4)
+            model.load_weights(str(model_path))
+            return model
+
+    model = prepare_network(patch_size, res_increase, 8, 4)
+    model.load_weights(str(model_path))
+    return model
+
+
+def create_model_executor(args: argparse.Namespace, model_path: Path) -> ModelExecutor:
+    print(f"--- Loading Model: {model_path.name} ---")
+    primary_model = build_model_with_weights(
+        model_path=model_path,
+        patch_size=args.patch_size,
+        res_increase=args.res_increase,
+        force_cpu=(args.device == "cpu"),
+    )
+
+    cpu_fallback_model = None
+    wants_fallback = args.cpu_fallback_on_gpu_error and args.device != "cpu"
+    if wants_fallback:
+        print("Preparing CPU fallback model for GPU fault tolerance...")
+        cpu_fallback_model = build_model_with_weights(
+            model_path=model_path,
+            patch_size=args.patch_size,
+            res_increase=args.res_increase,
+            force_cpu=True,
+        )
+
+    print("Model loaded successfully.")
+    return ModelExecutor(primary_model=primary_model, cpu_fallback_model=cpu_fallback_model)
+
+
 def resolve_mag_paths(case_dir: Path, args: argparse.Namespace) -> tuple[Path | None, Path | None, Path | None]:
     mag_u_path = case_dir / args.mag_u_name if args.mag_u_name else None
     mag_v_path = case_dir / args.mag_v_name if args.mag_v_name else None
@@ -521,17 +651,22 @@ def resolve_mag_paths(case_dir: Path, args: argparse.Namespace) -> tuple[Path | 
 
 def discover_nifti_cases(input_dir: Path, args: argparse.Namespace) -> list[NiftiCase]:
     case_dirs: list[Path] = []
+    suffix_filter = args.case_suffix or ""
+
+    def allowed_case_dir(path: Path) -> bool:
+        return not suffix_filter or path.name.endswith(suffix_filter)
 
     if args.recursive:
         for root, _dirs, files in os.walk(input_dir):
             names = set(files)
-            if args.u_name in names and args.v_name in names and args.w_name in names:
-                case_dirs.append(Path(root))
+            root_path = Path(root)
+            if args.u_name in names and args.v_name in names and args.w_name in names and allowed_case_dir(root_path):
+                case_dirs.append(root_path)
     else:
         root_names = {p.name for p in input_dir.iterdir() if p.is_file()}
-        if args.u_name in root_names and args.v_name in root_names and args.w_name in root_names:
+        if args.u_name in root_names and args.v_name in root_names and args.w_name in root_names and allowed_case_dir(input_dir):
             case_dirs.append(input_dir)
-        case_dirs.extend(sorted(path for path in input_dir.iterdir() if path.is_dir()))
+        case_dirs.extend(sorted(path for path in input_dir.iterdir() if path.is_dir() and allowed_case_dir(path)))
 
     cases: list[NiftiCase] = []
     for case_dir in sorted(case_dirs):
@@ -563,7 +698,7 @@ def discover_nifti_cases(input_dir: Path, args: argparse.Namespace) -> list[Nift
 
 
 def predict_case_nifti(
-    model: tf.keras.Model,
+    model_executor: ModelExecutor,
     case: NiftiCase,
     output_dir: Path,
     args: argparse.Namespace,
@@ -595,7 +730,7 @@ def predict_case_nifti(
             print(f"   Frame {frame_idx + 1}/{num_frames} ...")
             dataset.load_vectorfield(frame_idx)
             comp_u, comp_v, comp_w = infer_frame_components(
-                model=model,
+                model_executor=model_executor,
                 patch_generator=patch_generator,
                 dataset=dataset,
                 batch_size=args.batch_size,
@@ -625,7 +760,7 @@ def predict_case_nifti(
             print(f"   Frame {frame_idx + 1}/{num_frames} ...")
             dataset.load_vectorfield(frame_idx)
             comp_u, comp_v, comp_w = infer_frame_components(
-                model=model,
+                model_executor=model_executor,
                 patch_generator=patch_generator,
                 dataset=dataset,
                 batch_size=args.batch_size,
@@ -693,14 +828,18 @@ def main() -> None:
         print(f"Error: input directory not found: {args.input_dir}")
         return
 
+    if args.device == "gpu" and platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64"):
+        print("Note: Apple Metal GPU mode can be unstable in some TensorFlow builds.")
+        if args.cpu_fallback_on_gpu_error:
+            print("CPU fallback on GPU faults is enabled.")
+
+    configure_tensorflow(args.device, args.gpu_memory_limit_mb)
+
     model_path = resolve_model_path(args.model_path)
     if model_path is None:
         return
 
-    print(f"--- Loading Model: {model_path.name} ---")
-    model = prepare_network(args.patch_size, args.res_increase, 8, 4)
-    model.load_weights(str(model_path))
-    print("Model loaded successfully.")
+    model_executor = create_model_executor(args, model_path)
 
     if args.input_format == "h5":
         if output_format != "h5":
@@ -721,7 +860,7 @@ def main() -> None:
             start = time.time()
             try:
                 frames, seconds = predict_patient_h5(
-                    model=model,
+                    model_executor=model_executor,
                     input_filepath=str(input_path),
                     output_filepath=str(output_path),
                     patch_size=args.patch_size,
@@ -738,6 +877,11 @@ def main() -> None:
                 seconds = time.time() - start
                 status = f"failed:{type(exc).__name__}"
                 print(f"[FAIL] {input_path.name}: {exc}")
+                if is_metal_gpu_error(str(exc)):
+                    print(
+                        "Hint: Apple Metal GPU reset detected. Retry with "
+                        "`--device cpu` or keep GPU fallback enabled."
+                    )
 
             timing_rows.append(
                 ",".join(
@@ -761,7 +905,8 @@ def main() -> None:
     if not cases:
         print(
             "No NIfTI cases found. Expected per-case files: "
-            f"{args.u_name}, {args.v_name}, {args.w_name}, and magnitude file(s)."
+            f"{args.u_name}, {args.v_name}, {args.w_name}, and magnitude file(s). "
+            f"Current case filter: suffix='{args.case_suffix}'."
         )
         return
     if args.auto_convert_raw_phase and all(value is None for value in (args.venc, args.venc_u, args.venc_v, args.venc_w)):
@@ -777,7 +922,7 @@ def main() -> None:
         out_location = str(args.output_dir / case.rel_path)
         try:
             frames, seconds, out_location = predict_case_nifti(
-                model=model,
+                model_executor=model_executor,
                 case=case,
                 output_dir=args.output_dir,
                 args=args,
@@ -790,6 +935,11 @@ def main() -> None:
             seconds = time.time() - start
             status = f"failed:{type(exc).__name__}"
             print(f"[FAIL] {case.rel_path}: {exc}")
+            if is_metal_gpu_error(str(exc)):
+                print(
+                    "Hint: Apple Metal GPU reset detected. Retry with "
+                    "`--device cpu` or keep GPU fallback enabled."
+                )
         timing_rows.append(
             ",".join(
                 [

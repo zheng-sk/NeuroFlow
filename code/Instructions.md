@@ -33,15 +33,23 @@ code/
    - Use `--force-temporal` to force recomputation of temporal registration
    - Optional `--final-only` validates that all final 4D registered outputs exist per case before cleanup
    - Optional temporal telemetry: `--show-temporal-frame-progress` and `--temporal-timing-report <csv_path>`
-6. **(Optional) NIfTI -> H5**
+6. **(Optional) Export paired LR/HR NIfTI dataset**
+   - Script: `code/registration/export_paired_lr_hr_dataset.py`
+   - Creates two folders: `lr_3t/` (temporally registered 3T) and `hr_7t_in_3t/` (7T registered into 3T space)
+   - Writes paired CSV compatible with `data/nifti_cases_template.csv`
+7. **(Optional) NIfTI -> H5**
    - Script: `code/conversion/nifti_to_h5.py`
-7. **(Optional) Batch inference**
+8. **(Optional) Batch inference**
    - Script: `code/inference/batch_predict.py`
    - Supports `--input-format h5|nifti` and `--output-format h5|nifti`
    - Direct NIfTI mode bypasses H5 conversion and writes `u_SR.nii.gz`, `v_SR.nii.gz`, `w_SR.nii.gz`
-   - Defaults are connected to new registered outputs: `phaseX_7T_in_3T.nii.gz`, `phaseY_7T_in_3T.nii.gz`, `phaseZ_7T_in_3T.nii.gz`, `mag_7T_in_3T.nii.gz`
+   - Defaults are connected to **temporally registered 3T (LowRes)** inputs: `Vx.nii.gz`, `Vy.nii.gz`, `Vz.nii.gz`, `input_mag_raw.nii.gz`
+   - By default only `*_3T` folders are inferred (`--case-suffix _3T`)
+   - For evaluation on high-res aligned data, override with `--case-suffix _7T` and custom filenames
    - Optional raw-phase preprocessing in direct NIfTI mode: `--auto-convert-raw-phase` with `--venc` (or per-axis VENC)
    - Progress/timing options: `--show-patch-progress`, `--verbose`, `--timing-report <csv_path>`
+   - Device controls: `--device auto|cpu|gpu` and `--gpu-memory-limit-mb <int>`
+   - Apple Metal safety: CPU fallback on GPU errors is enabled by default (disable with `--no-cpu-fallback-on-gpu-error`)
 
 ## Legacy compatible entrypoints
 
@@ -49,7 +57,8 @@ You can still use the old script names in `code/`:
 - `convert2nifti2.py`, `calculate_mag.py`, `batch_register_magnitude.py`,
   `batch_temporal_register.py`, `temporal_register_to_t0.py`,
   `convert_to_h5.py`, `batch_predict.py`, `register_7T_to_3T_with_qc.py`,
-  `batch_register_7T_to_3T.py`, `batch_full_register_7T_to_3T.py`.
+  `batch_register_7T_to_3T.py`, `batch_full_register_7T_to_3T.py`,
+  `export_paired_lr_hr_dataset.py`.
 
 These wrappers redirect to the reorganized modules.
 
@@ -113,7 +122,16 @@ python code/registration/batch_full_register_7T_to_3T.py \
   --fixed-suffix _3T \
   --moving-suffix _7T
 
-# 6) Batch inference from H5 (legacy/original workflow)
+# 6) Export paired LR/HR folders + CSV for training/prediction
+python code/registration/export_paired_lr_hr_dataset.py \
+  --temporal-dir data/registered_7T_in_3T/_temporal_registered \
+  --registered-dir data/registered_7T_in_3T \
+  --output-root data/paired_dataset \
+  --mode copy \
+  --venc 0.90 \
+  --csv-path data/paired_dataset/paired_nifti_cases.csv
+
+# 7) Batch inference from H5 (legacy/original workflow)
 python code/inference/batch_predict.py \
   --input-format h5 \
   --output-format h5 \
@@ -122,28 +140,62 @@ python code/inference/batch_predict.py \
   --show-patch-progress \
   --timing-report data/reports/predict_h5_timing.csv
 
-# 7) Batch inference directly from NIfTI (no H5 conversion)
+# 8) Batch inference directly from NIfTI (no H5 conversion)
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \
-  --input-dir data/registered_cases \
+  --input-dir data/registered_7T_in_3T/_temporal_registered \
   --output-dir data/predictions_nifti \
   --recursive \
-  --u-name phaseX_7T_in_3T.nii.gz \
-  --v-name phaseY_7T_in_3T.nii.gz \
-  --w-name phaseZ_7T_in_3T.nii.gz \
-  --mag-name mag_7T_in_3T.nii.gz \
+  --case-suffix _3T \
+  --u-name Vx.nii.gz \
+  --v-name Vy.nii.gz \
+  --w-name Vz.nii.gz \
+  --mag-name input_mag_raw.nii.gz \
   --show-patch-progress \
   --timing-report data/reports/predict_nifti_timing.csv \
+  --device auto \
   --venc 0.90
 
-# 8) Single-case test in direct NIfTI mode (no --recursive)
+# 9) Single-case test in direct NIfTI mode (no --recursive)
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \
-  --input-dir data/registered_7T_in_3T/001_20240313 \
+  --input-dir data/registered_7T_in_3T/_temporal_registered/001_20240313_3T \
   --output-dir data/predictions_nifti_single \
   --show-patch-progress \
   --verbose \
+  --device auto \
+  --venc 0.90
+
+# 10) If Apple Metal GPU crashes (InnocentVictim), force CPU
+python code/inference/batch_predict.py \
+  --input-format nifti \
+  --output-format nifti \
+  --input-dir data/registered_7T_in_3T/_temporal_registered/001_20240313_3T \
+  --output-dir data/predictions_nifti_single_cpu \
+  --batch-size 1 \
+  --device cpu \
+  --venc 0.90
+
+# 11) Apple Metal with conservative GPU memory limit
+python code/inference/batch_predict.py \
+  --input-format nifti \
+  --output-format nifti \
+  --input-dir data/registered_7T_in_3T/_temporal_registered/001_20240313_3T \
+  --output-dir data/predictions_nifti_single_gpu \
+  --batch-size 1 \
+  --device gpu \
+  --gpu-memory-limit-mb 4096 \
+  --venc 0.90
+
+# 12) Disable automatic CPU fallback (debug only)
+python code/inference/batch_predict.py \
+  --input-format nifti \
+  --output-format nifti \
+  --input-dir data/registered_7T_in_3T/_temporal_registered/001_20240313_3T \
+  --output-dir data/predictions_nifti_single_gpu_nofallback \
+  --device gpu \
+  --no-cpu-fallback-on-gpu-error \
   --venc 0.90
 ```

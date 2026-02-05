@@ -39,7 +39,11 @@ code/
    - Writes paired CSV compatible with `data/nifti_cases_template.csv`
 7. **(Optional) NIfTI -> H5**
    - Script: `code/conversion/nifti_to_h5.py`
-8. **(Optional) Batch inference**
+8. **(Optional) Phase range quality check**
+   - Script: `code/registration/check_phase_ranges.py`
+   - Validates whether phase files look like raw phase (`0..4096`) or velocity (m/s)
+   - Prints per-file stats (`min/max/percentiles`) and summary, with optional CSV report
+9. **(Optional) Batch inference**
    - Script: `code/inference/batch_predict.py`
    - Supports `--input-format h5|nifti` and `--output-format h5|nifti`
    - Direct NIfTI mode bypasses H5 conversion and writes `u_SR.nii.gz`, `v_SR.nii.gz`, `w_SR.nii.gz`
@@ -131,7 +135,16 @@ python code/registration/export_paired_lr_hr_dataset.py \
   --venc 0.90 \
   --csv-path data/paired_dataset/paired_nifti_cases.csv
 
-# 7) Batch inference from H5 (legacy/original workflow)
+# 7) Validate phase ranges before conversion/prediction
+python code/registration/check_phase_ranges.py \
+  --input-root data/registered_7T_in_3T/_temporal_registered \
+  --recursive \
+  --expected-mode velocity \
+  --venc 0.90 \
+  --csv-report data/reports/phase_range_check.csv \
+  --verbose
+
+# 8) Batch inference from H5 (legacy/original workflow)
 python code/inference/batch_predict.py \
   --input-format h5 \
   --output-format h5 \
@@ -140,7 +153,7 @@ python code/inference/batch_predict.py \
   --show-patch-progress \
   --timing-report data/reports/predict_h5_timing.csv
 
-# 8) Batch inference directly from NIfTI (no H5 conversion)
+# 9) Batch inference directly from NIfTI (no H5 conversion)
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \
@@ -157,7 +170,7 @@ python code/inference/batch_predict.py \
   --device auto \
   --venc 0.90
 
-# 9) Single-case test in direct NIfTI mode (no --recursive)
+# 10) Single-case test in direct NIfTI mode (no --recursive)
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \
@@ -168,7 +181,7 @@ python code/inference/batch_predict.py \
   --device auto \
   --venc 0.90
 
-# 10) If Apple Metal GPU crashes (InnocentVictim), force CPU
+# 11) If Apple Metal GPU crashes (InnocentVictim), force CPU
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \
@@ -178,7 +191,7 @@ python code/inference/batch_predict.py \
   --device cpu \
   --venc 0.90
 
-# 11) Apple Metal with conservative GPU memory limit
+# 12) Apple Metal with conservative GPU memory limit
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \
@@ -189,7 +202,7 @@ python code/inference/batch_predict.py \
   --gpu-memory-limit-mb 4096 \
   --venc 0.90
 
-# 12) Disable automatic CPU fallback (debug only)
+# 13) Disable automatic CPU fallback (debug only)
 python code/inference/batch_predict.py \
   --input-format nifti \
   --output-format nifti \

@@ -25,15 +25,23 @@ code/
 4. **Inter-scan 7T -> 3T registration**
    - Per case: `code/registration/register_7T_to_3T_with_qc.py`
    - Batch over a folder: `code/registration/batch_register_7T_to_3T.py`
+   - Batch defaults expect temporally-registered velocity names: `Vx.nii.gz`, `Vy.nii.gz`, `Vz.nii.gz`
 5. **Full registration pipeline (temporal + 7T -> 3T)**
    - One command over a folder: `code/registration/batch_full_register_7T_to_3T.py`
    - Saves final registered images and brain masks (`BrainMasks/`), and can auto-clean intermediates/QC
+   - If `temporal-dir` already has the required files, temporal stage is skipped automatically
+   - Use `--force-temporal` to force recomputation of temporal registration
    - Optional `--final-only` validates that all final 4D registered outputs exist per case before cleanup
    - Optional temporal telemetry: `--show-temporal-frame-progress` and `--temporal-timing-report <csv_path>`
 6. **(Optional) NIfTI -> H5**
    - Script: `code/conversion/nifti_to_h5.py`
 7. **(Optional) Batch inference**
    - Script: `code/inference/batch_predict.py`
+   - Supports `--input-format h5|nifti` and `--output-format h5|nifti`
+   - Direct NIfTI mode bypasses H5 conversion and writes `u_SR.nii.gz`, `v_SR.nii.gz`, `w_SR.nii.gz`
+   - Defaults are connected to new registered outputs: `phaseX_7T_in_3T.nii.gz`, `phaseY_7T_in_3T.nii.gz`, `phaseZ_7T_in_3T.nii.gz`, `mag_7T_in_3T.nii.gz`
+   - Optional raw-phase preprocessing in direct NIfTI mode: `--auto-convert-raw-phase` with `--venc` (or per-axis VENC)
+   - Progress/timing options: `--show-patch-progress`, `--verbose`, `--timing-report <csv_path>`
 
 ## Legacy compatible entrypoints
 
@@ -86,6 +94,9 @@ python code/registration/register_7T_to_3T_with_qc.py \
 python code/registration/batch_register_7T_to_3T.py \
   --input-dir data/temporal_registered \
   --output-dir data/registered_7T_in_3T \
+  --phase-x-name Vx.nii.gz \
+  --phase-y-name Vy.nii.gz \
+  --phase-z-name Vz.nii.gz \
   --fixed-suffix _3T \
   --moving-suffix _7T
 
@@ -95,7 +106,44 @@ python code/registration/batch_full_register_7T_to_3T.py \
   --output-dir data/registered_7T_in_3T \
   --show-temporal-frame-progress \
   --temporal-timing-report data/reports/temporal_timing.csv \
+  --phase-x-name Vx.nii.gz \
+  --phase-y-name Vy.nii.gz \
+  --phase-z-name Vz.nii.gz \
   --final-only \
   --fixed-suffix _3T \
   --moving-suffix _7T
+
+# 6) Batch inference from H5 (legacy/original workflow)
+python code/inference/batch_predict.py \
+  --input-format h5 \
+  --output-format h5 \
+  --input-dir data/h5_lr \
+  --output-dir data/predictions_h5 \
+  --show-patch-progress \
+  --timing-report data/reports/predict_h5_timing.csv
+
+# 7) Batch inference directly from NIfTI (no H5 conversion)
+python code/inference/batch_predict.py \
+  --input-format nifti \
+  --output-format nifti \
+  --input-dir data/registered_cases \
+  --output-dir data/predictions_nifti \
+  --recursive \
+  --u-name phaseX_7T_in_3T.nii.gz \
+  --v-name phaseY_7T_in_3T.nii.gz \
+  --w-name phaseZ_7T_in_3T.nii.gz \
+  --mag-name mag_7T_in_3T.nii.gz \
+  --show-patch-progress \
+  --timing-report data/reports/predict_nifti_timing.csv \
+  --venc 0.90
+
+# 8) Single-case test in direct NIfTI mode (no --recursive)
+python code/inference/batch_predict.py \
+  --input-format nifti \
+  --output-format nifti \
+  --input-dir data/registered_7T_in_3T/001_20240313 \
+  --output-dir data/predictions_nifti_single \
+  --show-patch-progress \
+  --verbose \
+  --venc 0.90
 ```

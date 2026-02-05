@@ -39,9 +39,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fixed-mag-name", default="input_mag_raw.nii.gz")
     parser.add_argument("--moving-mag-name", default="input_mag_raw.nii.gz")
-    parser.add_argument("--phase-x-name", default="input_phase_x_raw.nii.gz")
-    parser.add_argument("--phase-y-name", default="input_phase_y_raw.nii.gz")
-    parser.add_argument("--phase-z-name", default="input_phase_z_raw.nii.gz")
+    parser.add_argument("--phase-x-name", default="Vx.nii.gz")
+    parser.add_argument("--phase-y-name", default="Vy.nii.gz")
+    parser.add_argument("--phase-z-name", default="Vz.nii.gz")
 
     parser.add_argument("--temporal-reg-type", default="Rigid", help="Temporal registration transform type")
     parser.add_argument(
@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
         "--final-only",
         action="store_true",
         help="Validate that every case has all final registered outputs before cleanup",
+    )
+    parser.add_argument(
+        "--force-temporal",
+        action="store_true",
+        help="Always run temporal registration even if temporal outputs already exist and look complete",
     )
 
     parser.add_argument("--dry-run", action="store_true", help="Print commands and planned cleanup only")
@@ -150,10 +155,41 @@ def validate_final_outputs(output_dir: str, case_keys: list[str]) -> list[tuple[
     return failures
 
 
+def build_pair_dirs(temporal_dir: str, case_key: str, fixed_suffix: str, moving_suffix: str) -> tuple[str, str]:
+    case_path = Path(case_key)
+    parent = "" if str(case_path.parent) == "." else str(case_path.parent)
+    case_base = case_path.name
+
+    fixed_dir = os.path.join(temporal_dir, parent, case_base + fixed_suffix)
+    moving_dir = os.path.join(temporal_dir, parent, case_base + moving_suffix)
+    return fixed_dir, moving_dir
+
+
+def temporal_outputs_ready(args: argparse.Namespace, temporal_dir: str, case_keys: list[str]) -> tuple[bool, list[str]]:
+    missing_details: list[str] = []
+
+    for case_key in case_keys:
+        fixed_dir, moving_dir = build_pair_dirs(temporal_dir, case_key, args.fixed_suffix, args.moving_suffix)
+        expected = [
+            ("fixed_mag", os.path.join(fixed_dir, args.fixed_mag_name)),
+            ("moving_mag", os.path.join(moving_dir, args.moving_mag_name)),
+            ("phase_x", os.path.join(moving_dir, args.phase_x_name)),
+            ("phase_y", os.path.join(moving_dir, args.phase_y_name)),
+            ("phase_z", os.path.join(moving_dir, args.phase_z_name)),
+        ]
+
+        for label, path in expected:
+            if not os.path.isfile(path):
+                missing_details.append(f"{case_key}:{label}:{path}")
+
+    return len(missing_details) == 0, missing_details
+
+
 def main() -> None:
     args = parse_args()
 
     temporal_dir = args.temporal_dir or os.path.join(args.output_dir, "_temporal_registered")
+    temporal_preexisting = os.path.isdir(temporal_dir)
     discovered_pairs = discover_case_pairs(args.input_dir, args.fixed_suffix, args.moving_suffix)
     case_keys = [pair.case_key for pair in discovered_pairs]
     if not case_keys:
@@ -186,11 +222,21 @@ def main() -> None:
         temporal_cmd.extend(["--timing-report", args.temporal_timing_report])
     if args.verbose:
         temporal_cmd.append("--verbose")
+    run_temporal = True
+    if not args.force_temporal and temporal_preexisting:
+        ready, missing_items = temporal_outputs_ready(args, temporal_dir, case_keys)
+        if ready:
+            run_temporal = False
+            print("== Stage 1/2: Temporal registration ==")
+            print("Temporal outputs already detected. Skipping temporal stage.")
+        elif args.verbose:
+            print(f"Temporal outputs incomplete ({len(missing_items)} missing files). Re-running temporal stage.")
 
-    print("== Stage 1/2: Temporal registration ==")
-    rc = run_command(temporal_cmd, args.dry_run)
-    if rc != 0:
-        raise SystemExit(f"Temporal stage failed with exit code {rc}")
+    if run_temporal:
+        print("== Stage 1/2: Temporal registration ==")
+        rc = run_command(temporal_cmd, args.dry_run)
+        if rc != 0:
+            raise SystemExit(f"Temporal stage failed with exit code {rc}")
 
     interscan_cmd = [
         sys.executable,
@@ -277,7 +323,10 @@ def main() -> None:
         input_abs = os.path.abspath(args.input_dir)
         if temporal_abs == input_abs:
             raise SystemExit("Refusing to delete temporal directory because it matches --input-dir.")
-        if os.path.isdir(temporal_abs):
+        if temporal_preexisting and not run_temporal:
+            if args.verbose:
+                print("Keeping pre-existing temporal directory (was reused in this run).")
+        elif os.path.isdir(temporal_abs):
             shutil.rmtree(temporal_abs, ignore_errors=True)
             removed_temporal = True
 

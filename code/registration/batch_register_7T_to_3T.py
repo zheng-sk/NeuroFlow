@@ -34,9 +34,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--fixed-mag-name", default="input_mag_raw.nii.gz", help="Magnitude file inside 3T folder")
     parser.add_argument("--moving-mag-name", default="input_mag_raw.nii.gz", help="Magnitude file inside 7T folder")
-    parser.add_argument("--phase-x-name", default="input_phase_x_raw.nii.gz", help="Phase X file inside 7T folder")
-    parser.add_argument("--phase-y-name", default="input_phase_y_raw.nii.gz", help="Phase Y file inside 7T folder")
-    parser.add_argument("--phase-z-name", default="input_phase_z_raw.nii.gz", help="Phase Z file inside 7T folder")
+    parser.add_argument("--phase-x-name", default="Vx.nii.gz", help="Phase/velocity X file inside 7T folder")
+    parser.add_argument("--phase-y-name", default="Vy.nii.gz", help="Phase/velocity Y file inside 7T folder")
+    parser.add_argument("--phase-z-name", default="Vz.nii.gz", help="Phase/velocity Z file inside 7T folder")
 
     parser.add_argument("--mask-method", choices=["ants", "hdbet"], default="ants")
     parser.add_argument("--device", default="cpu", help="For HD-BET: cpu/mps/cuda")
@@ -97,12 +97,39 @@ def discover_case_pairs(input_dir: str, fixed_suffix: str, moving_suffix: str) -
 
 
 def required_inputs(pair: CasePair, args: argparse.Namespace) -> tuple[dict[str, str], list[str]]:
+    def resolve_existing(base_dir: str, primary: str, aliases: list[str]) -> str:
+        for candidate in [primary] + aliases:
+            full_path = os.path.join(base_dir, candidate)
+            if os.path.isfile(full_path):
+                return full_path
+        return os.path.join(base_dir, primary)
+
     paths = {
-        "fixed_mag_3t": os.path.join(pair.fixed_dir, args.fixed_mag_name),
-        "moving_mag_7t": os.path.join(pair.moving_dir, args.moving_mag_name),
-        "moving_phase_x": os.path.join(pair.moving_dir, args.phase_x_name),
-        "moving_phase_y": os.path.join(pair.moving_dir, args.phase_y_name),
-        "moving_phase_z": os.path.join(pair.moving_dir, args.phase_z_name),
+        "fixed_mag_3t": resolve_existing(
+            pair.fixed_dir,
+            args.fixed_mag_name,
+            ["mag_3T_in_3T.nii.gz", "magnitude.nii.gz"],
+        ),
+        "moving_mag_7t": resolve_existing(
+            pair.moving_dir,
+            args.moving_mag_name,
+            ["mag_7T_in_3T.nii.gz", "magnitude.nii.gz"],
+        ),
+        "moving_phase_x": resolve_existing(
+            pair.moving_dir,
+            args.phase_x_name,
+            ["input_phase_x_raw.nii.gz", "vx.nii.gz", "flow_x.nii.gz", "phaseX_7T_in_3T.nii.gz"],
+        ),
+        "moving_phase_y": resolve_existing(
+            pair.moving_dir,
+            args.phase_y_name,
+            ["input_phase_y_raw.nii.gz", "vy.nii.gz", "flow_y.nii.gz", "phaseY_7T_in_3T.nii.gz"],
+        ),
+        "moving_phase_z": resolve_existing(
+            pair.moving_dir,
+            args.phase_z_name,
+            ["input_phase_z_raw.nii.gz", "vz.nii.gz", "flow_z.nii.gz", "phaseZ_7T_in_3T.nii.gz"],
+        ),
     }
     missing = [name for name, path in paths.items() if not os.path.isfile(path)]
     return paths, missing

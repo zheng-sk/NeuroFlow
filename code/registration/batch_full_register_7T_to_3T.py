@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional CSV path for temporal per-patient timing report",
     )
     parser.add_argument("--interscan-reg-type", default="antsRegistrationSyN[a]")
-    parser.add_argument("--mask-method", choices=["ants", "hdbet"], default="ants")
+    parser.add_argument("--mask-method", choices=["ants", "hdbet", "none"], default="ants")
     parser.add_argument("--device", default="cpu", help="For HD-BET: cpu/mps/cuda")
     parser.add_argument("--use-tta", action="store_true", help="Enable test-time augmentation in HD-BET")
     parser.add_argument("--interpolator-mag", default="bSpline")
@@ -273,10 +273,16 @@ def main() -> None:
         args.interpolator_phase,
         "--qc-frames",
         args.qc_frames,
-        "--save-brain-masks",
-        "--brain-mask-subdir",
-        args.brain_mask_subdir,
     ]
+
+    if args.mask_method != "none":
+        interscan_cmd.extend(
+            [
+                "--save-brain-masks",
+                "--brain-mask-subdir",
+                args.brain_mask_subdir,
+            ]
+        )
 
     if args.use_tta:
         interscan_cmd.append("--use-tta")

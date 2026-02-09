@@ -327,7 +327,7 @@ def parse_args():
     p.add_argument("--out_dir", required=True, help="Output directory (overwritten)")
     p.add_argument("--qc_dir", required=True, help="QC output directory (overwritten)")
 
-    p.add_argument("--mask_method", choices=["ants", "hdbet"], default="ants")
+    p.add_argument("--mask_method", choices=["ants", "hdbet", "none"], default="ants")
     p.add_argument("--device", default="cpu", help="For HD-BET: cpu/mps/cuda")
     p.add_argument("--use_tta", action="store_true", help="HD-BET TTA (slower)")
 
@@ -406,19 +406,30 @@ def main():
     if args.mask_method == "hdbet":
         fixed_mask  = mask_from_hdbet(fixed_ref,  os.path.join(args.qc_dir, "hdbet_fixed_3t"), device=args.device, use_tta=args.use_tta)
         moving_mask = mask_from_hdbet(moving_ref, os.path.join(args.qc_dir, "hdbet_moving_7t"), device=args.device, use_tta=args.use_tta)
-    else:
+    elif args.mask_method == "ants":
         fixed_mask  = mask_from_ants(fixed_ref)
         moving_mask = mask_from_ants(moving_ref)
+    else:
+        fixed_mask = None
+        moving_mask = None
+        if args.verbose:
+            print("Masking disabled (--mask_method none).")
 
-    if args.save_brain_masks:
+    if args.save_brain_masks and fixed_mask is not None and moving_mask is not None:
         mask_dir = args.brain_mask_dir or os.path.join(args.out_dir, "BrainMasks")
         ensure_dir(mask_dir)
         ants.image_write(fixed_mask, os.path.join(mask_dir, "fixed_3T_mask_ref.nii.gz"))
         ants.image_write(moving_mask, os.path.join(mask_dir, "moving_7T_mask_ref.nii.gz"))
+    elif args.save_brain_masks and args.verbose:
+        print("Skipping mask save: no masks available in --mask_method none.")
 
     # Preprocess for estimation only
-    fixed_n4 = ants.n4_bias_field_correction(fixed_ref,  mask=fixed_mask,  shrink_factor=4, rescale_intensities=True)
-    mov_n4   = ants.n4_bias_field_correction(moving_ref, mask=moving_mask, shrink_factor=4, rescale_intensities=True)
+    if fixed_mask is not None and moving_mask is not None:
+        fixed_n4 = ants.n4_bias_field_correction(fixed_ref,  mask=fixed_mask,  shrink_factor=4, rescale_intensities=True)
+        mov_n4   = ants.n4_bias_field_correction(moving_ref, mask=moving_mask, shrink_factor=4, rescale_intensities=True)
+    else:
+        fixed_n4 = ants.n4_bias_field_correction(fixed_ref,  shrink_factor=4, rescale_intensities=True)
+        mov_n4   = ants.n4_bias_field_correction(moving_ref, shrink_factor=4, rescale_intensities=True)
 
     fixed_dn = ants.denoise_image(fixed_n4, noise_model="Rician")
     mov_dn   = ants.denoise_image(mov_n4,   noise_model="Rician")
@@ -438,15 +449,21 @@ def main():
                       "EST BEFORE (fixed 3T vs moving 7T) edge")
 
     # Registration (estimate)
-    reg = ants.registration(
-        fixed=fixed_w,
-        moving=mov_w,
-        type_of_transform=args.reg_type,
-        mask=fixed_mask,
-        moving_mask=moving_mask,
-        mask_all_stages=True,
-        verbose=args.verbose,
-    )
+    reg_kwargs = {
+        "fixed": fixed_w,
+        "moving": mov_w,
+        "type_of_transform": args.reg_type,
+        "verbose": args.verbose,
+    }
+    if fixed_mask is not None and moving_mask is not None:
+        reg_kwargs.update(
+            {
+                "mask": fixed_mask,
+                "moving_mask": moving_mask,
+                "mask_all_stages": True,
+            }
+        )
+    reg = ants.registration(**reg_kwargs)
     txlist = reg["fwdtransforms"]  # moving -> fixed
     warped_est = reg["warpedmovout"]
 
@@ -485,9 +502,13 @@ def main():
     # QC metrics per 7T frame using the 3T reference (fixed_ref) resampled to fixed_geom
     fixed_geom = frame3d_from_4d(fixed4d, 0)  # exact 3T grid to write into
     fixed_ref_geom = ants.resample_image_to_target(fixed_ref, fixed_geom, interp_type=1)
-    mask_fixed_geom = ants.resample_image_to_target(fixed_mask, fixed_geom, interp_type=0)
+    mask_fixed_geom = (
+        ants.resample_image_to_target(fixed_mask, fixed_geom, interp_type=0)
+        if fixed_mask is not None
+        else None
+    )
 
-    if args.save_brain_masks:
+    if args.save_brain_masks and mask_fixed_geom is not None:
         mask_dir = args.brain_mask_dir or os.path.join(args.out_dir, "BrainMasks")
         ants.image_write(mask_fixed_geom, os.path.join(mask_dir, "fixed_3T_mask_output_grid.nii.gz"))
 
@@ -622,12 +643,15 @@ def main():
             f.write(pth + "\n")
         f.write("\n")
 
-        if args.save_brain_masks:
+        if args.save_brain_masks and fixed_mask is not None:
             mask_dir = args.brain_mask_dir or os.path.join(args.out_dir, "BrainMasks")
             f.write("=== Brain masks ===\n")
             f.write(os.path.join(mask_dir, "fixed_3T_mask_ref.nii.gz") + "\n")
             f.write(os.path.join(mask_dir, "moving_7T_mask_ref.nii.gz") + "\n")
             f.write(os.path.join(mask_dir, "fixed_3T_mask_output_grid.nii.gz") + "\n\n")
+        elif args.save_brain_masks:
+            f.write("=== Brain masks ===\n")
+            f.write("Not saved because --mask_method none was used.\n\n")
 
         f.write("=== Per-frame QC (MAG) ===\n")
         f.write(f"MAD before: min/median/max = {np.min(mad_before_list):.6f} / {np.median(mad_before_list):.6f} / {np.max(mad_before_list):.6f}\n")

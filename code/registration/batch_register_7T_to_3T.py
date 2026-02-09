@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase-y-name", default="Vy.nii.gz", help="Phase/velocity Y file inside 7T folder")
     parser.add_argument("--phase-z-name", default="Vz.nii.gz", help="Phase/velocity Z file inside 7T folder")
 
-    parser.add_argument("--mask-method", choices=["ants", "hdbet"], default="ants")
+    parser.add_argument("--mask-method", choices=["ants", "hdbet", "none"], default="ants")
     parser.add_argument("--device", default="cpu", help="For HD-BET: cpu/mps/cuda")
     parser.add_argument("--use-tta", action="store_true", help="Enable test-time augmentation in HD-BET")
 

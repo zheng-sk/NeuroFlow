@@ -16,8 +16,11 @@ code/
 1. **DICOM -> NIfTI**
    - Main script: `code/conversion/dicom_to_nifti.py`
    - Legacy wrapper: `code/convert2nifti2.py`
-2. **Derived features (speed / PC-MRA)**
+2. **Prepare input volumes (raw velocity + magnitude)**
    - Script: `code/preprocessing/calculate_mag.py`
+   - Default output per case: `Vx.nii.gz`, `Vy.nii.gz`, `Vz.nii.gz`, `input_mag_raw.nii.gz`
+   - Optional outputs: `input_speed_raw.nii.gz` (`--compute-speed`) and `input_pcmra_raw.nii.gz` (`--compute-pcmra`)
+   - RAW phase to m/s conversion is **disabled by default** (`--auto-convert-raw-phase` to enable)
 3. **Temporal registration (motion correction)**
    - Per folder/patient: `code/registration/batch_register_magnitude.py`
    - Per 4D file: `code/registration/temporal_register_to_t0.py`
@@ -57,6 +60,7 @@ code/
 
 ## Raw phase conversion behavior
 
+- **`calculate_mag.py` preprocessing**: by default it preserves raw phase values in `Vx/Vy/Vz`; conversion to m/s is only applied when `--auto-convert-raw-phase` is enabled.
 - **H5 workflow (`nifti_to_h5`)**: raw phase to m/s conversion is applied during NIfTI -> H5 conversion in `src/prepare_data/prepare_nifti_data.py`.
 - **Direct NIfTI inference workflow**: raw phase to m/s conversion is applied at prediction time only when `--auto-convert-raw-phase` is enabled.
 - Both workflows support **unsigned raw phase** (`~0..4096`) and **signed raw phase** (`~-4096..4096` / `~-2048..2048`), using VENC.
@@ -80,10 +84,19 @@ python code/conversion/dicom_to_nifti.py \
   --input-root data/sorted_patients \
   --output-root data/nifti_patients
 
-# 2) Speed + PC-MRA
+# 2) Prepare processed inputs (RAW velocity + magnitude only, default)
 python code/preprocessing/calculate_mag.py \
   --csv data/dataset.csv \
   --data-root data
+
+# 2b) Optional: also compute speed + PC-MRA (and optionally convert RAW -> m/s)
+python code/preprocessing/calculate_mag.py \
+  --csv data/dataset.csv \
+  --data-root data \
+  --compute-speed \
+  --compute-pcmra \
+  --auto-convert-raw-phase \
+  --venc 0.90
 
 # 3a) Temporal registration per folder
 python code/registration/batch_register_magnitude.py \

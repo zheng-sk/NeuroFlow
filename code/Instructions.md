@@ -8,6 +8,7 @@ code/
 ├── preprocessing/         # Derived feature generation
 ├── registration/          # Temporal + inter-scan registration and QC
 ├── inference/             # Model prediction workflows
+├── visualization/         # PyVista QC/flow visualization scripts
 └── *.py                   # Backward-compatible wrappers (legacy entrypoints)
 ```
 
@@ -65,6 +66,14 @@ code/
    - Progress/timing options: `--show-patch-progress`, `--verbose`, `--timing-report <csv_path>`
    - Device controls: `--device auto|cpu|gpu` and `--gpu-memory-limit-mb <int>`
    - Apple Metal safety: CPU fallback on GPU errors is enabled by default (disable with `--no-cpu-fallback-on-gpu-error`)
+11. **(Optional) Visualization / QC with PyVista**
+   - Streamlines/panel (interactive): `code/visualization/viz_streamlines.py`
+   - 3D streamlines GIF in segmented ROI: `code/visualization/viz_flow_gif.py`
+   - Direction QA (forward vs backward): `code/visualization/viz_direction_qa.py`
+   - Particle advection GIF (flow over time): `code/visualization/viz_particle_gif.py`
+   - Slice GIF over time: `code/visualization/viz_slice_gif.py`
+   - Vessel surface render (single or dual view): `code/visualization/viz_surface.py`
+   - Legacy wrapper still exists: `code/visualization/flow_qc_pyvista.py` (delegates to modular scripts)
 
 ## Raw phase conversion behavior
 
@@ -83,6 +92,136 @@ You can still use the old script names in `code/`:
   `export_paired_lr_hr_dataset.py`, `yolo_crop_patient_pairs.py`.
 
 These wrappers redirect to the reorganized modules.
+
+## Visualization scripts (modular)
+
+Use these scripts depending on the figure you want:
+
+- **Interactive flow exploration (slice / stream / panel):**
+  - `python code/visualization/viz_streamlines.py ...`
+- **3D GIF of segmented flow streamlines:**
+  - `python code/visualization/viz_flow_gif.py ...`
+- **Direction QA (forward/backward + optional signed components):**
+  - `python code/visualization/viz_direction_qa.py ...`
+- **Particle advection GIF (blood flow over time):**
+  - `python code/visualization/viz_particle_gif.py ...`
+- **Simple slice GIF through time:**
+  - `python code/visualization/viz_slice_gif.py ...`
+- **Surface visualization (closer to CoW render style):**
+  - `python code/visualization/viz_surface.py ...`
+
+### Example: `data/test_pyvista` (streamlines panel)
+
+```bash
+python code/visualization/viz_streamlines.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --mode panel \
+  --frame 0 \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --seed-mode speed \
+  --speed-seed-percentile 98.0 \
+  --n-seed-points 220 \
+  --zero-velocity-below 0.05 \
+  --stream-color-by-speed \
+  --background black
+```
+
+### Example: `data/test_pyvista` (3D flow GIF in segmented region)
+
+```bash
+python code/visualization/viz_flow_gif.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --gif-path data/test_pyvista/flow3d_segmented.gif \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --seed-mode speed \
+  --speed-seed-percentile 98.0 \
+  --n-seed-points 220 \
+  --zero-velocity-below 0.05 \
+  --integration-direction forward \
+  --show-direction-arrows \
+  --arrow-stride 35 \
+  --arrow-factor 0.8 \
+  --max-length 120 \
+  --step 0.2 \
+  --tube-radius 0.22 \
+  --stream-color-by-speed \
+  --gif-fps 12 \
+  --orbit-deg-per-frame 2.0 \
+  --camera-distance-scale 1.5 \
+  --background black
+```
+
+### Example: direction QA (forward vs backward)
+
+```bash
+python code/visualization/viz_direction_qa.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --seed-mode speed \
+  --speed-seed-percentile 97.0 \
+  --n-seed-points 400 \
+  --max-length 140 \
+  --step 0.15 \
+  --tube-radius 0.20 \
+  --signed-component vx \
+  --show-direction-arrows \
+  --background black
+```
+
+### Example: particle flow GIF (time-evolving blood flow)
+
+```bash
+python code/visualization/viz_particle_gif.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --gif-path data/test_pyvista/particle_flow.gif \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --n-particles 900 \
+  --spawn-per-frame 120 \
+  --trail-length 8 \
+  --speed-seed-percentile 95.0 \
+  --zero-velocity-below 0.05 \
+  --dt-scale 0.6 \
+  --gif-fps 12 \
+  --background black
+```
+
+### Example: surface render style (single/dual view)
+
+```bash
+python code/visualization/viz_surface.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --scalar speed \
+  --aggregate mean \
+  --two-views \
+  --off-screen \
+  --screenshot data/test_pyvista/cow_surface_speed_dual.png
+```
 
 ## Minimal examples
 

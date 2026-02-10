@@ -25,28 +25,36 @@ code/
    - Per folder/patient: `code/registration/batch_register_magnitude.py`
    - Per 4D file: `code/registration/temporal_register_to_t0.py`
    - Progress/timing options: `--show-frame-progress`, `--verbose`, `--timing-report <csv_path>`
-4. **Inter-scan 7T -> 3T registration**
+4. **(Optional) CoW ROI crop after temporal registration**
+   - Script: `code/preprocessing/yolo_crop_patient_pairs.py`
+   - Typical input root: temporally registered folders (`.../<CASE>_3T`, `.../<CASE>_7T`)
+   - Builds one common ROI per pair (3T+7T) and applies it to all NIfTI files in both folders
+   - Current behavior keeps the full **Z axis** and crops only X/Y
+5. **Inter-scan 7T -> 3T registration**
    - Per case: `code/registration/register_7T_to_3T_with_qc.py`
    - Batch over a folder: `code/registration/batch_register_7T_to_3T.py`
    - Batch defaults expect temporally-registered velocity names: `Vx.nii.gz`, `Vy.nii.gz`, `Vz.nii.gz`
-5. **Full registration pipeline (temporal + 7T -> 3T)**
+   - For CoW-cropped inputs, prefer `--mask-method none` (skip brain-mask estimation)
+6. **Full registration pipeline (temporal + 7T -> 3T)**
    - One command over a folder: `code/registration/batch_full_register_7T_to_3T.py`
    - Saves final registered images and brain masks (`BrainMasks/`), and can auto-clean intermediates/QC
+   - This full pipeline does **not** include the YOLO crop stage
    - If `temporal-dir` already has the required files, temporal stage is skipped automatically
    - Use `--force-temporal` to force recomputation of temporal registration
    - Optional `--final-only` validates that all final 4D registered outputs exist per case before cleanup
+   - Use `--keep-qc` if you want to preserve inter-scan QC folders
    - Optional temporal telemetry: `--show-temporal-frame-progress` and `--temporal-timing-report <csv_path>`
-6. **(Optional) Export paired LR/HR NIfTI dataset**
+7. **(Optional) Export paired LR/HR NIfTI dataset**
    - Script: `code/registration/export_paired_lr_hr_dataset.py`
    - Creates two folders: `lr_3t/` (temporally registered 3T) and `hr_7t_in_3t/` (7T registered into 3T space)
    - Writes paired CSV compatible with `data/nifti_cases_template.csv`
-7. **(Optional) NIfTI -> H5**
+8. **(Optional) NIfTI -> H5**
    - Script: `code/conversion/nifti_to_h5.py`
-8. **(Optional) Phase range quality check**
+9. **(Optional) Phase range quality check**
    - Script: `code/registration/check_phase_ranges.py`
    - Validates whether phase files look like raw phase (`0..4096`) or velocity (m/s)
    - Prints per-file stats (`min/max/percentiles`) and summary, with optional CSV report
-9. **(Optional) Batch inference**
+10. **(Optional) Batch inference**
    - Script: `code/inference/batch_predict.py`
    - Supports `--input-format h5|nifti` and `--output-format h5|nifti`
    - Direct NIfTI mode bypasses H5 conversion and writes `u_SR.nii.gz`, `v_SR.nii.gz`, `w_SR.nii.gz`
@@ -72,7 +80,7 @@ You can still use the old script names in `code/`:
   `batch_temporal_register.py`, `temporal_register_to_t0.py`,
   `convert_to_h5.py`, `batch_predict.py`, `register_7T_to_3T_with_qc.py`,
   `batch_register_7T_to_3T.py`, `batch_full_register_7T_to_3T.py`,
-  `export_paired_lr_hr_dataset.py`.
+  `export_paired_lr_hr_dataset.py`, `yolo_crop_patient_pairs.py`.
 
 These wrappers redirect to the reorganized modules.
 
@@ -101,7 +109,7 @@ python code/preprocessing/calculate_mag.py \
 # 3a) Temporal registration per folder
 python code/registration/batch_register_magnitude.py \
   --input-dir data/processed_inputs \
-  --output-dir data/registered_patients \
+  --output-dir data/temporal_registered \
   --reg-type Rigid \
   --show-frame-progress \
   --timing-report data/reports/temporal_timing.csv
@@ -109,16 +117,16 @@ python code/registration/batch_register_magnitude.py \
 # 3b) Temporal registration per file
 python code/registration/temporal_register_to_t0.py \
   --input data/processed_inputs/CASE/input_mag_raw.nii.gz \
-  --out data/registered_patients/CASE/input_mag_raw.nii.gz \
-  --qc_dir data/registered_patients/CASE/QC
+  --out data/temporal_registered/CASE/input_mag_raw.nii.gz \
+  --qc_dir data/temporal_registered/CASE/QC
 
 # 4a) Inter-scan registration (single case, 7T -> 3T)
 python code/registration/register_7T_to_3T_with_qc.py \
   --fixed_mag_3t data/temporal_registered/001_20240313_3T/input_mag_raw.nii.gz \
   --moving_mag_7t data/temporal_registered/001_20240313_7T/input_mag_raw.nii.gz \
-  --moving_phase_x data/temporal_registered/001_20240313_7T/input_phase_x_raw.nii.gz \
-  --moving_phase_y data/temporal_registered/001_20240313_7T/input_phase_y_raw.nii.gz \
-  --moving_phase_z data/temporal_registered/001_20240313_7T/input_phase_z_raw.nii.gz \
+  --moving_phase_x data/temporal_registered/001_20240313_7T/Vx.nii.gz \
+  --moving_phase_y data/temporal_registered/001_20240313_7T/Vy.nii.gz \
+  --moving_phase_z data/temporal_registered/001_20240313_7T/Vz.nii.gz \
   --out_dir data/registered_7T_in_3T/001_20240313 \
   --qc_dir data/registered_7T_in_3T/001_20240313/QC
 
@@ -132,6 +140,27 @@ python code/registration/batch_register_7T_to_3T.py \
   --fixed-suffix _3T \
   --moving-suffix _7T
 
+# 4c) CoW ROI crop after temporal registration (common crop for 3T+7T pair)
+python code/preprocessing/yolo_crop_patient_pairs.py \
+  --input-dir data/temporal_registered \
+  --output-dir data/temporal_registered_cow_crop \
+  --yolo-model models/yolo-cow-detection.pt \
+  --yolo-device mps \
+  --margin-xy 20 \
+  --shape-mismatch skip \
+  --write-folder-plans
+
+# 4d) Inter-scan registration over cropped temporal inputs (no brain masks)
+python code/registration/batch_register_7T_to_3T.py \
+  --input-dir data/temporal_registered_cow_crop \
+  --output-dir data/registered_7T_in_3T_cow_crop \
+  --phase-x-name Vx.nii.gz \
+  --phase-y-name Vy.nii.gz \
+  --phase-z-name Vz.nii.gz \
+  --fixed-suffix _3T \
+  --moving-suffix _7T \
+  --mask-method none
+
 # 5) Full pipeline: temporal first, then 7T -> 3T batch
 python code/registration/batch_full_register_7T_to_3T.py \
   --input-dir data/processed_inputs \
@@ -142,6 +171,7 @@ python code/registration/batch_full_register_7T_to_3T.py \
   --phase-y-name Vy.nii.gz \
   --phase-z-name Vz.nii.gz \
   --final-only \
+  --keep-qc \
   --fixed-suffix _3T \
   --moving-suffix _7T
 

@@ -34,8 +34,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-suffix", default="_3T", help="Suffix for fixed folders")
     parser.add_argument("--moving-suffix", default="_7T", help="Suffix for moving folders")
     parser.add_argument("--magnitude-name", default="input_mag_raw.nii.gz", help="Magnitude filename in both folders")
-    parser.add_argument("--margin-xy", type=int, default=20, help="Extra margin for bbox X/Y")
-    parser.add_argument("--margin-z", type=int, default=8, help="Extra margin for bbox Z")
+    parser.add_argument(
+        "--margin-xy",
+        type=int,
+        default=20,
+        help="Legacy fallback margin for X/Y when --margin-x/--margin-y are not set",
+    )
+    parser.add_argument("--margin-x", type=int, default=None, help="Extra margin for X axis (overrides --margin-xy)")
+    parser.add_argument("--margin-y", type=int, default=None, help="Extra margin for Y axis (overrides --margin-xy)")
+    parser.add_argument(
+        "--margin-x-side",
+        choices=["both", "min", "max"],
+        default="both",
+        help="Where to apply X margin: both borders, only lower border (min), or only upper border (max)",
+    )
+    parser.add_argument(
+        "--margin-y-side",
+        choices=["both", "min", "max"],
+        default="both",
+        help="Where to apply Y margin: both borders, only lower border (min), or only upper border (max)",
+    )
+    parser.add_argument(
+        "--margin-z",
+        type=int,
+        default=8,
+        help="Deprecated (ignored). Z crop always keeps the full axis.",
+    )
     parser.add_argument(
         "--shape-mismatch",
         choices=["error", "skip"],
@@ -128,7 +152,10 @@ def compute_crop_dict(
     bbox_widths,
     bbox_heights,
     slices_with_roi,
-    margin_xy: int,
+    margin_x: int,
+    margin_y: int,
+    margin_x_side: str,
+    margin_y_side: str,
     margin_z: int,
 ) -> dict[str, object]:
     if not bbox_centers:
@@ -140,24 +167,30 @@ def compute_crop_dict(
 
     median_center_x = int(np.median([c[0] for c in bbox_centers]))
     median_center_y = int(np.median([c[1] for c in bbox_centers]))
-    median_center_z = int(np.median([c[2] for c in bbox_centers]))
     median_width = int(np.median(bbox_widths))
     median_height = int(np.median(bbox_heights))
-    crop_z_size = max(1, len(set(slices_with_roi)))
 
     crop_x_min = max(0, median_center_x - median_width // 2)
     crop_x_max = min(volume_shape[1], median_center_x + median_width // 2)
     crop_y_min = max(0, median_center_y - median_height // 2)
     crop_y_max = min(volume_shape[0], median_center_y + median_height // 2)
-    crop_z_min = max(0, median_center_z - crop_z_size // 2)
-    crop_z_max = min(volume_shape[2], median_center_z + crop_z_size // 2)
 
-    y_start = max(0, crop_y_min - int(margin_xy))
-    y_end = min(volume_shape[0], crop_y_max + int(margin_xy))
-    x_start = max(0, crop_x_min - int(margin_xy))
-    x_end = min(volume_shape[1], crop_x_max + int(margin_xy))
-    z_start = max(0, crop_z_min - int(margin_z))
-    z_end = min(volume_shape[2], crop_z_max + int(margin_z))
+    def apply_margin(min_v: int, max_v: int, limit: int, margin: int, side: str) -> tuple[int, int]:
+        if side == "both":
+            return max(0, min_v - margin), min(limit, max_v + margin)
+        if side == "min":
+            return max(0, min_v - margin), min(limit, max_v)
+        if side == "max":
+            return max(0, min_v), min(limit, max_v + margin)
+        raise ValueError(f"Unsupported margin side: {side}")
+
+    y_start, y_end = apply_margin(crop_y_min, crop_y_max, volume_shape[0], int(margin_y), margin_y_side)
+    x_start, x_end = apply_margin(crop_x_min, crop_x_max, volume_shape[1], int(margin_x), margin_x_side)
+    # Keep full Z extent; CoW ROI is only constrained in X/Y.
+    _ = margin_z
+    _ = slices_with_roi
+    z_start = 0
+    z_end = int(volume_shape[2])
 
     return {
         "detected": True,
@@ -241,7 +274,16 @@ def save_cropped_nifti(cropped: np.ndarray, out_path: Path, reference_img: nib.N
     nib.save(out_img, str(out_path))
 
 
-def run_detection_for_mag(mag_path: Path, model, yolo_device: str | None, margin_xy: int, margin_z: int):
+def run_detection_for_mag(
+    mag_path: Path,
+    model,
+    yolo_device: str | None,
+    margin_x: int,
+    margin_y: int,
+    margin_x_side: str,
+    margin_y_side: str,
+    margin_z: int,
+):
     img = nib.load(str(mag_path))
     data = np.asarray(img.dataobj)
     vol3d, used_mip = maybe_mip_4d(data)
@@ -252,7 +294,10 @@ def run_detection_for_mag(mag_path: Path, model, yolo_device: str | None, margin
         bbox_widths=widths,
         bbox_heights=heights,
         slices_with_roi=slices,
-        margin_xy=margin_xy,
+        margin_x=margin_x,
+        margin_y=margin_y,
+        margin_x_side=margin_x_side,
+        margin_y_side=margin_y_side,
         margin_z=margin_z,
     )
     return img, vol3d, used_mip, crop
@@ -260,6 +305,9 @@ def run_detection_for_mag(mag_path: Path, model, yolo_device: str | None, margin
 
 def main() -> None:
     args = parse_args()
+
+    margin_x = args.margin_x if args.margin_x is not None else args.margin_xy
+    margin_y = args.margin_y if args.margin_y is not None else args.margin_xy
 
     try:
         from ultralytics import YOLO
@@ -302,14 +350,20 @@ def main() -> None:
             fixed_mag,
             model=model,
             yolo_device=args.yolo_device,
-            margin_xy=args.margin_xy,
+            margin_x=margin_x,
+            margin_y=margin_y,
+            margin_x_side=args.margin_x_side,
+            margin_y_side=args.margin_y_side,
             margin_z=args.margin_z,
         )
         _moving_img, moving_3d, moving_used_mip, bbox_moving = run_detection_for_mag(
             moving_mag,
             model=model,
             yolo_device=args.yolo_device,
-            margin_xy=args.margin_xy,
+            margin_x=margin_x,
+            margin_y=margin_y,
+            margin_x_side=args.margin_x_side,
+            margin_y_side=args.margin_y_side,
             margin_z=args.margin_z,
         )
 
@@ -392,6 +446,10 @@ def main() -> None:
                 "fixed_folder": str(pair.fixed_dir),
                 "moving_folder": str(pair.moving_dir),
                 "magnitude_file": args.magnitude_name,
+                "margin_x": int(margin_x),
+                "margin_y": int(margin_y),
+                "margin_x_side": args.margin_x_side,
+                "margin_y_side": args.margin_y_side,
                 "fixed_shape_3d": list(fixed_shape),
                 "fixed_used_mip_from_4d": bool(fixed_used_mip),
                 "moving_used_mip_from_4d": bool(moving_used_mip),

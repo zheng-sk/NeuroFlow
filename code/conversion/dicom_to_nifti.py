@@ -20,7 +20,7 @@ DICOM -> NIfTI with:
         - preserves component semantics (does NOT permute spatial axes if needed)
         - applies minimal flips to reach RAS without permutation (when possible)
         - applies LPS->RAS component sign convention: Vx and Vy invert sign, Vz does not
-          (only in direct-read fallback where conversion is done explicitly).
+          (for both dcm2niix and direct-read outputs).
 
 IMPORTANT (raw phase):
 - Does NOT apply modality LUT / rescale slope-intercept; raw phase values are preserved.
@@ -126,16 +126,24 @@ def apply_lps2ras_component_sign(data: np.ndarray, series_name: str) -> np.ndarr
       - X (L/R) changes sign
       - Y (P/A) changes sign
       - Z (I/S) does not change
-    
-    IMPORTANT: For RAW DICOM data (where 2048 ~= 0 velocity), blindly negating (-data)
-    is incorrect because it shifts the center from +2048 to -2048.
-    
-    We disable the sign flip here. The sign correction must be applied
-    AFTER converting raw intensity to physical velocity (m/s).
+
+    For unsigned RAW phase (0..~4096, centered near 2048), negate around the raw
+    center instead of applying `-data`, so raw encoding remains valid.
     """
-    # if is_vx(series_name) or is_vy(series_name):
-    #     return -data
-    return data
+    if not (is_vx(series_name) or is_vy(series_name)):
+        return data
+
+    out = data.astype(np.float32, copy=False)
+    mn = float(np.nanmin(out))
+    mx = float(np.nanmax(out))
+    is_unsigned_raw = (mn >= 0.0) and (mx > 1000.0) and (mx <= 8192.0)
+    if is_unsigned_raw:
+        # Typical center is 2048 for 12-bit raw phase. Keep 8192 support as a guard.
+        center = 4096.0 if mx > 5000.0 else 2048.0
+        out = (2.0 * center) - out
+    else:
+        out = -out
+    return out.astype(np.float32, copy=False)
 
 
 # --------------------------
@@ -150,8 +158,8 @@ def dicom_affine_from_iop_ipp(iop, ipp, pixel_spacing, slice_spacing) -> np.ndar
       - slice spacing (mm) along the slice normal
 
     If data is stored as (X=cols, Y=rows, Z=slices):
-      axis0 (X) = row_cos * col_spacing
-      axis1 (Y) = col_cos * row_spacing
+      axis0 (X) = col_cos * col_spacing
+      axis1 (Y) = row_cos * row_spacing
       axis2 (Z) = normal  * slice_spacing
     """
     iop = np.asarray(iop, dtype=np.float64).reshape(-1)
@@ -173,8 +181,9 @@ def dicom_affine_from_iop_ipp(iop, ipp, pixel_spacing, slice_spacing) -> np.ndar
     col_spacing = float(ps[1])
 
     aff = np.eye(4, dtype=np.float64)
-    aff[0:3, 0] = row_cos * col_spacing
-    aff[0:3, 1] = col_cos * row_spacing
+    # Direct-read stores voxels as (cols, rows, z, t) because of arr.T.
+    aff[0:3, 0] = col_cos * col_spacing
+    aff[0:3, 1] = row_cos * row_spacing
     aff[0:3, 2] = slc_cos * float(slice_spacing)
     aff[0:3, 3] = ipp
     return aff
@@ -574,8 +583,8 @@ def standardize_from_dcm2niix(nifti_in: str, nifti_out: str, series_name: str, c
     dcm2niix usually writes RAS already. This step:
       - enforces qform/sform
       - for scalars: canonicalizes to RAS+
-      - for phase components: tries flips-only to RAS (no permutations). Does not apply sign flips
-        because LPS->RAS was already handled by dcm2niix.
+      - for phase components: tries flips-only to RAS (no permutations), then applies
+        Vx/Vy sign correction so phase components are already in RAS convention.
     """
     img = nib.load(nifti_in)
     img = force_qsform(img, code=1)
@@ -590,6 +599,14 @@ def standardize_from_dcm2niix(nifti_in: str, nifti_out: str, series_name: str, c
             img = force_qsform(img2, code=1)
         else:
             img = canonicalize_scalar_ras(img)
+
+    if is_phase_component(series_name):
+        data = img.get_fdata(dtype=np.float32)
+        data = apply_lps2ras_component_sign(data, series_name)
+        hdr = img.header.copy()
+        hdr.set_data_dtype(np.float32)
+        img = nib.Nifti1Image(data, img.affine, hdr)
+        img = force_qsform(img, code=1)
 
     nib.save(img, nifti_out)
 

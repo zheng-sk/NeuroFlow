@@ -231,8 +231,8 @@ def load_flow_data_from_args(args: argparse.Namespace) -> FlowData:
         venc_u = args.venc_u if args.venc_u is not None else args.venc
         venc_v = args.venc_v if args.venc_v is not None else args.venc
         venc_w = args.venc_w if args.venc_w is not None else args.venc
-        vx, _ = convert_raw_to_velocity_if_needed(vx, venc_u, invert_sign_if_raw=True, label="Vx/U")
-        vy, _ = convert_raw_to_velocity_if_needed(vy, venc_v, invert_sign_if_raw=True, label="Vy/V")
+        vx, _ = convert_raw_to_velocity_if_needed(vx, venc_u, invert_sign_if_raw=False, label="Vx/U")
+        vy, _ = convert_raw_to_velocity_if_needed(vy, venc_v, invert_sign_if_raw=False, label="Vy/V")
         vz, _ = convert_raw_to_velocity_if_needed(vz, venc_w, invert_sign_if_raw=False, label="Vz/W")
     else:
         print("RAW auto-conversion disabled. Velocities are used as loaded.")

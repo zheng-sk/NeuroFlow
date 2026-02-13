@@ -85,7 +85,7 @@ def convert_raw_to_velocity_if_needed(
         scale = 4096.0 if max_abs > 3000.0 else 2048.0
         out = out / scale * float(venc)
 
-    # Match repository convention used in H5 pipeline.
+    # Legacy option for datasets where NIfTI did not bake LPS->RAS sign correction.
     if invert_sign_if_raw:
         out = -out
     return out, True
@@ -207,8 +207,8 @@ def process_case(
 
     if auto_convert_raw_phase:
         try:
-            vx, vx_converted = convert_raw_to_velocity_if_needed(vx, venc_u, invert_sign_if_raw=True, label="Vx")
-            vy, vy_converted = convert_raw_to_velocity_if_needed(vy, venc_v, invert_sign_if_raw=True, label="Vy")
+            vx, vx_converted = convert_raw_to_velocity_if_needed(vx, venc_u, invert_sign_if_raw=False, label="Vx")
+            vy, vy_converted = convert_raw_to_velocity_if_needed(vy, venc_v, invert_sign_if_raw=False, label="Vy")
             vz, vz_converted = convert_raw_to_velocity_if_needed(vz, venc_w, invert_sign_if_raw=False, label="Vz")
         except ValueError as exc:
             print(f"RAW conversion error: {exc}")

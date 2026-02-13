@@ -28,7 +28,7 @@ def convert_raw_to_velocity_if_needed(data, venc, invert_sign=False, name="Compo
     """
     Checks if data is raw DICOM intensity (approx 0..4096, centered at 2048).
     If so, converts to physical velocity (m/s).
-    Also applies semantic sign inversion (LPS->RAS) if requested.
+    Optional sign inversion is for legacy inputs only.
     """
     # Heuristic:
     # - Unsigned raw phase: ~0..4096, centered near 2048
@@ -52,14 +52,9 @@ def convert_raw_to_velocity_if_needed(data, venc, invert_sign=False, name="Compo
             data = data.astype(np.float32) / scale * venc
 
         if invert_sign:
-            print(f"   [{name}] applying LPS->RAS sign inversion (-1).")
+            print(f"   [{name}] applying legacy LPS->RAS sign inversion (-1).")
             data = -data
-    else:
-        # If not raw, maybe we still need sign inversion?
-        # Usually if data is already physical, user might have handled it.
-        # But to be safe, if we are in this pipeline, we might enforce sign if requested.
-        pass
-        
+
     return data
 
 
@@ -142,13 +137,10 @@ def main():
     if venc_w is None:
         venc_w = float(np.max(np.abs(w_data)))
 
-    # --- Pre-processing: Convert Raw Phase to m/s AND apply LPS->RAS sign flip ---
-    # We assume U and V correspond to Vx and Vy which need sign inversion in RAS,
-    # while W corresponds to Vz which usually does not.
-    u_data = convert_raw_to_velocity_if_needed(u_data, venc_u, invert_sign=True, name="U")
-    v_data = convert_raw_to_velocity_if_needed(v_data, venc_v, invert_sign=True, name="V")
+    # Convert RAW phase to m/s only. Sign correction should already be baked into NIfTI.
+    u_data = convert_raw_to_velocity_if_needed(u_data, venc_u, invert_sign=False, name="U")
+    v_data = convert_raw_to_velocity_if_needed(v_data, venc_v, invert_sign=False, name="V")
     w_data = convert_raw_to_velocity_if_needed(w_data, venc_w, invert_sign=False, name="W")
-    # -----------------------------------------------------------------------------
 
     if not os.path.isdir(args.output_dir):
         os.makedirs(args.output_dir)

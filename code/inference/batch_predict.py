@@ -402,8 +402,8 @@ class NiftiInferenceDataset:
         v_frame = self._extract_frame(self.v_img, self._resolve_time_axis(self.v_img.ndim, self.time_axis_arg), frame_idx)
         w_frame = self._extract_frame(self.w_img, self._resolve_time_axis(self.w_img.ndim, self.time_axis_arg), frame_idx)
 
-        u_frame = self._convert_raw_if_needed(u_frame, self.venc_u, invert_sign=True, label="u")
-        v_frame = self._convert_raw_if_needed(v_frame, self.venc_v, invert_sign=True, label="v")
+        u_frame = self._convert_raw_if_needed(u_frame, self.venc_u, invert_sign=False, label="u")
+        v_frame = self._convert_raw_if_needed(v_frame, self.venc_v, invert_sign=False, label="v")
         w_frame = self._convert_raw_if_needed(w_frame, self.venc_w, invert_sign=False, label="w")
 
         mag_u_frame = self._extract_frame(

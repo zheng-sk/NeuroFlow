@@ -184,8 +184,8 @@ def main() -> None:
             f"Vz  {vz4d_raw.shape}"
         )
 
-    vx4d = convert_raw_to_velocity_repo_style(vx4d_raw, args.venc, invert_sign=True)
-    vy4d = convert_raw_to_velocity_repo_style(vy4d_raw, args.venc, invert_sign=True)
+    vx4d = convert_raw_to_velocity_repo_style(vx4d_raw, args.venc, invert_sign=False)
+    vy4d = convert_raw_to_velocity_repo_style(vy4d_raw, args.venc, invert_sign=False)
     vz4d = convert_raw_to_velocity_repo_style(vz4d_raw, args.venc, invert_sign=False)
     speed4d = np.sqrt(vx4d * vx4d + vy4d * vy4d + vz4d * vz4d).astype(np.float32)
 

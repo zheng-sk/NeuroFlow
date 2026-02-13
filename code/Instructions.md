@@ -84,6 +84,7 @@ code/
 - **`calculate_mag.py` preprocessing**: by default it preserves raw phase values in `Vx/Vy/Vz`; conversion to m/s is only applied when `--auto-convert-raw-phase` is enabled.
 - **H5 workflow (`nifti_to_h5`)**: raw phase to m/s conversion is applied during NIfTI -> H5 conversion in `src/prepare_data/prepare_nifti_data.py`.
 - **Direct NIfTI inference workflow**: raw phase to m/s conversion is applied at prediction time only when `--auto-convert-raw-phase` is enabled.
+- **Sign convention**: DICOM -> NIfTI conversion (`code/conversion/dicom_to_nifti.py`) now bakes LPS->RAS sign correction for phase components (`Vx/Vy` sign inverted, `Vz` unchanged). Downstream raw->m/s conversion should not invert signs again.
 - Both workflows support **unsigned raw phase** (`~0..4096`) and **signed raw phase** (`~-4096..4096` / `~-2048..2048`), using VENC.
 
 ## Legacy compatible entrypoints

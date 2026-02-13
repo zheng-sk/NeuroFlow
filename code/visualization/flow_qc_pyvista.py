@@ -40,6 +40,22 @@ def main() -> None:
         from viz_direction_qa import main as entry
 
         print("[flow_qc_pyvista] delegating to viz_direction_qa.py")
+    elif mode in {"affine-direction-qa"}:
+        from viz_affine_direction_qc import main as entry
+
+        print("[flow_qc_pyvista] delegating to viz_affine_direction_qc.py")
+    elif mode in {"flux-qa"}:
+        from viz_flux_planes_qc import main as entry
+
+        print("[flow_qc_pyvista] delegating to viz_flux_planes_qc.py")
+    elif mode in {"component-qa"}:
+        from viz_component_qc import main as entry
+
+        print("[flow_qc_pyvista] delegating to viz_component_qc.py")
+    elif mode in {"roi-sign-qa", "roi-sign", "roi-2d-3d"}:
+        from viz_roi_sign_qc import main as entry
+
+        print("[flow_qc_pyvista] delegating to viz_roi_sign_qc.py")
     elif mode in {"surface"}:
         from viz_surface import main as entry
 

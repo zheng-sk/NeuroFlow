@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--off-screen", action="store_true")
     parser.add_argument("--screenshot", type=Path, default=None)
-    parser.add_argument("--background", type=str, default="black")
+    parser.add_argument("--background", type=str, default="white")
     return parser.parse_args()
 
 

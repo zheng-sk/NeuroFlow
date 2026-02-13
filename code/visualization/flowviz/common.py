@@ -53,7 +53,7 @@ def add_common_preproc_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_streamline_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--seed-mode", choices=["sphere", "speed"], default="speed")
+    parser.add_argument("--seed-mode", choices=["sphere", "speed", "mask"], default="speed")
     parser.add_argument("--seed-radius", type=float, default=10.0, help="Seed sphere radius in mm.")
     parser.add_argument("--n-seed-points", type=int, default=300, help="Approximate number of streamline seeds.")
     parser.add_argument(
@@ -61,6 +61,12 @@ def add_streamline_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=97.0,
         help="Percentile of speed used to pick speed-based seeds.",
+    )
+    parser.add_argument(
+        "--seed-min-speed",
+        type=float,
+        default=0.0,
+        help="Ignore points below this speed (m/s) when selecting seeds.",
     )
     parser.add_argument("--step", type=float, default=0.5, help="Initial integration step.")
     parser.add_argument(
@@ -315,6 +321,7 @@ def make_seeds_from_grid(
     seed_radius: float,
     n_seed_points: int,
     speed_seed_percentile: float,
+    seed_min_speed: float = 0.0,
 ) -> pv.PolyData:
     if seed_mode == "sphere":
         base_res = int(max(8, np.sqrt(max(1, int(n_seed_points)))))
@@ -328,19 +335,37 @@ def make_seeds_from_grid(
     if seed_mode == "speed":
         speed = grid.point_data["speed"]
         in_mask = (grid.point_data["mask"] > 0.5) if "mask" in grid.point_data else np.ones_like(speed, dtype=bool)
-        positive = speed[(speed > 0) & in_mask]
+        min_speed = float(max(seed_min_speed, 0.0))
+        positive = speed[(speed > min_speed) & in_mask]
         if positive.size == 0:
-            raise ValueError("No positive speed values inside mask. Cannot create speed-based seeds.")
+            raise ValueError("No speed values above seed-min-speed inside mask. Cannot create speed-based seeds.")
         threshold = np.percentile(positive, float(speed_seed_percentile))
+        threshold = max(float(threshold), min_speed)
         candidates = np.flatnonzero((speed >= threshold) & in_mask)
         if candidates.size == 0:
-            candidates = np.flatnonzero((speed > 0) & in_mask)
+            candidates = np.flatnonzero((speed > min_speed) & in_mask)
+        if candidates.size == 0:
+            candidates = np.flatnonzero(in_mask)
         count = min(int(n_seed_points), int(candidates.size))
         rng = np.random.default_rng(0)
         chosen = rng.choice(candidates, size=count, replace=False)
         return pv.PolyData(grid.points[chosen])
 
-    raise ValueError("seed_mode must be 'sphere' or 'speed'.")
+    if seed_mode == "mask":
+        speed = grid.point_data["speed"]
+        in_mask = (grid.point_data["mask"] > 0.5) if "mask" in grid.point_data else np.ones_like(speed, dtype=bool)
+        min_speed = float(max(seed_min_speed, 0.0))
+        candidates = np.flatnonzero((speed > min_speed) & in_mask)
+        if candidates.size == 0:
+            candidates = np.flatnonzero(in_mask)
+        if candidates.size == 0:
+            raise ValueError("Mask-based seeding failed: no candidate points found.")
+        count = min(int(n_seed_points), int(candidates.size))
+        rng = np.random.default_rng(0)
+        chosen = rng.choice(candidates, size=count, replace=False)
+        return pv.PolyData(grid.points[chosen])
+
+    raise ValueError("seed_mode must be 'sphere', 'speed' or 'mask'.")
 
 
 def compute_speed_clim(

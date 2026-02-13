@@ -70,6 +70,10 @@ code/
    - Streamlines/panel (interactive): `code/visualization/viz_streamlines.py`
    - 3D streamlines GIF in segmented ROI: `code/visualization/viz_flow_gif.py`
    - Direction QA (forward vs backward): `code/visualization/viz_direction_qa.py`
+   - Affine + direction ranking QA (sign/permutation search): `code/visualization/viz_affine_direction_qc.py`
+   - Physiological flux QA by planes (`Q(t)=∫v·n dA`): `code/visualization/viz_flux_planes_qc.py`
+   - Component QA (Vx/Vy/Vz per CoW point): `code/visualization/viz_component_qc.py`
+   - ROI sign QA (3D crop + synchronized 2D slices): `code/visualization/viz_roi_sign_qc.py`
    - Particle advection GIF (flow over time): `code/visualization/viz_particle_gif.py`
    - Slice GIF over time: `code/visualization/viz_slice_gif.py`
    - Vessel surface render (single or dual view): `code/visualization/viz_surface.py`
@@ -103,6 +107,14 @@ Use these scripts depending on the figure you want:
   - `python code/visualization/viz_flow_gif.py ...`
 - **Direction QA (forward/backward + optional signed components):**
   - `python code/visualization/viz_direction_qa.py ...`
+- **Affine + direction ranking QA (best sign/permutation candidate):**
+  - `python code/visualization/viz_affine_direction_qc.py ...`
+- **Physiological flux QA with anatomical planes:**
+  - `python code/visualization/viz_flux_planes_qc.py ...`
+- **Component QA (signed Vx/Vy/Vz + per-point CSV export):**
+  - `python code/visualization/viz_component_qc.py ...`
+- **ROI sign QA (interactive 3D crop + synchronized X/Y/Z 2D slices):**
+  - `python code/visualization/viz_roi_sign_qc.py ...`
 - **Particle advection GIF (blood flow over time):**
   - `python code/visualization/viz_particle_gif.py ...`
 - **Simple slice GIF through time:**
@@ -130,6 +142,77 @@ python code/visualization/viz_streamlines.py \
   --stream-color-by-speed \
   --background black
 ```
+
+### Example: interactive ROI clip + component view (`Vx`/`Vy`/`Vz`)
+
+```bash
+python code/visualization/viz_streamlines.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --mode stream \
+  --scalar vx \
+  --stream-color-by-speed \
+  --interactive-clip-box \
+  --background black
+```
+
+Notes:
+- Set `--scalar` to `vx`, `vy`, `vz`, or `speed`
+- Use `--clip-box-bounds x0,x1,y0,y1,z0,z1` for a fixed ROI crop
+- Add `--clip-invert` to keep outside instead of inside
+
+### Example: software-like interactive stream editor (no relaunch)
+
+```bash
+python code/visualization/viz_streamlines.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --mode stream \
+  --scalar speed \
+  --interactive-controls \
+  --interactive-clip-box \
+  --roi-only-interaction \
+  --clip-widget-no-translation \
+  --background black
+```
+
+In-window controls:
+- Sliders: seeds, seed percentile, step, max length, tube radius, arrow stride
+- Keys: `1/2/3/4` scalar (`speed/vx/vy/vz`), `n/m` seeds, `[/]` percentile, `,/.` tube, `;/'` step, `k/l` max length, `i` integration direction, `f` arrows, `c` color, `b` invert clip, `h` HUD, `u` reset camera
+
+### Example: interactive ROI + synchronized 2D sign check (recommended for Vx/Vy/Vz validation)
+
+```bash
+python code/visualization/viz_roi_sign_qc.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --frame 0 \
+  --scalar vx \
+  --interactive-clip-box \
+  --background white
+```
+
+In-window keys for `viz_roi_sign_qc.py`:
+- `1/2/3/4`: switch scalar (`speed/vx/vy/vz`)
+- `c`: toggle ROI clip on/off
+- `b`: show/hide bounding box widget
+- `h`: show/hide HUD text
+- `r`: reset 3D camera
 
 ### Example: `data/test_pyvista` (3D flow GIF in segmented region)
 
@@ -180,6 +263,74 @@ python code/visualization/viz_direction_qa.py \
   --tube-radius 0.20 \
   --signed-component vx \
   --show-direction-arrows \
+  --background black
+```
+
+### Example: affine + direction ranking QA
+
+```bash
+python code/visualization/viz_affine_direction_qc.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --frame-step 4 \
+  --max-frames 6 \
+  --top-k 10 \
+  --affine-lambda 0.8 \
+  --export-ranking-csv data/test_pyvista/affine_direction_ranking.csv
+```
+
+### Example: physiological flux QA with inlet/outlet planes
+
+```bash
+python code/visualization/viz_flux_planes_qc.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --all-frames \
+  --dt-seconds 0.04 \
+  --plane "ICA_L:-18.0,-9.0,7.0:1.0,0.0,0.0:2.5:70:in" \
+  --plane "ICA_R: 18.0,-9.0,7.0:-1.0,0.0,0.0:2.5:70:in" \
+  --plane "BASILAR:0.0,-20.0,3.0:0.0,1.0,0.0:2.5:70:in" \
+  --plane "MCA_L:-25.0,5.0,10.0:-1.0,0.0,0.0:2.0:70:out" \
+  --plane "MCA_R: 25.0,5.0,10.0: 1.0,0.0,0.0:2.0:70:out" \
+  --plane "ACA:0.0,18.0,13.0:0.0,1.0,0.0:2.0:70:out" \
+  --auto-flip-negative-role \
+  --csv-out data/test_pyvista/flux_planes_qc.csv \
+  --summary-out data/test_pyvista/flux_planes_qc_summary.txt \
+  --plot-png data/test_pyvista/flux_planes_qc.png
+```
+
+`--plane` format:
+- `name:cx,cy,cz:nx,ny,nz[:radius_mm[:resolution[:role]]]`
+- `role` can be `in`, `out`, or `none`
+
+### Example: component QA (Vx/Vy/Vz at each CoW point)
+
+```bash
+python code/visualization/viz_component_qc.py \
+  --vx-path data/test_pyvista/4dflow_v100_inplane_rl_7.nii.gz \
+  --vy-path data/test_pyvista/4dflow_v100_inplane_ap_6.nii.gz \
+  --vz-path data/test_pyvista/4dflow_v100_through_8.nii.gz \
+  --mag-path data/test_pyvista/4dflow_mag.nii.gz \
+  --mask data/test_pyvista/4dflow_mag_mask.nii.gz \
+  --auto-convert-raw \
+  --venc 1.0 \
+  --aggregate frame \
+  --frame 0 \
+  --report-all-frames \
+  --export-csv data/test_pyvista/cow_component_values_frame0.csv \
+  --show-glyphs \
+  --glyph-stride 35 \
+  --glyph-factor 1.8 \
   --background black
 ```
 

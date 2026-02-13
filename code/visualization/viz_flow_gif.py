@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-elevation", type=float, default=18.0)
     parser.add_argument("--camera-distance-scale", type=float, default=1.5)
     parser.add_argument("--camera-zoom", type=float, default=1.2, help="Camera zoom factor (>1 zoom in).")
-    parser.add_argument("--background", type=str, default="black")
+    parser.add_argument("--background", type=str, default="white")
     return parser.parse_args()
 
 

@@ -26,6 +26,8 @@ class TrainerController:
         network_name="4DFlowNet",
         low_resblock=8,
         hi_resblock=4,
+        predict_mag=False,
+        mag_loss_weight=1.0,
     ):
         """
         TrainerController constructor.
@@ -45,6 +47,8 @@ class TrainerController:
 
         # Training params
         self.QUICKSAVE_ENABLED = quicksave_enable
+        self.predict_mag = bool(predict_mag)
+        self.mag_loss_weight = float(mag_loss_weight)
 
         # Network
         self.network_name = network_name
@@ -53,6 +57,7 @@ class TrainerController:
             low_resblock=low_resblock,
             hi_resblock=hi_resblock,
             channel_nr=64,
+            predict_mag=self.predict_mag,
         ).to(self.device)
 
         self.metric_keys = [
@@ -66,10 +71,15 @@ class TrainerController:
             "val_div",
             "l2_reg_loss",
         ]
+        if self.predict_mag:
+            self.metric_keys.extend(["train_mag_mse", "val_mag_mse"])
         self.accuracy_metric = "val_loss"
 
         print(f"Divergence loss2 * {self.div_weight}")
         print(f"Accuracy metric: {self.accuracy_metric}")
+        print(f"Predict magnitude head: {self.predict_mag}")
+        if self.predict_mag:
+            print(f"Magnitude loss weight: {self.mag_loss_weight}")
         print(f"Using device: {self.device}")
 
         # Learning rate and optimizer (weight_decay replicates L2 regularization)
@@ -100,6 +110,8 @@ class TrainerController:
                     "optimizer_state_dict": self.optimizer.state_dict(),
                     "learning_rate": self.learning_rate,
                     "network_name": self.network_name,
+                    "predict_mag": self.predict_mag,
+                    "mag_loss_weight": self.mag_loss_weight,
                 },
                 checkpoint_path,
             )
@@ -109,28 +121,29 @@ class TrainerController:
     def loss_function(self, y_true, y_pred, mask):
         """
         Calculate Total Loss function:
-        Loss = MSE + weight * div_loss2
+        Loss = velocity_MSE + mag_weight * magnitude_MSE + weight * div_loss2
         """
         u, v, w = y_true[:, 0], y_true[:, 1], y_true[:, 2]
         u_pred, v_pred, w_pred = y_pred[:, 0], y_pred[:, 1], y_pred[:, 2]
 
-        mse = self.calculate_mse(u, v, w, u_pred, v_pred, w_pred)
+        vel_mse_vox = self.calculate_mse(u, v, w, u_pred, v_pred, w_pred)
+        vel_mse = self._masked_region_mse(vel_mse_vox, mask)
 
-        # === Separate mse ===
-        non_fluid_mask = (mask < 0.5).float()
-        epsilon = 1.0  # minimum 1 pixel
+        mag_mse = torch.zeros_like(vel_mse)
+        if self.predict_mag:
+            if y_true.shape[1] < 4 or y_pred.shape[1] < 4:
+                raise ValueError(
+                    f"predict_mag=True requires 4 channels in y_true/y_pred, got "
+                    f"{y_true.shape[1]} and {y_pred.shape[1]}."
+                )
+            mag_true = y_true[:, 3]
+            mag_pred = y_pred[:, 3]
+            mag_mse_vox = (mag_pred - mag_true) ** 2
+            mag_mse = self._masked_region_mse(mag_mse_vox, mask)
 
-        fluid_mse = mse * mask
-        fluid_mse = fluid_mse.sum(dim=(1, 2, 3)) / (mask.sum(dim=(1, 2, 3)) + epsilon)
-
-        non_fluid_mse = mse * non_fluid_mask
-        non_fluid_mse = non_fluid_mse.sum(dim=(1, 2, 3)) / (non_fluid_mask.sum(dim=(1, 2, 3)) + epsilon)
-
-        mse = fluid_mse + non_fluid_mse
-
-        divergence_loss = torch.zeros_like(mse)
-        total_loss = mse + divergence_loss
-        return total_loss, mse, divergence_loss
+        divergence_loss = torch.zeros_like(vel_mse)
+        total_loss = vel_mse + (self.mag_loss_weight * mag_mse) + divergence_loss
+        return total_loss, vel_mse, divergence_loss, mag_mse
 
     def accuracy_function(self, y_true, y_pred, mask):
         """
@@ -146,6 +159,19 @@ class TrainerController:
         Calculate speed magnitude error.
         """
         return (u_pred - u) ** 2 + (v_pred - v) ** 2 + (w_pred - w) ** 2
+
+    @staticmethod
+    def _masked_region_mse(voxel_error, mask):
+        non_fluid_mask = (mask < 0.5).float()
+        epsilon = 1.0  # minimum 1 pixel
+
+        fluid_mse = voxel_error * mask
+        fluid_mse = fluid_mse.sum(dim=(1, 2, 3)) / (mask.sum(dim=(1, 2, 3)) + epsilon)
+
+        non_fluid_mse = voxel_error * non_fluid_mask
+        non_fluid_mse = non_fluid_mse.sum(dim=(1, 2, 3)) / (non_fluid_mask.sum(dim=(1, 2, 3)) + epsilon)
+
+        return fluid_mse + non_fluid_mse
 
     def init_model_dir(self):
         """
@@ -200,12 +226,31 @@ class TrainerController:
     def _to_device_batch(self, data_pairs):
         return [item.to(self.device, non_blocking=True) for item in data_pairs]
 
+    def _prepare_batch(self, data_pairs):
+        batch = self._to_device_batch(data_pairs)
+        if self.predict_mag:
+            if len(batch) != 12:
+                raise ValueError(
+                    f"predict_mag=True expects 12 batch tensors (including hr_mag), got {len(batch)}."
+                )
+            u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, mag_hr, venc, mask = batch
+            hires = torch.cat((u_hr, v_hr, w_hr, mag_hr), dim=1)
+            return u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr
+
+        if len(batch) == 12:
+            u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, _mag_hr, venc, mask = batch
+        elif len(batch) == 11:
+            u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, venc, mask = batch
+        else:
+            raise ValueError(f"Unexpected batch length {len(batch)}.")
+        hires = torch.cat((u_hr, v_hr, w_hr), dim=1)
+        return u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, None
+
     def train_step(self, data_pairs):
         self.model.train()
-        u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, venc, mask = self._to_device_batch(data_pairs)
+        u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _ = self._prepare_batch(data_pairs)
         del venc
 
-        hires = torch.cat((u_hr, v_hr, w_hr), dim=1)
         self.optimizer.zero_grad(set_to_none=True)
         predictions = self.model(u, v, w, u_mag, v_mag, w_mag)
         loss = self.calculate_and_update_metrics(hires, predictions, mask, "train")
@@ -215,16 +260,15 @@ class TrainerController:
     @torch.no_grad()
     def test_step(self, data_pairs):
         self.model.eval()
-        u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, venc, mask = self._to_device_batch(data_pairs)
+        u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _ = self._prepare_batch(data_pairs)
         del venc
 
-        hires = torch.cat((u_hr, v_hr, w_hr), dim=1)
         predictions = self.model(u, v, w, u_mag, v_mag, w_mag)
         self.calculate_and_update_metrics(hires, predictions, mask, "val")
         return predictions
 
     def calculate_and_update_metrics(self, hires, predictions, mask, metric_set):
-        total_loss, mse, divloss = self.loss_function(hires, predictions, mask)
+        total_loss, mse, divloss, mag_mse = self.loss_function(hires, predictions, mask)
         rel_error = self.accuracy_function(hires, predictions, mask)
 
         batch_size = hires.shape[0]
@@ -234,6 +278,8 @@ class TrainerController:
         self._update_metric(f"{metric_set}_loss", total_loss.mean().item(), batch_size)
         self._update_metric(f"{metric_set}_mse", mse.mean().item(), batch_size)
         self._update_metric(f"{metric_set}_div", divloss.mean().item(), batch_size)
+        if self.predict_mag:
+            self._update_metric(f"{metric_set}_mag_mse", mag_mse.mean().item(), batch_size)
         self._update_metric(f"{metric_set}_accuracy", rel_error.mean().item(), batch_size)
         return total_loss.mean()
 
@@ -334,6 +380,8 @@ class TrainerController:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "learning_rate": self.optimizer.param_groups[0]["lr"],
             "network_name": self.network_name,
+            "predict_mag": self.predict_mag,
+            "mag_loss_weight": self.mag_loss_weight,
         }
         torch.save(checkpoint, f"{self.model_path}-best.pt")
 
@@ -368,6 +416,8 @@ class TrainerController:
             "div": self._metric_value("train_div"),
             "l2_reg_loss": self._metric_value("l2_reg_loss"),
         }
+        if self.predict_mag:
+            train_metrics["mag_mse"] = self._metric_value("train_mag_mse")
         for key, value in train_metrics.items():
             self.train_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -377,6 +427,8 @@ class TrainerController:
             "mse": self._metric_value("val_mse"),
             "div": self._metric_value("val_div"),
         }
+        if self.predict_mag:
+            val_metrics["mag_mse"] = self._metric_value("val_mag_mse")
         for key, value in val_metrics.items():
             self.val_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -387,11 +439,10 @@ class TrainerController:
         """
         self.model.eval()
         for data_pairs in testset:
-            u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, venc, mask = self._to_device_batch(data_pairs)
-            hires = torch.cat((u_hr, v_hr, w_hr), dim=1)
+            u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr = self._prepare_batch(data_pairs)
             preds = self.model(u, v, w, u_mag, v_mag, w_mag)
 
-            loss_val, mse, divloss = self.loss_function(hires, preds, mask)
+            loss_val, mse, divloss, _mag_mse = self.loss_function(hires, preds, mask)
             rel_loss = self.accuracy_function(hires, preds, mask)
             break
 
@@ -402,15 +453,25 @@ class TrainerController:
         h5util.save_predictions(self.model_dir, quicksave_filename, "u", preds_np[:, 0], compression="gzip")
         h5util.save_predictions(self.model_dir, quicksave_filename, "v", preds_np[:, 1], compression="gzip")
         h5util.save_predictions(self.model_dir, quicksave_filename, "w", preds_np[:, 2], compression="gzip")
+        if self.predict_mag:
+            h5util.save_predictions(self.model_dir, quicksave_filename, "mag", preds_np[:, 3], compression="gzip")
 
         if epoch_nr == 1:
             h5util.save_predictions(self.model_dir, quicksave_filename, "lr_u", u.detach().cpu().numpy().squeeze(1), compression="gzip")
             h5util.save_predictions(self.model_dir, quicksave_filename, "lr_v", v.detach().cpu().numpy().squeeze(1), compression="gzip")
             h5util.save_predictions(self.model_dir, quicksave_filename, "lr_w", w.detach().cpu().numpy().squeeze(1), compression="gzip")
 
-            h5util.save_predictions(self.model_dir, quicksave_filename, "hr_u", u_hr.detach().cpu().numpy().squeeze(1), compression="gzip")
-            h5util.save_predictions(self.model_dir, quicksave_filename, "hr_v", v_hr.detach().cpu().numpy().squeeze(1), compression="gzip")
-            h5util.save_predictions(self.model_dir, quicksave_filename, "hr_w", w_hr.detach().cpu().numpy().squeeze(1), compression="gzip")
+            h5util.save_predictions(self.model_dir, quicksave_filename, "hr_u", hires[:, 0].detach().cpu().numpy(), compression="gzip")
+            h5util.save_predictions(self.model_dir, quicksave_filename, "hr_v", hires[:, 1].detach().cpu().numpy(), compression="gzip")
+            h5util.save_predictions(self.model_dir, quicksave_filename, "hr_w", hires[:, 2].detach().cpu().numpy(), compression="gzip")
+            if self.predict_mag and mag_hr is not None:
+                h5util.save_predictions(
+                    self.model_dir,
+                    quicksave_filename,
+                    "hr_mag",
+                    mag_hr.detach().cpu().numpy().squeeze(1),
+                    compression="gzip",
+                )
 
             h5util.save_predictions(self.model_dir, quicksave_filename, "venc", venc.detach().cpu().numpy(), compression="gzip")
             h5util.save_predictions(self.model_dir, quicksave_filename, "mask", mask.detach().cpu().numpy(), compression="gzip")

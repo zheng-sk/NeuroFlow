@@ -21,6 +21,17 @@ def main():
     parser.add_argument("--mag-scale", type=float, default=4095.0, help="Magnitude normalization divisor.")
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold.")
     parser.add_argument(
+        "--predict-mag",
+        action="store_true",
+        help="Enable 4th output channel to predict HR magnitude (requires `hr_mag` in CSV).",
+    )
+    parser.add_argument(
+        "--mag-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight applied to magnitude MSE term when --predict-mag is enabled.",
+    )
+    parser.add_argument(
         "--raw-phase-input",
         dest="raw_phase_input",
         action="store_true",
@@ -72,6 +83,7 @@ def main():
         samples_per_volume=args.train_samples_per_volume,
         shuffle=True,
         augment=True,
+        include_hr_mag=args.predict_mag,
         num_workers=args.num_workers,
         mag_scale=args.mag_scale,
         mask_threshold=args.mask_threshold,
@@ -92,6 +104,7 @@ def main():
         samples_per_volume=args.val_samples_per_volume,
         shuffle=False,
         augment=False,
+        include_hr_mag=args.predict_mag,
         num_workers=args.num_workers,
         mag_scale=args.mag_scale,
         mask_threshold=args.mask_threshold,
@@ -114,6 +127,8 @@ def main():
         network_name=args.network_name,
         low_resblock=args.low_resblock,
         hi_resblock=args.hi_resblock,
+        predict_mag=args.predict_mag,
+        mag_loss_weight=args.mag_loss_weight,
     )
     network.init_model_dir()
 

@@ -50,17 +50,17 @@ def _resolve_path(path_value: str, base_dir: str) -> str:
     return os.path.abspath(os.path.join(base_abs, path_value))
 
 
-def load_nifti_case_table(csv_path: str) -> List[Dict]:
+def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[Dict]:
     """
     Load case descriptors from CSV.
 
     Required columns:
         lr_u, lr_v, lr_w, lr_mag_u, lr_mag_v, lr_mag_w, hr_u, hr_v, hr_w
     Optional columns:
-        mask, venc, venc_u, venc_v, venc_w, time_start, time_end, time_index
+        hr_mag, mask, venc, venc_u, venc_v, venc_w, time_start, time_end, time_index
     """
     required = ["lr_u", "lr_v", "lr_w", "lr_mag_u", "lr_mag_v", "lr_mag_w", "hr_u", "hr_v", "hr_w"]
-    optional = ["mask", "venc", "venc_u", "venc_v", "venc_w", "time_start", "time_end", "time_index"]
+    optional = ["hr_mag", "mask", "venc", "venc_u", "venc_v", "venc_w", "time_start", "time_end", "time_index"]
 
     base_dir = os.path.dirname(os.path.abspath(csv_path))
     cases = []
@@ -78,10 +78,25 @@ def load_nifti_case_table(csv_path: str) -> List[Dict]:
                     case[key] = float(value) if str(value).strip() else 0.0
                 elif key in ("time_start", "time_end", "time_index"):
                     case[key] = int(value) if str(value).strip() else -1
+                elif key == "hr_mag":
+                    if str(value).strip():
+                        case[key] = _resolve_path(value, base_dir)
+                    elif include_hr_mag:
+                        # Backward-compatible fallback for older CSVs without hr_mag.
+                        hr_u_path = _resolve_path(row.get("hr_u", ""), base_dir)
+                        inferred = os.path.join(os.path.dirname(hr_u_path), "input_mag_raw.nii.gz")
+                        case[key] = inferred if os.path.exists(inferred) else ""
+                    else:
+                        case[key] = ""
                 elif key == "mask":
                     case[key] = _resolve_path(value, base_dir) if str(value).strip() else None
                 else:
                     case[key] = _resolve_path(value, base_dir)
+            if include_hr_mag and not case.get("hr_mag"):
+                raise ValueError(
+                    f"Row {idx} in {csv_path} requires hr_mag for --predict-mag. "
+                    "Add `hr_mag` column or ensure `<hr_u_dir>/input_mag_raw.nii.gz` exists."
+                )
             cases.append(case)
     return cases
 
@@ -91,6 +106,7 @@ class _StackNormalizeFieldsd(Transform):
         self,
         mag_scale: float,
         mask_threshold: float,
+        include_hr_mag: bool = False,
         raw_phase_input: bool = True,
         invert_uv_sign_on_raw: bool = False,
         raw_center: float = 2048.0,
@@ -101,6 +117,7 @@ class _StackNormalizeFieldsd(Transform):
     ):
         self.mag_scale = float(mag_scale)
         self.mask_threshold = float(mask_threshold)
+        self.include_hr_mag = bool(include_hr_mag)
         self.raw_phase_input = bool(raw_phase_input)
         self.invert_uv_sign_on_raw = bool(invert_uv_sign_on_raw)
         self.raw_center = float(raw_center)
@@ -176,6 +193,7 @@ class _StackNormalizeFieldsd(Transform):
         mag_u_raw = d["lr_mag_u"][0].astype(np.float32)
         mag_v_raw = d["lr_mag_v"][0].astype(np.float32)
         mag_w_raw = d["lr_mag_w"][0].astype(np.float32)
+        hr_mag_raw = d["hr_mag"][0].astype(np.float32) if self.include_hr_mag else None
         mask_raw = d["mask"][0].astype(np.float32) if "mask" in d and d["mask"] is not None else None
 
         # 4D NIfTI support: sample/select one time frame and continue with 3D patching.
@@ -184,6 +202,9 @@ class _StackNormalizeFieldsd(Transform):
             for arr in [lr_u_raw, lr_v_raw, lr_w_raw, hr_u_raw, hr_v_raw, hr_w_raw, mag_u_raw, mag_v_raw, mag_w_raw]:
                 axis = self._normalize_time_axis(arr.ndim)
                 time_lengths.append(arr.shape[axis])
+            if hr_mag_raw is not None and hr_mag_raw.ndim == 4:
+                axis = self._normalize_time_axis(hr_mag_raw.ndim)
+                time_lengths.append(hr_mag_raw.shape[axis])
             if mask_raw is not None and mask_raw.ndim == 4:
                 axis = self._normalize_time_axis(mask_raw.ndim)
                 time_lengths.append(mask_raw.shape[axis])
@@ -227,6 +248,7 @@ class _StackNormalizeFieldsd(Transform):
         mag_u = self._select_time_frame(mag_u_raw, t_index)
         mag_v = self._select_time_frame(mag_v_raw, t_index)
         mag_w = self._select_time_frame(mag_w_raw, t_index)
+        hr_mag = self._select_time_frame(hr_mag_raw, t_index) if hr_mag_raw is not None else None
         mask = self._select_time_frame(mask_raw, t_index) if mask_raw is not None else None
 
         venc_u = self._resolve_component_venc(d, "venc_u")
@@ -272,6 +294,8 @@ class _StackNormalizeFieldsd(Transform):
         lr_vel = lr_vel / venc
         hr_vel = hr_vel / venc
         lr_mag = lr_mag / self.mag_scale
+        if hr_mag is not None:
+            hr_mag = hr_mag.astype(np.float32) / self.mag_scale
 
         if mask is not None:
             mask = (mask >= self.mask_threshold).astype(np.float32)
@@ -281,6 +305,8 @@ class _StackNormalizeFieldsd(Transform):
         d["lr_vel"] = lr_vel
         d["hr_vel"] = hr_vel
         d["lr_mag"] = lr_mag
+        if hr_mag is not None:
+            d["hr_mag"] = hr_mag
         d["mask"] = mask
         d["venc"] = np.float32(venc)
         return d
@@ -332,6 +358,8 @@ class _RandomVectorRotate90d(Transform):
             ],
             axis=0,
         ).astype(np.float32)
+        if "hr_mag" in d:
+            d["hr_mag"] = self._rotate_scalar(d["hr_mag"], rotation_idx, plane_nr).astype(np.float32)
         d["mask"] = self._rotate_scalar(d["mask"], rotation_idx, plane_nr).astype(np.float32)
         return d
 
@@ -342,6 +370,7 @@ class _PairedRandomPatchd(Transform):
         patch_size: int,
         res_increase: int,
         random_center: bool,
+        include_hr_mag: bool = False,
         minimum_coverage: float = 0.0,
         max_sampling_attempts: int = 100,
         allow_empty_fallback: bool = True,
@@ -349,6 +378,7 @@ class _PairedRandomPatchd(Transform):
         self.patch_size = int(patch_size)
         self.res_increase = int(res_increase)
         self.random_center = bool(random_center)
+        self.include_hr_mag = bool(include_hr_mag)
         self.minimum_coverage = float(minimum_coverage)
         self.max_sampling_attempts = int(max_sampling_attempts)
         self.allow_empty_fallback = bool(allow_empty_fallback)
@@ -363,8 +393,13 @@ class _PairedRandomPatchd(Transform):
         lr_vel = np.ascontiguousarray(d["lr_vel"][:, x0 : x0 + p, y0 : y0 + p, z0 : z0 + p])
         lr_mag = np.ascontiguousarray(d["lr_mag"][:, x0 : x0 + p, y0 : y0 + p, z0 : z0 + p])
         hr_vel = np.ascontiguousarray(d["hr_vel"][:, hx0 : hx0 + hp, hy0 : hy0 + hp, hz0 : hz0 + hp])
+        hr_mag = (
+            np.ascontiguousarray(d["hr_mag"][hx0 : hx0 + hp, hy0 : hy0 + hp, hz0 : hz0 + hp])
+            if self.include_hr_mag
+            else None
+        )
         mask = np.ascontiguousarray(d["mask"][hx0 : hx0 + hp, hy0 : hy0 + hp, hz0 : hz0 + hp])
-        return lr_vel, lr_mag, hr_vel, mask
+        return lr_vel, lr_mag, hr_vel, hr_mag, mask
 
     def __call__(self, data):
         d = dict(data)
@@ -381,8 +416,10 @@ class _PairedRandomPatchd(Transform):
             x0 = (lx - p) // 2
             y0 = (ly - p) // 2
             z0 = (lz - p) // 2
-            lr_vel, lr_mag, hr_vel, mask = self._crop_pair(d, x0, y0, z0)
+            lr_vel, lr_mag, hr_vel, hr_mag, mask = self._crop_pair(d, x0, y0, z0)
             d["lr_vel"], d["lr_mag"], d["hr_vel"], d["mask"] = lr_vel, lr_mag, hr_vel, mask
+            if self.include_hr_mag and hr_mag is not None:
+                d["hr_mag"] = hr_mag
             return d
 
         # Training mode: random patch with optional legacy minimum coverage constraint.
@@ -395,18 +432,22 @@ class _PairedRandomPatchd(Transform):
             y0 = np.random.randint(0, ly - p + 1)
             z0 = np.random.randint(0, lz - p + 1)
 
-            lr_vel, lr_mag, hr_vel, mask = self._crop_pair(d, x0, y0, z0)
+            lr_vel, lr_mag, hr_vel, hr_mag, mask = self._crop_pair(d, x0, y0, z0)
             coverage = float(mask.mean())
             if coverage > best_cov:
                 best_cov = coverage
-                best = (lr_vel, lr_mag, hr_vel, mask)
+                best = (lr_vel, lr_mag, hr_vel, hr_mag, mask)
 
             if coverage >= self.minimum_coverage:
                 d["lr_vel"], d["lr_mag"], d["hr_vel"], d["mask"] = lr_vel, lr_mag, hr_vel, mask
+                if self.include_hr_mag and hr_mag is not None:
+                    d["hr_mag"] = hr_mag
                 return d
 
         if self.allow_empty_fallback and best is not None:
-            d["lr_vel"], d["lr_mag"], d["hr_vel"], d["mask"] = best
+            d["lr_vel"], d["lr_mag"], d["hr_vel"], hr_mag, d["mask"] = best
+            if self.include_hr_mag and hr_mag is not None:
+                d["hr_mag"] = hr_mag
             d["patch_coverage"] = np.float32(best_cov)
             return d
 
@@ -425,6 +466,7 @@ class NiftiPatchDataset(Dataset):
         res_increase: int,
         samples_per_volume: int,
         augment: bool,
+        include_hr_mag: bool = False,
         mag_scale: float = 4095.0,
         mask_threshold: float = 0.5,
         raw_phase_input: bool = True,
@@ -439,14 +481,18 @@ class NiftiPatchDataset(Dataset):
         self.cases = list(cases)
         self.samples_per_volume = int(samples_per_volume)
         self.samples_per_volume = max(self.samples_per_volume, 1)
+        self.include_hr_mag = bool(include_hr_mag)
 
         load_keys = ["lr_u", "lr_v", "lr_w", "lr_mag_u", "lr_mag_v", "lr_mag_w", "hr_u", "hr_v", "hr_w", "mask"]
+        if self.include_hr_mag:
+            load_keys.append("hr_mag")
         transforms = [
             LoadImaged(keys=load_keys, image_only=True, allow_missing_keys=True),
             EnsureChannelFirstd(keys=load_keys, channel_dim="no_channel", allow_missing_keys=True),
             _StackNormalizeFieldsd(
                 mag_scale=mag_scale,
                 mask_threshold=mask_threshold,
+                include_hr_mag=self.include_hr_mag,
                 raw_phase_input=raw_phase_input,
                 invert_uv_sign_on_raw=invert_uv_sign_on_raw,
                 raw_center=raw_center,
@@ -462,6 +508,7 @@ class NiftiPatchDataset(Dataset):
                 patch_size=patch_size,
                 res_increase=res_increase,
                 random_center=augment,
+                include_hr_mag=self.include_hr_mag,
                 minimum_coverage=minimum_coverage,
                 max_sampling_attempts=max_sampling_attempts,
                 allow_empty_fallback=allow_empty_fallback,
@@ -482,10 +529,11 @@ class NiftiPatchDataset(Dataset):
         lr_vel = torch.from_numpy(sample["lr_vel"]).float()
         lr_mag = torch.from_numpy(sample["lr_mag"]).float()
         hr_vel = torch.from_numpy(sample["hr_vel"]).float()
+        hr_mag = torch.from_numpy(sample["hr_mag"]).float() if self.include_hr_mag else None
         mask = torch.from_numpy(sample["mask"]).float()
         venc = torch.tensor(sample["venc"], dtype=torch.float32)
 
-        return (
+        out = (
             lr_vel[0:1],
             lr_vel[1:2],
             lr_vel[2:3],
@@ -495,9 +543,11 @@ class NiftiPatchDataset(Dataset):
             hr_vel[0:1],
             hr_vel[1:2],
             hr_vel[2:3],
-            venc,
-            mask,
         )
+        if self.include_hr_mag and hr_mag is not None:
+            out = out + (hr_mag.unsqueeze(0),)
+        out = out + (venc, mask)
+        return out
 
 
 def create_nifti_patch_dataloader(
@@ -508,6 +558,7 @@ def create_nifti_patch_dataloader(
     samples_per_volume: int,
     shuffle: bool,
     augment: bool,
+    include_hr_mag: bool = False,
     num_workers: int = 0,
     mag_scale: float = 4095.0,
     mask_threshold: float = 0.5,
@@ -520,13 +571,14 @@ def create_nifti_patch_dataloader(
     max_sampling_attempts: int = 100,
     allow_empty_fallback: bool = True,
 ):
-    cases = load_nifti_case_table(csv_path)
+    cases = load_nifti_case_table(csv_path, include_hr_mag=include_hr_mag)
     dataset = NiftiPatchDataset(
         cases=cases,
         patch_size=patch_size,
         res_increase=res_increase,
         samples_per_volume=samples_per_volume,
         augment=augment,
+        include_hr_mag=include_hr_mag,
         mag_scale=mag_scale,
         mask_threshold=mask_threshold,
         raw_phase_input=raw_phase_input,

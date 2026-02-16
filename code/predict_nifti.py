@@ -1,7 +1,7 @@
 import argparse
 import os
 import sys
-from typing import Tuple
+from typing import Optional, Tuple
 
 import nibabel as nib
 import numpy as np
@@ -32,15 +32,25 @@ def ensure_time_first(data: np.ndarray, time_axis: int):
     return data
 
 
-def load_model(model_path, res_increase, low_resblock, hi_resblock, device):
-    model = SR4DFlowNet(res_increase, low_resblock=low_resblock, hi_resblock=hi_resblock).to(device)
+def load_model(model_path, res_increase, low_resblock, hi_resblock, device, predict_mag: Optional[bool] = None):
     checkpoint = torch.load(model_path, map_location=device)
+    if predict_mag is None and isinstance(checkpoint, dict) and "predict_mag" in checkpoint:
+        predict_mag = bool(checkpoint["predict_mag"])
+    if predict_mag is None:
+        predict_mag = False
+
+    model = SR4DFlowNet(
+        res_increase,
+        low_resblock=low_resblock,
+        hi_resblock=hi_resblock,
+        predict_mag=predict_mag,
+    ).to(device)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     else:
         model.load_state_dict(checkpoint)
     model.eval()
-    return model
+    return model, bool(predict_mag)
 
 
 def adjust_affine_for_upsample(affine: np.ndarray, res_increase: int):
@@ -172,7 +182,7 @@ def _legacy_overlap_predict(model, lr_input: np.ndarray, patch_size: int, res_in
             pred = model(u, v, w, um, vm, wm).cpu().numpy()
         pred_batches.append(pred)
 
-    pred_all = np.concatenate(pred_batches, axis=0)  # [N, 3, hp, hp, hp]
+    pred_all = np.concatenate(pred_batches, axis=0)  # [N, C, hp, hp, hp], C in {3,4}
     pred_u = _legacy_patchup_with_overlap(
         pred_all[:, 0], nr_x=nr_x, nr_y=nr_y, nr_z=nr_z, patch_size=patch_size, res_increase=res_increase, end_pads=end_pads
     )
@@ -182,7 +192,19 @@ def _legacy_overlap_predict(model, lr_input: np.ndarray, patch_size: int, res_in
     pred_w = _legacy_patchup_with_overlap(
         pred_all[:, 2], nr_x=nr_x, nr_y=nr_y, nr_z=nr_z, patch_size=patch_size, res_increase=res_increase, end_pads=end_pads
     )
-    return np.stack([pred_u, pred_v, pred_w], axis=0).astype(np.float32)
+    outputs = [pred_u, pred_v, pred_w]
+    if pred_all.shape[1] == 4:
+        pred_mag = _legacy_patchup_with_overlap(
+            pred_all[:, 3],
+            nr_x=nr_x,
+            nr_y=nr_y,
+            nr_z=nr_z,
+            patch_size=patch_size,
+            res_increase=res_increase,
+            end_pads=end_pads,
+        )
+        outputs.append(pred_mag)
+    return np.stack(outputs, axis=0).astype(np.float32)
 
 
 def main():
@@ -231,6 +253,15 @@ def main():
     parser.add_argument("--time-axis", type=int, default=-1, help="Time axis for 4D NIfTI (default last axis).")
     parser.add_argument("--low-resblock", type=int, default=8, help="Number of low-res residual blocks.")
     parser.add_argument("--hi-resblock", type=int, default=4, help="Number of high-res residual blocks.")
+    parser.add_argument(
+        "--predict-mag",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable/disable 4-channel output (u,v,w,mag). "
+            "If not provided, tries checkpoint metadata (`predict_mag`)."
+        ),
+    )
     args = parser.parse_args()
 
     u, u_img = load_nifti(args.u)
@@ -295,7 +326,14 @@ def main():
         w = raw_to_velocity(w, venc=venc, raw_center=args.raw_center, raw_scale=args.raw_scale, invert_sign=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(args.model_path, args.res_increase, args.low_resblock, args.hi_resblock, device)
+    model, predict_mag = load_model(
+        args.model_path,
+        args.res_increase,
+        args.low_resblock,
+        args.hi_resblock,
+        device,
+        predict_mag=args.predict_mag,
+    )
 
     def predictor_fn(x):
         u_t, v_t, w_t, um_t, vm_t, wm_t = torch.chunk(x, 6, dim=1)
@@ -338,18 +376,24 @@ def main():
                 )
             pred_np = pred.squeeze(0).cpu().numpy()
 
-        pred_np = pred_np * venc
+        if pred_np.shape[0] not in (3, 4):
+            raise ValueError(f"Unexpected model output channels: {pred_np.shape[0]} (expected 3 or 4)")
+
+        pred_np[:3] = pred_np[:3] * venc
+        if pred_np.shape[0] == 4:
+            pred_np[3] = pred_np[3] * float(args.mag_scale)
 
         if args.round_small_values:
             threshold = venc / 2048.0
-            pred_np[np.abs(pred_np) < threshold] = 0
+            pred_np[:3][np.abs(pred_np[:3]) < threshold] = 0
         pred_frames.append(pred_np)
         print(f"Processed frame {t + 1}/{u.shape[0]}")
 
-    pred_stack = np.stack(pred_frames, axis=0)  # [T, 3, X, Y, Z]
+    pred_stack = np.stack(pred_frames, axis=0)  # [T, C, X, Y, Z]
     u_out = np.moveaxis(pred_stack[:, 0], 0, -1)  # [X, Y, Z, T]
     v_out = np.moveaxis(pred_stack[:, 1], 0, -1)
     w_out = np.moveaxis(pred_stack[:, 2], 0, -1)
+    mag_out = np.moveaxis(pred_stack[:, 3], 0, -1) if pred_stack.shape[1] == 4 else None
 
     out_affine = adjust_affine_for_upsample(u_img.affine, args.res_increase)
     os.makedirs(os.path.dirname(os.path.abspath(args.output_prefix)), exist_ok=True)
@@ -358,13 +402,16 @@ def main():
     v_path = f"{args.output_prefix}_v.nii.gz"
     w_path = f"{args.output_prefix}_w.nii.gz"
     uvw_path = f"{args.output_prefix}_uvw.nii.gz"
+    mag_path = f"{args.output_prefix}_mag.nii.gz"
 
     nib.save(nib.Nifti1Image(u_out.astype(np.float32), out_affine), u_path)
     nib.save(nib.Nifti1Image(v_out.astype(np.float32), out_affine), v_path)
     nib.save(nib.Nifti1Image(w_out.astype(np.float32), out_affine), w_path)
+    if mag_out is not None:
+        nib.save(nib.Nifti1Image(mag_out.astype(np.float32), out_affine), mag_path)
 
     # Combined vector-field NIfTI. Shape: [X, Y, Z, T, 3]
-    uvw_out = np.moveaxis(pred_stack, 1, -1).astype(np.float32)
+    uvw_out = np.moveaxis(pred_stack[:, :3], 1, -1).astype(np.float32)
     uvw_out = np.moveaxis(uvw_out, 0, 3)
     nib.save(nib.Nifti1Image(uvw_out, out_affine), uvw_path)
 
@@ -372,7 +419,10 @@ def main():
     print(" ", u_path)
     print(" ", v_path)
     print(" ", w_path)
+    if mag_out is not None:
+        print(" ", mag_path)
     print(" ", uvw_path)
+    print(f"Model predict_mag={predict_mag}, output_channels={pred_stack.shape[1]}")
 
 
 if __name__ == "__main__":

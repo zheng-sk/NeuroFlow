@@ -271,6 +271,7 @@ This creates:
 - `lr_3t/<case>/...`
 - `hr_7t_in_3t/<case>/...`
 - paired CSV for training (with `mask` empty by default)
+- includes `hr_mag` column for optional 4-output training (`u,v,w,mag`)
 
 Command:
 

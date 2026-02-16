@@ -16,6 +16,12 @@ Required CSV columns:
 lr_u,lr_v,lr_w,lr_mag_u,lr_mag_v,lr_mag_w,hr_u,hr_v,hr_w,mask,venc
 ```
 
+If you train with magnitude output (`--predict-mag`), add:
+
+```text
+hr_mag
+```
+
 Notes:
 
 - `mask` is optional (empty allowed).
@@ -144,6 +150,12 @@ non_fluid_mse = sum(mse * (1-mask)) / (sum(1-mask) + eps)
 loss = fluid_mse + non_fluid_mse
 ```
 
+When `--predict-mag` is enabled:
+
+```text
+loss = vel_mse + mag_loss_weight * mag_mse
+```
+
 Relative error metric is computed over masked regions.
 
 ## 8) Training Command
@@ -170,4 +182,20 @@ Use legacy U/V inversion only for old datasets:
 
 ```bash
 --legacy-invert-uv-sign-on-raw
+```
+
+Train with 4 outputs (`u,v,w,mag`):
+
+```bash
+cd src
+python trainer_nifti.py \
+  --train-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
+  --val-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
+  --patch-size 16 \
+  --res-increase 2 \
+  --batch-size 4 \
+  --epochs 60 \
+  --mask-threshold 0.5 \
+  --predict-mag \
+  --mag-loss-weight 1.0
 ```

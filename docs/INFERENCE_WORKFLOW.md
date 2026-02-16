@@ -39,7 +39,10 @@ W_norm = W / venc
 MAG_norm = MAG / mag_scale
 ```
 
-Model predicts normalized HR velocity; output is rescaled by `venc`.
+Model predicts normalized HR outputs:
+
+- velocity channels (`u,v,w`) are rescaled by `venc`
+- magnitude channel (`mag`, when enabled) is rescaled by `mag_scale`
 
 ## 3) Sliding Window Modes
 
@@ -66,12 +69,19 @@ python code/predict_nifti.py \
   --res-increase 2
 ```
 
+For checkpoints trained with 4 outputs (`u,v,w,mag`), set:
+
+```bash
+--predict-mag
+```
+
 ## 5) Outputs
 
 - `<output-prefix>_u.nii.gz`
 - `<output-prefix>_v.nii.gz`
 - `<output-prefix>_w.nii.gz`
 - `<output-prefix>_uvw.nii.gz`
+- `<output-prefix>_mag.nii.gz` (only when model outputs magnitude)
 
 `_uvw` stacks the 3 components in one 4D NIfTI.
 

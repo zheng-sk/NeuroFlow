@@ -74,10 +74,11 @@ class ResnetBlock(nn.Module):
 
 
 class SR4DFlowNet(nn.Module):
-    def __init__(self, res_increase, low_resblock=8, hi_resblock=4, channel_nr=64):
+    def __init__(self, res_increase, low_resblock=8, hi_resblock=4, channel_nr=64, predict_mag=False):
         super().__init__()
         self.res_increase = res_increase
         self.channel_nr = channel_nr
+        self.predict_mag = bool(predict_mag)
 
         self.pc_path = nn.Sequential(
             Conv3dBlock(3, channel_nr, 3, "SYMMETRIC", "relu"),
@@ -112,6 +113,11 @@ class SR4DFlowNet(nn.Module):
             Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
             Conv3dBlock(channel_nr, 1, 3, "SYMMETRIC", None),
         )
+        if self.predict_mag:
+            self.mag_path = nn.Sequential(
+                Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
+                Conv3dBlock(channel_nr, 1, 3, "SYMMETRIC", None),
+            )
 
     def forward(self, u, v, w, u_mag, v_mag, w_mag):
         speed = torch.sqrt(u**2 + v**2 + w**2)
@@ -138,4 +144,7 @@ class SR4DFlowNet(nn.Module):
         u_path = self.u_path(rb)
         v_path = self.v_path(rb)
         w_path = self.w_path(rb)
-        return torch.cat([u_path, v_path, w_path], dim=1)
+        outputs = [u_path, v_path, w_path]
+        if self.predict_mag:
+            outputs.append(self.mag_path(rb))
+        return torch.cat(outputs, dim=1)

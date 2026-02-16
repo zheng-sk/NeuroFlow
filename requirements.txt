@@ -1,0 +1,34 @@
+# 4DFlowNet main environment (PyTorch + MONAI + CoW segmentation)
+
+# Core deep learning stack
+# NOTE: install PyTorch matching your platform/CUDA from official wheels if needed.
+torch
+torchvision
+torchaudio
+monai
+tensorboard
+
+# Medical imaging + data IO
+antspyx
+h5py
+nibabel
+pydicom
+SimpleITK>=2.2.1
+
+# Scientific Python
+numpy
+scipy
+pandas
+scikit-learn
+statsmodels
+matplotlib
+PyYAML
+
+# CoW segmentation dependencies
+ultralytics
+opencv-python-headless
+scikit-image>=0.19.3
+batchgenerators>=0.25
+
+# Local nnU-Net v2 package vendored in this repository
+-e ./topcow-2024-nnunet

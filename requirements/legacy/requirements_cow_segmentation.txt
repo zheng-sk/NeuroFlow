@@ -1,0 +1,12 @@
+# Base stack used in this repository (PyTorch + MONAI + imaging tools)
+-r requirements_torch_monai.txt
+
+# CoW segmentation dependencies
+ultralytics
+opencv-python-headless
+SimpleITK>=2.2.1
+scikit-image>=0.19.3
+batchgenerators>=0.25
+
+# Local nnU-Net v2 package vendored in this repository
+-e ./topcow-2024-nnunet

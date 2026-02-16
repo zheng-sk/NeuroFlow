@@ -6,13 +6,17 @@ This is an implementation of the paper [4DFlowNet: Super-Resolution 4D Flow MRI]
 ## Framework migration status
 
 - Legacy branch implementation: TensorFlow/Keras.
-- Current migration branch implementation: PyTorch + MONAI (`requirements_torch_monai.txt`).
+- Current migration branch implementation: PyTorch + MONAI (`requirements.txt`).
 
-Install dependencies for the migration branch:
+Install dependencies for this branch:
 
 ```bash
-pip install -r requirements_torch_monai.txt
+pip install -r requirements.txt
 ```
+
+If your environment is offline and editable install of `topcow-2024-nnunet` fails, segmentation scripts can still import `nnunetv2` directly from the vendored `topcow-2024-nnunet/` folder in repo root.
+
+Previous requirements files were moved to `requirements/legacy/`.
 
 ## Updates 4DFlowNet v2.0
 - Loss function has been updated (MSE fluid + MSE non fluid)
@@ -66,6 +70,20 @@ The old HDF5 patch-index workflow is still available as a legacy option, but it 
 Detailed step-by-step preprocessing and normalization guide:
 
 - [`docs/PREPROCESSING_PIPELINE.md`](docs/PREPROCESSING_PIPELINE.md)
+
+CoW semantic segmentation guide (for already cropped + interscan-registered NIfTI):
+
+- [`docs/COW_SEGMENTATION.md`](docs/COW_SEGMENTATION.md)
+
+Quick command (cropped + interscan-registered inputs):
+
+```bash
+python code/segmentation/segment_cow_crops.py \
+  --input data/registered_7T_in_3T_cow_crop \
+  --recursive \
+  --model-dir models/topcow-claim-models \
+  --output-dir data/cow_segmentation
+```
 
 ## Direct NIfTI training and prediction (no HDF5)
 

@@ -13,6 +13,7 @@ The sequence below follows this order:
 2. Temporal registration
 3. CoW crop
 4. Inter-scan registration (7T -> 3T)
+4b. (Optional) CoW semantic segmentation
 5. Training data assembly and training normalization
 
 
@@ -191,6 +192,36 @@ Sign behavior at this stage:
 - this stage is geometric alignment; component sign convention should already come from DICOM->NIfTI
 
 
+## 4b) Optional CoW Semantic Segmentation (after crop + inter-scan registration)
+
+Primary scripts:
+
+- `code/segmentation/segment_cow_crops.py` (recommended for already cropped + registered inputs)
+- `code/segmentation/segment_cow_patient_pipeline.py` (patient-folder variant)
+- `code/segmentation/compute_cow_bbox.py` (YOLO bbox utility; no nnU-Net inference)
+
+Purpose:
+
+- generate binary CoW masks for registered volumes
+- combine nnU-Net predictions (`checkpoint_best` + `checkpoint_final`)
+- optionally combine with classical vesselness (Frangi/Sato) and postprocess morphology
+
+Model/install notes:
+
+- local nnU-Net package is vendored at `topcow-2024-nnunet/`
+- install with: `pip install -r requirements.txt`
+
+Recommended command:
+
+```bash
+python code/segmentation/segment_cow_crops.py \
+  --input data/registered_7T_in_3T_cow_crop/ \
+  --recursive \
+  --model-dir models/topcow-claim-models \
+  --output-dir data/cow_segmentation
+```
+
+
 ## 5) Training Preparation and Normalization
 
 Typical scripts:
@@ -336,7 +367,13 @@ python code/preprocessing/yolo_crop_patient_pairs.py --help
 python code/registration/batch_register_7T_to_3T.py --help
 ```
 
-5. Export paired LR/HR and train
+5. Optional CoW segmentation (already cropped + inter-scan registered)
+
+```bash
+python code/segmentation/segment_cow_crops.py --help
+```
+
+6. Export paired LR/HR and train
 
 ```bash
 python code/registration/export_paired_lr_hr_dataset.py --help

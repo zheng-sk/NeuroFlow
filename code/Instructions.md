@@ -8,6 +8,7 @@ code/
 ├── preprocessing/         # Derived feature generation
 ├── registration/          # Temporal + inter-scan registration and QC
 ├── inference/             # Model prediction workflows
+├── segmentation/          # CoW semantic segmentation workflows
 ├── visualization/         # PyVista QC/flow visualization scripts
 ├── predict_nifti.py       # Direct NIfTI inference entrypoint
 └── run_version_e_cow_roi.py  # CoW ROI preprocessing helper
@@ -36,6 +37,13 @@ code/
    - Batch over a folder: `code/registration/batch_register_7T_to_3T.py`
    - Batch defaults expect temporally-registered velocity names: `Vx.nii.gz`, `Vy.nii.gz`, `Vz.nii.gz`
    - For CoW-cropped inputs, prefer `--mask-method none` (skip brain-mask estimation)
+5b. **(Optional) CoW semantic segmentation (recommended for cropped + registered data)**
+   - Main script: `code/segmentation/segment_cow_crops.py`
+   - Input assumption: CoW crop + inter-scan registration already completed
+   - Optional variants:
+     - bbox-only utility: `code/segmentation/compute_cow_bbox.py`
+     - patient-folder pipeline: `code/segmentation/segment_cow_patient_pipeline.py`
+     - legacy end-to-end script: `code/segmentation/legacy_segment_circle_of_willis.py`
 6. **Full registration pipeline (temporal + 7T -> 3T)**
    - One command over a folder: `code/registration/batch_full_register_7T_to_3T.py`
    - Saves final registered images and brain masks (`BrainMasks/`), and can auto-clean intermediates/QC
@@ -87,6 +95,15 @@ code/
 - **NIfTI train/predict defaults**: `src/trainer_nifti.py` and `code/predict_nifti.py` convert RAW phase to m/s with unsigned/signed auto-detection and without extra U/V inversion by default; use `--legacy-invert-uv-sign-on-raw` only for older datasets that still require it.
 - **Orientation convention**: DICOM -> NIfTI conversion canonicalizes magnitude and phase to RAS+ by default. Use `--phase-flips-only` only if you explicitly want to avoid axis permutations in phase components.
 - Both workflows support **unsigned raw phase** (`~0..4096`) and **signed raw phase** (`~-4096..4096` / `~-2048..2048`), using VENC.
+
+## CoW segmentation scripts
+
+- **Install dependencies first**: `pip install -r requirements.txt`
+- **Primary script for cropped + registered inputs**: `python code/segmentation/segment_cow_crops.py --help`
+- **Patient-folder variant**: `python code/segmentation/segment_cow_patient_pipeline.py --help`
+- **YOLO bbox utility**: `python code/segmentation/compute_cow_bbox.py --help`
+- **Legacy script (compatibility only)**: `python code/segmentation/legacy_segment_circle_of_willis.py`
+- **Detailed guide**: `docs/COW_SEGMENTATION.md`
 
 ## Visualization scripts (modular)
 

@@ -10,4 +10,5 @@ data/
 pytorch_venv/
 *.sh
 *.out
+.venv*
 *.venv*

@@ -50,7 +50,23 @@ def adjust_affine_for_upsample(affine: np.ndarray, res_increase: int):
 
 
 def raw_to_velocity(data: np.ndarray, venc: float, raw_center: float, raw_scale: float, invert_sign: bool):
-    out = (data.astype(np.float32) - float(raw_center)) / float(raw_scale) * float(venc)
+    out = data.astype(np.float32)
+    mn = float(np.min(out))
+    mx = float(np.max(out))
+    is_unsigned_raw = (mn >= 0.0) and (mx > 1000.0) and (mx <= 8192.0)
+    max_abs = max(abs(mn), abs(mx))
+    centered_ratio = abs(mx + mn) / (max_abs + 1e-6)
+    is_signed_raw = (mn < -500.0) and (mx > 500.0) and (max_abs <= 8192.0) and (centered_ratio < 0.25)
+
+    if is_unsigned_raw:
+        out = (out - float(raw_center)) / float(raw_scale) * float(venc)
+    elif is_signed_raw:
+        scale = 4096.0 if max_abs > 3000.0 else 2048.0
+        out = out / scale * float(venc)
+    else:
+        # Legacy fallback for non-raw-like ranges when --raw-phase-input is set.
+        out = (out - float(raw_center)) / float(raw_scale) * float(venc)
+
     if invert_sign:
         out = -out
     return out
@@ -203,6 +219,11 @@ def main():
         action="store_false",
         help="Disable raw-phase conversion (input velocity already physical).",
     )
+    parser.add_argument(
+        "--legacy-invert-uv-sign-on-raw",
+        action="store_true",
+        help="Legacy mode: invert U/V signs after RAW->velocity conversion. Keep disabled for DICOM->NIfTI outputs that already applied LPS->RAS sign correction.",
+    )
     parser.add_argument("--raw-center", type=float, default=2048.0, help="Raw phase center value.")
     parser.add_argument("--raw-scale", type=float, default=2048.0, help="Raw phase scaling denominator.")
     parser.add_argument("--mag-scale", type=float, default=4095.0, help="Magnitude normalization divisor.")
@@ -255,9 +276,22 @@ def main():
             venc = 1.0
 
     if args.raw_phase_input:
-        # Legacy-compatible semantic conversion: U/V sign inversion, W unchanged.
-        u = raw_to_velocity(u, venc=venc, raw_center=args.raw_center, raw_scale=args.raw_scale, invert_sign=True)
-        v = raw_to_velocity(v, venc=venc, raw_center=args.raw_center, raw_scale=args.raw_scale, invert_sign=True)
+        # Default behavior avoids double inversion when DICOM->NIfTI already
+        # applied LPS->RAS sign correction to Vx/Vy.
+        u = raw_to_velocity(
+            u,
+            venc=venc,
+            raw_center=args.raw_center,
+            raw_scale=args.raw_scale,
+            invert_sign=args.legacy_invert_uv_sign_on_raw,
+        )
+        v = raw_to_velocity(
+            v,
+            venc=venc,
+            raw_center=args.raw_center,
+            raw_scale=args.raw_scale,
+            invert_sign=args.legacy_invert_uv_sign_on_raw,
+        )
         w = raw_to_velocity(w, venc=venc, raw_center=args.raw_center, raw_scale=args.raw_scale, invert_sign=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

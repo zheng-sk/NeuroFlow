@@ -63,6 +63,10 @@ High Res Ground Truth vs noise-free Super Resolution (1mm)
 Use direct NIfTI training/inference in this migration branch.  
 The old HDF5 patch-index workflow is still available as a legacy option, but it is no longer the recommended default.
 
+Detailed step-by-step preprocessing and normalization guide:
+
+- [`docs/PREPROCESSING_PIPELINE.md`](docs/PREPROCESSING_PIPELINE.md)
+
 ## Direct NIfTI training and prediction (no HDF5)
 
 The migration branch supports an end-to-end MONAI NIfTI workflow:
@@ -115,15 +119,23 @@ python trainer_nifti.py \
   --epochs 60
 ```
 
-By default, `trainer_nifti.py` assumes velocity inputs are raw phase-like values and performs legacy-compatible conversion:
+By default, `trainer_nifti.py` assumes velocity inputs are raw phase-like values and converts to physical velocity.
+The conversion now auto-detects unsigned/signed RAW ranges:
 
-- `vel = (raw - 2048) / 2048 * venc`
-- U/V sign inversion, W unchanged
+- unsigned RAW (centered near 2048): `vel = (raw - 2048) / 2048 * venc`
+- signed RAW (centered near 0): `vel = raw / scale * venc`, with `scale=2048` or `4096`
+- No additional U/V sign inversion (to avoid double inversion when DICOM->NIfTI already applied LPS->RAS sign correction)
 
 If your NIfTI velocity is already physical (m/s), disable this with:
 
 ```bash
 --already-velocity-input
+```
+
+Only for older datasets that still need the extra legacy sign convention, enable:
+
+```bash
+--legacy-invert-uv-sign-on-raw
 ```
 
 Legacy-compatible patch sampling (coverage-aware) can be enabled with:
@@ -187,9 +199,11 @@ The NIfTI training/validation dataloader in `src/Network/NiftiPatchDataset.py` a
    - Stacks LR velocity into `lr_vel` (3 channels).  
    - Stacks HR velocity into `hr_vel` (3 channels).  
    - Stacks LR magnitude into `lr_mag` (3 channels).  
-   - By default, converts raw phase-like velocity to physical velocity using legacy formula and sign convention:
-     - `vel = (raw - 2048) / 2048 * venc`
-     - U/V are sign-inverted, W is unchanged
+   - By default, converts raw phase-like velocity to physical velocity (auto-detecting unsigned/signed RAW):
+     - unsigned RAW: `vel = (raw - 2048) / 2048 * venc`
+     - signed RAW: `vel = raw / scale * venc`, with `scale=2048` or `4096`
+     - no extra U/V inversion (LPS->RAS sign correction is expected to be baked during DICOM->NIfTI conversion)
+     - optional legacy mode: `--legacy-invert-uv-sign-on-raw`
    - Applies normalization:
      - velocity: divide by `venc` (CSV value, or estimated from LR velocity max abs if `venc <= 0`)
      - magnitude: divide by `mag_scale` (default 4095)
@@ -255,6 +269,7 @@ Training (`trainer_nifti.py`):
 | `val-samples-per-volume` | Patch samples per validation volume per epoch | 16 |
 | `legacy-minimum-coverage` | Optional minimum mask coverage per sampled train patch | 0.0 |
 | `legacy-max-sampling-attempts` | Max retries to find a patch matching coverage | 100 |
+| `legacy-invert-uv-sign-on-raw` | Legacy-only extra U/V sign inversion after RAW->m/s conversion | off |
 
 Prediction (`code/predict_nifti.py`):
 
@@ -267,6 +282,7 @@ Prediction (`code/predict_nifti.py`):
 | `legacy-overlap-inference` | Use legacy overlap/trim patch reconstruction | off |
 | `round-small-values` | Zero values below `venc/2048` | off |
 | `already-velocity-input` | Disable default raw phase-to-velocity conversion | off |
+| `legacy-invert-uv-sign-on-raw` | Legacy-only extra U/V sign inversion after RAW->m/s conversion | off |
 
 ## Legacy HDF5 workflow (optional, not recommended)
 

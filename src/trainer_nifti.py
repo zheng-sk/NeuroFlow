@@ -33,6 +33,11 @@ def main():
         action="store_false",
         help="Disable raw-phase conversion (input velocity is already physical).",
     )
+    parser.add_argument(
+        "--legacy-invert-uv-sign-on-raw",
+        action="store_true",
+        help="Legacy mode: invert U/V signs after RAW->velocity conversion. Keep disabled for DICOM->NIfTI outputs that already applied LPS->RAS sign correction.",
+    )
     parser.add_argument("--raw-center", type=float, default=2048.0, help="Raw phase center value.")
     parser.add_argument("--raw-scale", type=float, default=2048.0, help="Raw phase scaling denominator.")
     parser.add_argument("--time-axis", type=int, default=-1, help="Time axis for 4D NIfTI (default last axis).")
@@ -71,6 +76,7 @@ def main():
         mag_scale=args.mag_scale,
         mask_threshold=args.mask_threshold,
         raw_phase_input=args.raw_phase_input,
+        invert_uv_sign_on_raw=args.legacy_invert_uv_sign_on_raw,
         raw_center=args.raw_center,
         raw_scale=args.raw_scale,
         time_axis=args.time_axis,
@@ -90,6 +96,7 @@ def main():
         mag_scale=args.mag_scale,
         mask_threshold=args.mask_threshold,
         raw_phase_input=args.raw_phase_input,
+        invert_uv_sign_on_raw=args.legacy_invert_uv_sign_on_raw,
         raw_center=args.raw_center,
         raw_scale=args.raw_scale,
         time_axis=args.time_axis,

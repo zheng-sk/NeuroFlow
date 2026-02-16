@@ -239,8 +239,10 @@ class PatchHandler3D:
 # ---- Rotation code ----
 def rotate180_3d(u, v, w, plane=1, is_phase_img=True):
     """
-        Rotate 180 degrees to introduce negative values
-        xyz Axis stays the same
+        Rotate vector field by 180 degrees.
+        If `is_phase_img` is True, apply component sign changes implied by the
+        rotation matrix. This is valid for phase-derived vectors and for
+        physical velocity vectors.
     """
     if plane==1:
         # Rotate on XY, y*-1, z*-1
@@ -273,8 +275,8 @@ def rotate180_3d(u, v, w, plane=1, is_phase_img=True):
 
 def rotate90(u, v, w, plane, k, is_phase_img=True):
     """
-        Rotate 90 (k=1) or 270 degrees (k=3)
-        Introduce axes swapping and negative values
+        Rotate vector field by 90 (k=1) or 270 (k=3) degrees.
+        For vector fields, this requires component swaps plus sign changes.
     """
     if plane==1:
         

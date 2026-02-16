@@ -81,6 +81,7 @@ class _StackNormalizeFieldsd(Transform):
         mag_scale: float,
         mask_threshold: float,
         raw_phase_input: bool = True,
+        invert_uv_sign_on_raw: bool = False,
         raw_center: float = 2048.0,
         raw_scale: float = 2048.0,
         random_time_frame: bool = False,
@@ -90,6 +91,7 @@ class _StackNormalizeFieldsd(Transform):
         self.mag_scale = float(mag_scale)
         self.mask_threshold = float(mask_threshold)
         self.raw_phase_input = bool(raw_phase_input)
+        self.invert_uv_sign_on_raw = bool(invert_uv_sign_on_raw)
         self.raw_center = float(raw_center)
         self.raw_scale = float(raw_scale)
         self.random_time_frame = bool(random_time_frame)
@@ -120,8 +122,32 @@ class _StackNormalizeFieldsd(Transform):
         v_shared = float(d.get("venc", 0.0))
         return v_shared
 
+    @staticmethod
+    def _detect_raw_mode(arr: np.ndarray) -> str:
+        mn = float(np.min(arr))
+        mx = float(np.max(arr))
+        is_unsigned_raw = (mn >= 0.0) and (mx > 1000.0) and (mx <= 8192.0)
+        max_abs = max(abs(mn), abs(mx))
+        centered_ratio = abs(mx + mn) / (max_abs + 1e-6)
+        is_signed_raw = (mn < -500.0) and (mx > 500.0) and (max_abs <= 8192.0) and (centered_ratio < 0.25)
+        if is_unsigned_raw:
+            return "unsigned"
+        if is_signed_raw:
+            return "signed"
+        return "not_raw"
+
     def _raw_to_velocity(self, arr, venc, invert_sign=False):
-        vel = (arr.astype(np.float32) - self.raw_center) / self.raw_scale * float(venc)
+        mode = self._detect_raw_mode(arr)
+        vel = arr.astype(np.float32)
+        if mode == "unsigned":
+            vel = (vel - self.raw_center) / self.raw_scale * float(venc)
+        elif mode == "signed":
+            max_abs = max(abs(float(np.min(vel))), abs(float(np.max(vel))))
+            scale = 4096.0 if max_abs > 3000.0 else 2048.0
+            vel = vel / scale * float(venc)
+        else:
+            # Legacy fallback: preserve previous behavior when values do not look RAW.
+            vel = (vel - self.raw_center) / self.raw_scale * float(venc)
         if invert_sign:
             vel = -vel
         return vel
@@ -205,13 +231,14 @@ class _StackNormalizeFieldsd(Transform):
             if venc_w <= 0:
                 venc_w = float(np.max(np.abs(lr_w)))
 
-            # Same semantic behavior as legacy prepare_nifti_data.py:
-            # U/V sign inversion, W unchanged.
-            lr_u = self._raw_to_velocity(lr_u, venc=venc_u, invert_sign=True)
-            lr_v = self._raw_to_velocity(lr_v, venc=venc_v, invert_sign=True)
+            # Default behavior avoids double inversion when DICOM->NIfTI already
+            # applied LPS->RAS sign correction to Vx/Vy. Enable legacy inversion
+            # with `invert_uv_sign_on_raw=True` only for old datasets.
+            lr_u = self._raw_to_velocity(lr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw)
+            lr_v = self._raw_to_velocity(lr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw)
             lr_w = self._raw_to_velocity(lr_w, venc=venc_w, invert_sign=False)
-            hr_u = self._raw_to_velocity(hr_u, venc=venc_u, invert_sign=True)
-            hr_v = self._raw_to_velocity(hr_v, venc=venc_v, invert_sign=True)
+            hr_u = self._raw_to_velocity(hr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw)
+            hr_v = self._raw_to_velocity(hr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw)
             hr_w = self._raw_to_velocity(hr_w, venc=venc_w, invert_sign=False)
         else:
             if venc_u <= 0:
@@ -390,6 +417,7 @@ class NiftiPatchDataset(Dataset):
         mag_scale: float = 4095.0,
         mask_threshold: float = 0.5,
         raw_phase_input: bool = True,
+        invert_uv_sign_on_raw: bool = False,
         raw_center: float = 2048.0,
         raw_scale: float = 2048.0,
         time_axis: int = -1,
@@ -409,6 +437,7 @@ class NiftiPatchDataset(Dataset):
                 mag_scale=mag_scale,
                 mask_threshold=mask_threshold,
                 raw_phase_input=raw_phase_input,
+                invert_uv_sign_on_raw=invert_uv_sign_on_raw,
                 raw_center=raw_center,
                 raw_scale=raw_scale,
                 random_time_frame=augment,
@@ -472,6 +501,7 @@ def create_nifti_patch_dataloader(
     mag_scale: float = 4095.0,
     mask_threshold: float = 0.5,
     raw_phase_input: bool = True,
+    invert_uv_sign_on_raw: bool = False,
     raw_center: float = 2048.0,
     raw_scale: float = 2048.0,
     time_axis: int = -1,
@@ -489,6 +519,7 @@ def create_nifti_patch_dataloader(
         mag_scale=mag_scale,
         mask_threshold=mask_threshold,
         raw_phase_input=raw_phase_input,
+        invert_uv_sign_on_raw=invert_uv_sign_on_raw,
         raw_center=raw_center,
         raw_scale=raw_scale,
         time_axis=time_axis,

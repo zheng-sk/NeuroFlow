@@ -85,6 +85,7 @@ code/
 - **H5 workflow (`nifti_to_h5`)**: raw phase to m/s conversion is applied during NIfTI -> H5 conversion in `src/prepare_data/prepare_nifti_data.py`.
 - **Direct NIfTI inference workflow**: raw phase to m/s conversion is applied at prediction time only when `--auto-convert-raw-phase` is enabled.
 - **Sign convention**: DICOM -> NIfTI conversion (`code/conversion/dicom_to_nifti.py`) now bakes LPS->RAS sign correction for phase components (`Vx/Vy` sign inverted, `Vz` unchanged). Downstream raw->m/s conversion should not invert signs again.
+- **NIfTI train/predict defaults**: `src/trainer_nifti.py` and `code/predict_nifti.py` convert RAW phase to m/s with unsigned/signed auto-detection and without extra U/V inversion by default; use `--legacy-invert-uv-sign-on-raw` only for older datasets that still require it.
 - **Orientation convention**: DICOM -> NIfTI conversion canonicalizes magnitude and phase to RAS+ by default. Use `--phase-flips-only` only if you explicitly want to avoid axis permutations in phase components.
 - Both workflows support **unsigned raw phase** (`~0..4096`) and **signed raw phase** (`~-4096..4096` / `~-2048..2048`), using VENC.
 

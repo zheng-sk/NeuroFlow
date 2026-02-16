@@ -1,4 +1,5 @@
 import csv
+import copy
 import os
 from typing import Dict, List
 
@@ -467,6 +468,11 @@ class NiftiPatchDataset(Dataset):
         samples_per_volume: int,
         augment: bool,
         include_hr_mag: bool = False,
+        cache_dataset: bool = False,
+        cache_eager: bool = True,
+        random_time_frame: bool | None = None,
+        random_patch_sampling: bool | None = None,
+        rotation_prob: float | None = None,
         mag_scale: float = 4095.0,
         mask_threshold: float = 0.5,
         raw_phase_input: bool = True,
@@ -482,11 +488,28 @@ class NiftiPatchDataset(Dataset):
         self.samples_per_volume = int(samples_per_volume)
         self.samples_per_volume = max(self.samples_per_volume, 1)
         self.include_hr_mag = bool(include_hr_mag)
+        self.cache_dataset = bool(cache_dataset)
+        self.cache_eager = bool(cache_eager)
+        self._case_cache: dict[int, dict] = {}
+
+        if random_time_frame is None:
+            random_time_frame = augment
+        if random_patch_sampling is None:
+            random_patch_sampling = augment
+        if rotation_prob is None:
+            rotation_prob = 0.5 if augment else 0.0
 
         load_keys = ["lr_u", "lr_v", "lr_w", "lr_mag_u", "lr_mag_v", "lr_mag_w", "hr_u", "hr_v", "hr_w", "mask"]
         if self.include_hr_mag:
             load_keys.append("hr_mag")
+        self.load_transforms = Compose(
+            [
+                LoadImaged(keys=load_keys, image_only=True, allow_missing_keys=True),
+                EnsureChannelFirstd(keys=load_keys, channel_dim="no_channel", allow_missing_keys=True),
+            ]
+        )
         transforms = [
+            # Converts loaded arrays to normalized tensors and selects time frame.
             LoadImaged(keys=load_keys, image_only=True, allow_missing_keys=True),
             EnsureChannelFirstd(keys=load_keys, channel_dim="no_channel", allow_missing_keys=True),
             _StackNormalizeFieldsd(
@@ -497,34 +520,38 @@ class NiftiPatchDataset(Dataset):
                 invert_uv_sign_on_raw=invert_uv_sign_on_raw,
                 raw_center=raw_center,
                 raw_scale=raw_scale,
-                random_time_frame=augment,
+                random_time_frame=bool(random_time_frame),
                 time_axis=time_axis,
             ),
         ]
-        if augment:
-            transforms.append(_RandomVectorRotate90d(prob=0.5))
+        if float(rotation_prob) > 0:
+            transforms.append(_RandomVectorRotate90d(prob=float(rotation_prob)))
         transforms.append(
             _PairedRandomPatchd(
                 patch_size=patch_size,
                 res_increase=res_increase,
-                random_center=augment,
+                random_center=bool(random_patch_sampling),
                 include_hr_mag=self.include_hr_mag,
                 minimum_coverage=minimum_coverage,
                 max_sampling_attempts=max_sampling_attempts,
                 allow_empty_fallback=allow_empty_fallback,
             )
         )
-        self.transforms = Compose(transforms)
+        # Post-load transforms operate on already loaded arrays.
+        self.post_transforms = Compose(transforms[2:])
+
+        if self.cache_dataset and self.cache_eager:
+            print(f"Caching {len(self.cases)} case(s) in memory...")
+            for case_idx in range(len(self.cases)):
+                self._get_or_load_case(case_idx)
+            print("Dataset cache ready.")
 
     def __len__(self):
         return len(self.cases) * self.samples_per_volume
 
     def __getitem__(self, idx):
         case_idx = idx % len(self.cases)
-        case = dict(self.cases[case_idx])
-        if not case.get("mask"):
-            case.pop("mask", None)
-        sample = self.transforms(case)
+        sample = self.post_transforms(self._load_case_input(case_idx))
 
         lr_vel = torch.from_numpy(sample["lr_vel"]).float()
         lr_mag = torch.from_numpy(sample["lr_mag"]).float()
@@ -549,6 +576,28 @@ class NiftiPatchDataset(Dataset):
         out = out + (venc, mask)
         return out
 
+    def _prepare_case_dict(self, case_idx: int) -> dict:
+        case = dict(self.cases[case_idx])
+        if not case.get("mask"):
+            case.pop("mask", None)
+        if not case.get("hr_mag"):
+            case.pop("hr_mag", None)
+        return case
+
+    def _get_or_load_case(self, case_idx: int) -> dict:
+        cached = self._case_cache.get(case_idx)
+        if cached is not None:
+            return cached
+        loaded = self.load_transforms(self._prepare_case_dict(case_idx))
+        self._case_cache[case_idx] = loaded
+        return loaded
+
+    def _load_case_input(self, case_idx: int) -> dict:
+        if self.cache_dataset:
+            # Shallow copy is enough: post transforms create new arrays from loaded inputs.
+            return copy.copy(self._get_or_load_case(case_idx))
+        return self.load_transforms(self._prepare_case_dict(case_idx))
+
 
 def create_nifti_patch_dataloader(
     csv_path: str,
@@ -559,6 +608,11 @@ def create_nifti_patch_dataloader(
     shuffle: bool,
     augment: bool,
     include_hr_mag: bool = False,
+    cache_dataset: bool = False,
+    cache_eager: bool = True,
+    random_time_frame: bool | None = None,
+    random_patch_sampling: bool | None = None,
+    rotation_prob: float | None = None,
     num_workers: int = 0,
     mag_scale: float = 4095.0,
     mask_threshold: float = 0.5,
@@ -579,6 +633,11 @@ def create_nifti_patch_dataloader(
         samples_per_volume=samples_per_volume,
         augment=augment,
         include_hr_mag=include_hr_mag,
+        cache_dataset=cache_dataset,
+        cache_eager=cache_eager,
+        random_time_frame=random_time_frame,
+        random_patch_sampling=random_patch_sampling,
+        rotation_prob=rotation_prob,
         mag_scale=mag_scale,
         mask_threshold=mask_threshold,
         raw_phase_input=raw_phase_input,

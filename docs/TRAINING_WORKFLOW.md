@@ -199,3 +199,29 @@ python trainer_nifti.py \
   --predict-mag \
   --mag-loss-weight 1.0
 ```
+
+Performance-oriented options:
+
+- cache loaded NIfTI cases in memory:
+
+```bash
+--cache-dataset --cache-eager
+```
+
+- disable rotation/time-frame augmentation in training:
+
+```bash
+--no-augmentation
+```
+
+- keep random patches but without rotation augmentation:
+
+```bash
+--rotation-prob 0.0
+```
+
+- force deterministic center patch during training:
+
+```bash
+--deterministic-train-patches
+```

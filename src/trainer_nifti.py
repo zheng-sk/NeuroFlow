@@ -70,10 +70,47 @@ def main():
         help="If set, fail when no patch meets minimum coverage instead of falling back to best available patch.",
     )
     parser.add_argument("--num-workers", type=int, default=0, help="Dataloader workers.")
+    parser.add_argument(
+        "--cache-dataset",
+        action="store_true",
+        help="Cache loaded NIfTI cases in memory to reduce per-batch I/O.",
+    )
+    parser.add_argument(
+        "--cache-eager",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When caching is enabled, preload all cases at startup (default: true).",
+    )
+    parser.add_argument(
+        "--no-augmentation",
+        action="store_true",
+        help="Disable rotation augmentation and random time-frame sampling in training.",
+    )
+    parser.add_argument(
+        "--deterministic-train-patches",
+        action="store_true",
+        help="Use center patch in training instead of random patch sampling.",
+    )
+    parser.add_argument(
+        "--rotation-prob",
+        type=float,
+        default=0.5,
+        help="Rotation augmentation probability in training (ignored with --no-augmentation).",
+    )
     parser.add_argument("--restore", action="store_true", help="Restore training from an existing checkpoint.")
     parser.add_argument("--restore-dir", type=str, default="", help="Checkpoint directory to restore from.")
     parser.add_argument("--restore-file", type=str, default="", help="Checkpoint filename (.pt).")
     args = parser.parse_args()
+
+    if args.cache_dataset and args.num_workers > 0:
+        print(
+            "Warning: --cache-dataset with num_workers>0 may duplicate cache per worker. "
+            "For max memory efficiency use --num-workers 0."
+        )
+
+    train_rotation_prob = 0.0 if args.no_augmentation else max(float(args.rotation_prob), 0.0)
+    train_random_time_frame = not args.no_augmentation
+    train_random_patch = not args.deterministic_train_patches
 
     train_loader = create_nifti_patch_dataloader(
         csv_path=args.train_csv,
@@ -84,6 +121,11 @@ def main():
         shuffle=True,
         augment=True,
         include_hr_mag=args.predict_mag,
+        cache_dataset=args.cache_dataset,
+        cache_eager=args.cache_eager,
+        random_time_frame=train_random_time_frame,
+        random_patch_sampling=train_random_patch,
+        rotation_prob=train_rotation_prob,
         num_workers=args.num_workers,
         mag_scale=args.mag_scale,
         mask_threshold=args.mask_threshold,
@@ -105,6 +147,11 @@ def main():
         shuffle=False,
         augment=False,
         include_hr_mag=args.predict_mag,
+        cache_dataset=args.cache_dataset,
+        cache_eager=args.cache_eager,
+        random_time_frame=False,
+        random_patch_sampling=False,
+        rotation_prob=0.0,
         num_workers=args.num_workers,
         mag_scale=args.mag_scale,
         mask_threshold=args.mask_threshold,

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-convert2nifti2.py
+dicom_to_nifti.py
 
 DICOM -> NIfTI with:
 - dcm2niix first (when it succeeds without data loss)

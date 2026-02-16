@@ -9,14 +9,14 @@ code/
 ├── registration/          # Temporal + inter-scan registration and QC
 ├── inference/             # Model prediction workflows
 ├── visualization/         # PyVista QC/flow visualization scripts
-└── *.py                   # Backward-compatible wrappers (legacy entrypoints)
+├── predict_nifti.py       # Direct NIfTI inference entrypoint
+└── run_version_e_cow_roi.py  # CoW ROI preprocessing helper
 ```
 
 ## Recommended workflow
 
 1. **DICOM -> NIfTI**
    - Main script: `code/conversion/dicom_to_nifti.py`
-   - Legacy wrapper: `code/convert2nifti2.py`
 2. **Prepare input volumes (raw velocity + magnitude)**
    - Script: `code/preprocessing/calculate_mag.py`
    - Default output per case: `Vx.nii.gz`, `Vy.nii.gz`, `Vz.nii.gz`, `input_mag_raw.nii.gz`
@@ -77,28 +77,16 @@ code/
    - Particle advection GIF (flow over time): `code/visualization/viz_particle_gif.py`
    - Slice GIF over time: `code/visualization/viz_slice_gif.py`
    - Vessel surface render (single or dual view): `code/visualization/viz_surface.py`
-   - Legacy wrapper still exists: `code/visualization/flow_qc_pyvista.py` (delegates to modular scripts)
 
 ## Raw phase conversion behavior
 
-- **`calculate_mag.py` preprocessing**: by default it preserves raw phase values in `Vx/Vy/Vz`; conversion to m/s is only applied when `--auto-convert-raw-phase` is enabled.
+- **`code/preprocessing/calculate_mag.py` preprocessing**: by default it preserves raw phase values in `Vx/Vy/Vz`; conversion to m/s is only applied when `--auto-convert-raw-phase` is enabled.
 - **H5 workflow (`nifti_to_h5`)**: raw phase to m/s conversion is applied during NIfTI -> H5 conversion in `src/prepare_data/prepare_nifti_data.py`.
 - **Direct NIfTI inference workflow**: raw phase to m/s conversion is applied at prediction time only when `--auto-convert-raw-phase` is enabled.
 - **Sign convention**: DICOM -> NIfTI conversion (`code/conversion/dicom_to_nifti.py`) now bakes LPS->RAS sign correction for phase components (`Vx/Vy` sign inverted, `Vz` unchanged). Downstream raw->m/s conversion should not invert signs again.
 - **NIfTI train/predict defaults**: `src/trainer_nifti.py` and `code/predict_nifti.py` convert RAW phase to m/s with unsigned/signed auto-detection and without extra U/V inversion by default; use `--legacy-invert-uv-sign-on-raw` only for older datasets that still require it.
 - **Orientation convention**: DICOM -> NIfTI conversion canonicalizes magnitude and phase to RAS+ by default. Use `--phase-flips-only` only if you explicitly want to avoid axis permutations in phase components.
 - Both workflows support **unsigned raw phase** (`~0..4096`) and **signed raw phase** (`~-4096..4096` / `~-2048..2048`), using VENC.
-
-## Legacy compatible entrypoints
-
-You can still use the old script names in `code/`:
-- `convert2nifti2.py`, `calculate_mag.py`, `batch_register_magnitude.py`,
-  `batch_temporal_register.py`, `temporal_register_to_t0.py`,
-  `convert_to_h5.py`, `batch_predict.py`, `register_7T_to_3T_with_qc.py`,
-  `batch_register_7T_to_3T.py`, `batch_full_register_7T_to_3T.py`,
-  `export_paired_lr_hr_dataset.py`, `yolo_crop_patient_pairs.py`.
-
-These wrappers redirect to the reorganized modules.
 
 ## Visualization scripts (modular)
 

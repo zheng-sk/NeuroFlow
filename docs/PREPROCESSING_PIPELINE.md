@@ -21,7 +21,6 @@ The sequence below follows this order:
 Primary script:
 
 - `code/conversion/dicom_to_nifti.py`
-- wrapper: `code/convert2nifti2.py`
 
 Purpose:
 
@@ -102,7 +101,6 @@ Sign behavior at this stage:
 Primary script:
 
 - `code/preprocessing/yolo_crop_patient_pairs.py`
-- wrapper: `code/yolo_crop_patient_pairs.py`
 
 Purpose:
 
@@ -317,25 +315,25 @@ Adjust paths and options to your dataset.
 1. DICOM -> NIfTI
 
 ```bash
-python code/convert2nifti2.py --help
+python code/conversion/dicom_to_nifti.py --help
 ```
 
 2. Temporal registration
 
 ```bash
-python code/batch_temporal_register.py --help
+python code/registration/batch_temporal_register.py --help
 ```
 
 3. CoW crop (paired)
 
 ```bash
-python code/yolo_crop_patient_pairs.py --help
+python code/preprocessing/yolo_crop_patient_pairs.py --help
 ```
 
 4. Inter-scan registration (7T -> 3T)
 
 ```bash
-python code/batch_register_7T_to_3T.py --help
+python code/registration/batch_register_7T_to_3T.py --help
 ```
 
 5. Export paired LR/HR and train

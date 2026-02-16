@@ -289,7 +289,7 @@ Prediction (`code/predict_nifti.py`):
 The following scripts are kept for backward compatibility with previous experiments:
 - `src/trainer.py`
 - `src/predictor.py`
-- `code/batch_predict.py`
+- `code/inference/batch_predict.py`
 - `src/prepare_data/prepare_mri_data.py`
 - `src/prepare_data/prepare_nifti_data.py`
 

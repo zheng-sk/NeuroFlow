@@ -270,7 +270,7 @@ This creates:
 
 - `lr_3t/<case>/...`
 - `hr_7t_in_3t/<case>/...`
-- paired CSV for training
+- paired CSV for training (with `mask` empty by default)
 
 Command:
 
@@ -281,6 +281,33 @@ python code/registration/export_paired_lr_hr_dataset.py \
   --output-root data/paired_dataset \
   --csv-path data/paired_dataset/paired_nifti_cases.csv \
   --venc 0.9
+```
+
+## 8) Attach CoW Masks to Training CSV
+
+Script:
+
+- `code/registration/attach_cow_masks_to_csv.py`
+
+Purpose:
+
+- read paired CSV rows
+- infer case path from `hr_u`
+- locate `cow_seg_final.nii.gz` under segmentation output root
+- write an updated CSV with `mask` paths filled
+
+Command:
+
+```bash
+python code/registration/attach_cow_masks_to_csv.py \
+  --csv-in data/paired_dataset/paired_nifti_cases.csv \
+  --csv-out data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
+  --masks-root data/cow_segmentation_patient_batch \
+  --mask-name cow_seg_final.nii.gz \
+  --hr-col hr_u \
+  --hr-root-name hr_7t_in_3t \
+  --path-mode relative-to-cwd \
+  --strict
 ```
 
 ## Sign Policy Checklist

@@ -166,3 +166,17 @@ For training CSV `mask` column:
 - point to generated segmentation NIfTI
 - recommended values `{0,1}` in `uint8`
 - same HR space/shape as target HR velocity
+
+Fill the `mask` column automatically:
+
+```bash
+python code/registration/attach_cow_masks_to_csv.py \
+  --csv-in data/paired_dataset/paired_nifti_cases.csv \
+  --csv-out data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
+  --masks-root data/cow_segmentation_patient_batch \
+  --mask-name cow_seg_final.nii.gz \
+  --hr-col hr_u \
+  --hr-root-name hr_7t_in_3t \
+  --path-mode relative-to-cwd \
+  --strict
+```

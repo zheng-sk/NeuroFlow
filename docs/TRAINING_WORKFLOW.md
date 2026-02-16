@@ -42,6 +42,20 @@ Practical recommendation:
 
 - store masks as `uint8` with values `{0,1}`.
 
+Populate `mask` column from CoW segmentations:
+
+```bash
+python code/registration/attach_cow_masks_to_csv.py \
+  --csv-in data/paired_dataset/paired_nifti_cases.csv \
+  --csv-out data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
+  --masks-root data/cow_segmentation_patient_batch \
+  --mask-name cow_seg_final.nii.gz \
+  --hr-col hr_u \
+  --hr-root-name hr_7t_in_3t \
+  --path-mode relative-to-cwd \
+  --strict
+```
+
 ## 3) Normalization and Conversions
 
 ### 3.1 RAW phase -> velocity
@@ -137,8 +151,8 @@ Relative error metric is computed over masked regions.
 ```bash
 cd src
 python trainer_nifti.py \
-  --train-csv ../data/paired_dataset/paired_nifti_cases.csv \
-  --val-csv ../data/paired_dataset/paired_nifti_cases.csv \
+  --train-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
+  --val-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
   --patch-size 16 \
   --res-increase 2 \
   --batch-size 4 \

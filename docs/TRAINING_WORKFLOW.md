@@ -202,7 +202,7 @@ python trainer_nifti.py \
 
 Performance-oriented options:
 
-- cache loaded NIfTI cases in memory:
+- cache loaded NIfTI cases in memory (MONAI `CacheDataset`):
 
 ```bash
 --cache-dataset --cache-eager

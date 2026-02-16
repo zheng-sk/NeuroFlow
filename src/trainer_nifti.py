@@ -73,7 +73,7 @@ def main():
     parser.add_argument(
         "--cache-dataset",
         action="store_true",
-        help="Cache loaded NIfTI cases in memory to reduce per-batch I/O.",
+        help="Use MONAI CacheDataset to cache loaded NIfTI cases and reduce per-batch I/O.",
     )
     parser.add_argument(
         "--cache-eager",

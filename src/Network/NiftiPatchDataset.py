@@ -1,12 +1,11 @@
 import csv
-import copy
 import os
 from typing import Dict, List
 
 import numpy as np
 import torch
-from monai.data import DataLoader
-from monai.transforms import Compose, EnsureChannelFirstd, LoadImaged, Transform
+from monai.data import CacheDataset, DataLoader, Dataset as MonaiDataset
+from monai.transforms import Compose, EnsureChannelFirstd, LoadImaged, RandomizableTransform
 from torch.utils.data import Dataset
 
 from .PatchHandler3D import rotate180_3d, rotate90
@@ -102,7 +101,42 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
     return cases
 
 
-class _StackNormalizeFieldsd(Transform):
+def _build_monai_case_dataset(cases: List[Dict], load_transform, use_cache: bool, cache_eager: bool):
+    """
+    Build the MONAI dataset used for case-level loading.
+    - without cache: monai.data.Dataset
+    - with cache:    monai.data.CacheDataset
+    """
+    prepared_cases = [dict(c) for c in cases]
+    if not use_cache:
+        return MonaiDataset(data=prepared_cases, transform=load_transform)
+
+    def _create_cache_dataset(extra_kwargs=None):
+        kwargs = dict(data=prepared_cases, transform=load_transform, cache_rate=1.0, num_workers=0)
+        if extra_kwargs:
+            kwargs.update(extra_kwargs)
+        try:
+            return CacheDataset(**kwargs)
+        except (TypeError, ValueError):
+            # Backward compatibility for older MONAI versions.
+            kwargs.pop("num_workers", None)
+            return CacheDataset(**kwargs)
+
+    if cache_eager:
+        return _create_cache_dataset()
+
+    # Lazy runtime cache if supported by this MONAI version.
+    for runtime_cache in (True, "threads", "processes"):
+        try:
+            return _create_cache_dataset({"runtime_cache": runtime_cache})
+        except (TypeError, ValueError):
+            continue
+
+    print("Warning: runtime lazy cache is not supported in this MONAI version; using eager cache instead.")
+    return _create_cache_dataset()
+
+
+class _StackNormalizeFieldsd(RandomizableTransform):
     def __init__(
         self,
         mag_scale: float,
@@ -116,6 +150,7 @@ class _StackNormalizeFieldsd(Transform):
         time_axis: int = -1,
         fixed_time_index: int = 0,
     ):
+        super().__init__()
         self.mag_scale = float(mag_scale)
         self.mask_threshold = float(mask_threshold)
         self.include_hr_mag = bool(include_hr_mag)
@@ -232,7 +267,7 @@ class _StackNormalizeFieldsd(Transform):
                     )
                 t_index = time_index
             elif self.random_time_frame:
-                t_index = int(np.random.randint(time_start, time_end))
+                t_index = int(self.R.randint(time_start, time_end))
             else:
                 range_len = time_end - time_start
                 offset = int(np.clip(self.fixed_time_index, 0, range_len - 1))
@@ -313,9 +348,20 @@ class _StackNormalizeFieldsd(Transform):
         return d
 
 
-class _RandomVectorRotate90d(Transform):
+class _RandomVectorRotate90d(RandomizableTransform):
     def __init__(self, prob: float):
-        self.prob = float(prob)
+        super().__init__(prob=float(prob))
+        self.rotation_idx = 0
+        self.plane_nr = 0
+
+    def randomize(self, data=None):
+        super().randomize(None)
+        self.rotation_idx = 0
+        self.plane_nr = 0
+        if not self._do_transform:
+            return
+        self.rotation_idx = int(self.R.choice([1, 2, 3]))
+        self.plane_nr = int(self.R.choice([1, 2, 3]))
 
     @staticmethod
     def _rotate_scalar(img, rotation_idx: int, plane_nr: int):
@@ -329,11 +375,12 @@ class _RandomVectorRotate90d(Transform):
 
     def __call__(self, data):
         d = dict(data)
-        if np.random.rand() >= self.prob:
+        self.randomize()
+        if not self._do_transform:
             return d
 
-        rotation_idx = int(np.random.choice([1, 2, 3]))
-        plane_nr = int(np.random.choice([1, 2, 3]))
+        rotation_idx = self.rotation_idx
+        plane_nr = self.plane_nr
 
         # Velocity vectors require axis swaps/sign updates.
         u, v, w = d["lr_vel"][0], d["lr_vel"][1], d["lr_vel"][2]
@@ -365,7 +412,7 @@ class _RandomVectorRotate90d(Transform):
         return d
 
 
-class _PairedRandomPatchd(Transform):
+class _PairedRandomPatchd(RandomizableTransform):
     def __init__(
         self,
         patch_size: int,
@@ -376,6 +423,7 @@ class _PairedRandomPatchd(Transform):
         max_sampling_attempts: int = 100,
         allow_empty_fallback: bool = True,
     ):
+        super().__init__(prob=1.0)
         self.patch_size = int(patch_size)
         self.res_increase = int(res_increase)
         self.random_center = bool(random_center)
@@ -383,6 +431,9 @@ class _PairedRandomPatchd(Transform):
         self.minimum_coverage = float(minimum_coverage)
         self.max_sampling_attempts = int(max_sampling_attempts)
         self.allow_empty_fallback = bool(allow_empty_fallback)
+
+    def _randint(self, low: int, high: int) -> int:
+        return int(self.R.randint(low, high))
 
     def _crop_pair(self, d, x0, y0, z0):
         p = self.patch_size
@@ -429,9 +480,9 @@ class _PairedRandomPatchd(Transform):
 
         attempts = max(self.max_sampling_attempts, 1)
         for _ in range(attempts):
-            x0 = np.random.randint(0, lx - p + 1)
-            y0 = np.random.randint(0, ly - p + 1)
-            z0 = np.random.randint(0, lz - p + 1)
+            x0 = self._randint(0, lx - p + 1)
+            y0 = self._randint(0, ly - p + 1)
+            z0 = self._randint(0, lz - p + 1)
 
             lr_vel, lr_mag, hr_vel, hr_mag, mask = self._crop_pair(d, x0, y0, z0)
             coverage = float(mask.mean())
@@ -490,7 +541,6 @@ class NiftiPatchDataset(Dataset):
         self.include_hr_mag = bool(include_hr_mag)
         self.cache_dataset = bool(cache_dataset)
         self.cache_eager = bool(cache_eager)
-        self._case_cache: dict[int, dict] = {}
 
         if random_time_frame is None:
             random_time_frame = augment
@@ -508,10 +558,8 @@ class NiftiPatchDataset(Dataset):
                 EnsureChannelFirstd(keys=load_keys, channel_dim="no_channel", allow_missing_keys=True),
             ]
         )
-        transforms = [
+        post_transforms = [
             # Converts loaded arrays to normalized tensors and selects time frame.
-            LoadImaged(keys=load_keys, image_only=True, allow_missing_keys=True),
-            EnsureChannelFirstd(keys=load_keys, channel_dim="no_channel", allow_missing_keys=True),
             _StackNormalizeFieldsd(
                 mag_scale=mag_scale,
                 mask_threshold=mask_threshold,
@@ -525,8 +573,8 @@ class NiftiPatchDataset(Dataset):
             ),
         ]
         if float(rotation_prob) > 0:
-            transforms.append(_RandomVectorRotate90d(prob=float(rotation_prob)))
-        transforms.append(
+            post_transforms.append(_RandomVectorRotate90d(prob=float(rotation_prob)))
+        post_transforms.append(
             _PairedRandomPatchd(
                 patch_size=patch_size,
                 res_increase=res_increase,
@@ -537,21 +585,30 @@ class NiftiPatchDataset(Dataset):
                 allow_empty_fallback=allow_empty_fallback,
             )
         )
-        # Post-load transforms operate on already loaded arrays.
-        self.post_transforms = Compose(transforms[2:])
+        self.post_transforms = Compose(post_transforms)
 
-        if self.cache_dataset and self.cache_eager:
-            print(f"Caching {len(self.cases)} case(s) in memory...")
-            for case_idx in range(len(self.cases)):
-                self._get_or_load_case(case_idx)
-            print("Dataset cache ready.")
+        case_inputs = [self._prepare_case_dict(case_idx) for case_idx in range(len(self.cases))]
+        if self.cache_dataset:
+            print(f"Using MONAI CacheDataset for {len(case_inputs)} case(s)...")
+            if self.cache_eager:
+                print("Cache mode: eager")
+            else:
+                print("Cache mode: runtime-lazy (if supported by current MONAI)")
+        self.case_dataset = _build_monai_case_dataset(
+            cases=case_inputs,
+            load_transform=self.load_transforms,
+            use_cache=self.cache_dataset,
+            cache_eager=self.cache_eager,
+        )
+        if self.cache_dataset:
+            print("MONAI CacheDataset ready.")
 
     def __len__(self):
         return len(self.cases) * self.samples_per_volume
 
     def __getitem__(self, idx):
         case_idx = idx % len(self.cases)
-        sample = self.post_transforms(self._load_case_input(case_idx))
+        sample = self.post_transforms(dict(self.case_dataset[case_idx]))
 
         lr_vel = torch.from_numpy(sample["lr_vel"]).float()
         lr_mag = torch.from_numpy(sample["lr_mag"]).float()
@@ -583,20 +640,6 @@ class NiftiPatchDataset(Dataset):
         if not case.get("hr_mag"):
             case.pop("hr_mag", None)
         return case
-
-    def _get_or_load_case(self, case_idx: int) -> dict:
-        cached = self._case_cache.get(case_idx)
-        if cached is not None:
-            return cached
-        loaded = self.load_transforms(self._prepare_case_dict(case_idx))
-        self._case_cache[case_idx] = loaded
-        return loaded
-
-    def _load_case_input(self, case_idx: int) -> dict:
-        if self.cache_dataset:
-            # Shallow copy is enough: post transforms create new arrays from loaded inputs.
-            return copy.copy(self._get_or_load_case(case_idx))
-        return self.load_transforms(self._prepare_case_dict(case_idx))
 
 
 def create_nifti_patch_dataloader(

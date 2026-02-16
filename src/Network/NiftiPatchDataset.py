@@ -19,24 +19,35 @@ def _resolve_path(path_value: str, base_dir: str) -> str:
         return ""
     if os.path.isabs(path_value):
         return path_value
-    # Primary behavior: resolve relative to CSV directory.
-    candidate_csv_dir = os.path.abspath(os.path.join(base_dir, path_value))
-    if os.path.exists(candidate_csv_dir):
-        return candidate_csv_dir
 
-    # Fallback 1: resolve from current working directory.
-    candidate_cwd = os.path.abspath(os.path.join(os.getcwd(), path_value))
-    if os.path.exists(candidate_cwd):
-        return candidate_cwd
+    base_abs = os.path.abspath(base_dir)
+    search_roots = [base_abs, os.path.abspath(os.getcwd())]
 
-    # Fallback 2: resolve from parent of CSV directory (helps when CSV lives in data/
-    # and paths are given as data/... project-relative).
-    candidate_csv_parent = os.path.abspath(os.path.join(os.path.dirname(base_dir), path_value))
-    if os.path.exists(candidate_csv_parent):
-        return candidate_csv_parent
+    # Also try every CSV ancestor directory so paths like `data/...` work when
+    # CSV lives in `data/paired_dataset` and trainer is launched from `src/`.
+    cursor = base_abs
+    while True:
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        search_roots.append(parent)
+        cursor = parent
+
+    seen = set()
+    ordered_roots = []
+    for root in search_roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        ordered_roots.append(root)
+
+    for root in ordered_roots:
+        candidate = os.path.abspath(os.path.join(root, path_value))
+        if os.path.exists(candidate):
+            return candidate
 
     # Keep deterministic behavior for downstream error messages.
-    return candidate_csv_dir
+    return os.path.abspath(os.path.join(base_abs, path_value))
 
 
 def load_nifti_case_table(csv_path: str) -> List[Dict]:

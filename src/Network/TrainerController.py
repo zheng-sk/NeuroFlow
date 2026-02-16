@@ -39,6 +39,10 @@ class TrainerController:
         self.res_increase = res_increase
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        self.network_src_dir = os.path.dirname(os.path.abspath(__file__))
+        self.src_root_dir = os.path.dirname(self.network_src_dir)
+        self.repo_root_dir = os.path.dirname(self.src_root_dir)
+
         # Training params
         self.QUICKSAVE_ENABLED = quicksave_enable
 
@@ -151,8 +155,8 @@ class TrainerController:
         timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
         self.unique_model_name = f"{self.network_name}_{timestamp}"
 
-        self.model_dir = f"../models/{self.unique_model_name}"
-        self.model_path = f"{self.model_dir}/{self.network_name}"
+        self.model_dir = os.path.join(self.repo_root_dir, "models", self.unique_model_name)
+        self.model_path = os.path.join(self.model_dir, self.network_name)
 
         if not os.path.isdir(self.model_dir):
             os.makedirs(self.model_dir)
@@ -181,14 +185,17 @@ class TrainerController:
         )
 
         print("Copying source code to model directory...")
-        directory_to_backup = [".", "Network"]
-        for directory in directory_to_backup:
-            files = os.listdir(directory)
+        directory_to_backup = [
+            (".", self.src_root_dir),
+            ("Network", self.network_src_dir),
+        ]
+        for backup_subdir, source_dir in directory_to_backup:
+            files = os.listdir(source_dir)
             for fname in files:
                 if fname.endswith(".py") or fname.endswith(".ipynb"):
-                    dest_fpath = os.path.join(self.model_dir, "backup_source", directory, fname)
+                    dest_fpath = os.path.join(self.model_dir, "backup_source", backup_subdir, fname)
                     os.makedirs(os.path.dirname(dest_fpath), exist_ok=True)
-                    shutil.copy2(f"{directory}/{fname}", dest_fpath)
+                    shutil.copy2(os.path.join(source_dir, fname), dest_fpath)
 
     def _to_device_batch(self, data_pairs):
         return [item.to(self.device, non_blocking=True) for item in data_pairs]

@@ -1,0 +1,88 @@
+# Inference Workflow (Direct NIfTI)
+
+Prediction script:
+
+- `code/predict_nifti.py`
+
+## 1) Inputs
+
+Required:
+
+- LR velocity: `u`, `v`, `w`
+- LR magnitude: either
+  - one file per component (`--mag-u`, `--mag-v`, `--mag-w`), or
+  - one shared file (`--mag`)
+- trained checkpoint: `--model-path`
+
+## 2) Internal Processing
+
+If `--raw-phase-input` (default), velocity is converted from RAW-like values using:
+
+- unsigned RAW:
+
+```text
+v = (raw - raw_center) / raw_scale * venc
+```
+
+- signed RAW:
+
+```text
+v = raw / scale * venc, scale in {2048, 4096}
+```
+
+Then normalization:
+
+```text
+U_norm = U / venc
+V_norm = V / venc
+W_norm = W / venc
+MAG_norm = MAG / mag_scale
+```
+
+Model predicts normalized HR velocity; output is rescaled by `venc`.
+
+## 3) Sliding Window Modes
+
+Default:
+
+- MONAI `sliding_window_inference`
+
+Legacy reconstruction option:
+
+- `--legacy-overlap-inference`
+- uses overlap/trim patch stitching equivalent to the old patch generator logic.
+
+## 4) Command
+
+```bash
+python code/predict_nifti.py \
+  --u /path/lr_u.nii.gz \
+  --v /path/lr_v.nii.gz \
+  --w /path/lr_w.nii.gz \
+  --mag /path/lr_mag.nii.gz \
+  --model-path /path/model-best.pt \
+  --output-prefix /path/output/pred \
+  --patch-size 16 \
+  --res-increase 2
+```
+
+## 5) Outputs
+
+- `<output-prefix>_u.nii.gz`
+- `<output-prefix>_v.nii.gz`
+- `<output-prefix>_w.nii.gz`
+- `<output-prefix>_uvw.nii.gz`
+
+`_uvw` stacks the 3 components in one 4D NIfTI.
+
+## 6) Sign-Consistency Note
+
+For modern datasets processed with repository DICOM->NIfTI conversion:
+
+- keep default (no extra U/V inversion)
+
+Only for old datasets that need legacy correction:
+
+```bash
+--legacy-invert-uv-sign-on-raw
+```

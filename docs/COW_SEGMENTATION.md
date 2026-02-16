@@ -122,6 +122,25 @@ If you start from a patient folder containing `input_mag_raw.nii.gz`, `Vx.nii.gz
 
 This script computes a 3D angiography proxy from MAG and velocity-derived speed, then runs the same AI/classic/ensemble logic.
 
+Batch variant (case-by-case using patient folders):
+
+- `code/segmentation/batch_segment_cow_magnitude.py`
+
+Example (registered 7T-in-3T filenames):
+
+```bash
+python code/segmentation/batch_segment_cow_magnitude.py \
+  --input-root data/registered_7T_in_3T_cow_crop \
+  --recursive \
+  --mag-pattern "mag_7T_in_3T.nii.gz" \
+  --mag-name "mag_7T_in_3T.nii.gz" \
+  --vx-name "phaseX_7T_in_3T.nii.gz" \
+  --vy-name "phaseY_7T_in_3T.nii.gz" \
+  --vz-name "phaseZ_7T_in_3T.nii.gz" \
+  --output-dir data/cow_segmentation_patient_batch \
+  --ensemble-mode union
+```
+
 
 ## 7) YOLO BBox Utility (Optional)
 

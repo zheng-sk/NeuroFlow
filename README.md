@@ -67,13 +67,16 @@ High Res Ground Truth vs noise-free Super Resolution (1mm)
 Use direct NIfTI training/inference in this migration branch.  
 The old HDF5 patch-index workflow is still available as a legacy option, but it is no longer the recommended default.
 
-Detailed step-by-step preprocessing and normalization guide:
+Documentation index (recommended entrypoint):
 
-- [`docs/PREPROCESSING_PIPELINE.md`](docs/PREPROCESSING_PIPELINE.md)
+- [`docs/README.md`](docs/README.md)
 
-CoW semantic segmentation guide (for already cropped + interscan-registered NIfTI):
+Task-specific guides:
 
-- [`docs/COW_SEGMENTATION.md`](docs/COW_SEGMENTATION.md)
+- Preprocessing: [`docs/PREPROCESSING_WORKFLOW.md`](docs/PREPROCESSING_WORKFLOW.md)
+- Training: [`docs/TRAINING_WORKFLOW.md`](docs/TRAINING_WORKFLOW.md)
+- CoW segmentation: [`docs/SEGMENTATION_COW_WORKFLOW.md`](docs/SEGMENTATION_COW_WORKFLOW.md)
+- Inference: [`docs/INFERENCE_WORKFLOW.md`](docs/INFERENCE_WORKFLOW.md)
 
 Quick command (cropped + interscan-registered inputs):
 

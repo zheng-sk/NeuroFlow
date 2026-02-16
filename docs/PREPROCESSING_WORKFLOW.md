@@ -271,7 +271,7 @@ This creates:
 - `lr_3t/<case>/...`
 - `hr_7t_in_3t/<case>/...`
 - paired CSV for training (with `mask` empty by default)
-- includes `hr_mag` column for optional 4-output training (`u,v,w,mag`)
+- complete CSV columns including `hr_mag`, `venc_u`, `venc_v`, `venc_w`, and temporal fields (`time_start`, `time_end`, `time_index`)
 
 Command:
 
@@ -281,6 +281,16 @@ python code/registration/export_paired_lr_hr_dataset.py \
   --registered-dir data/registered_7T_in_3T_cow_crop \
   --output-root data/paired_dataset \
   --csv-path data/paired_dataset/paired_nifti_cases.csv \
+  --venc 0.9
+```
+
+If folders are already exported and you only want to regenerate/update CSV:
+
+```bash
+python code/registration/export_paired_lr_hr_dataset.py \
+  --output-root data/paired_dataset \
+  --csv-path data/paired_dataset/paired_nifti_cases.csv \
+  --csv-only \
   --venc 0.9
 ```
 

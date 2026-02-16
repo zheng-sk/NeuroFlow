@@ -18,11 +18,48 @@ class PairCase:
     hr_dir: str
 
 
+CSV_FIELDNAMES = [
+    "lr_u",
+    "lr_v",
+    "lr_w",
+    "lr_mag_u",
+    "lr_mag_v",
+    "lr_mag_w",
+    "hr_u",
+    "hr_v",
+    "hr_w",
+    "hr_mag",
+    "mask",
+    "venc",
+    "venc_u",
+    "venc_v",
+    "venc_w",
+    "time_start",
+    "time_end",
+    "time_index",
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export paired 3T (LR) and 7T->3T (HR target) datasets.")
-    parser.add_argument("--temporal-dir", required=True, help="Root with temporally registered folders")
-    parser.add_argument("--registered-dir", required=True, help="Root with final 7T->3T registered outputs")
+    parser.add_argument("--temporal-dir", default=None, help="Root with temporally registered folders")
+    parser.add_argument("--registered-dir", default=None, help="Root with final 7T->3T registered outputs")
     parser.add_argument("--output-root", required=True, help="Root where lr/hr paired folders are written")
+    parser.add_argument(
+        "--csv-only",
+        action="store_true",
+        help="Only (re)generate the paired CSV from existing output folders, without copying/symlinking files again.",
+    )
+    parser.add_argument(
+        "--existing-lr-root",
+        default=None,
+        help="When --csv-only is enabled, LR root to scan (default: <output-root>/lr_3t).",
+    )
+    parser.add_argument(
+        "--existing-hr-root",
+        default=None,
+        help="When --csv-only is enabled, HR root to scan (default: <output-root>/hr_7t_in_3t).",
+    )
 
     parser.add_argument("--fixed-suffix", default="_3T", help="Suffix for LR folders in temporal-dir")
     parser.add_argument("--moving-suffix", default="_7T", help="Suffix for HR source folders in temporal-dir")
@@ -81,6 +118,28 @@ def discover_pairs(temporal_dir: str, registered_dir: str, fixed_suffix: str, mo
     return sorted(pairs, key=lambda item: item.case_key)
 
 
+def discover_existing_pairs(hr_root: str, lr_root: str, hr_u_name: str) -> list[PairCase]:
+    """
+    Discover already-exported paired case folders from existing LR/HR roots.
+    We index cases from HR folders that contain `hr_u_name`.
+    """
+    hr_root_p = Path(hr_root)
+    lr_root_p = Path(lr_root)
+    pairs: list[PairCase] = []
+
+    for hr_u_path in hr_root_p.rglob(hr_u_name):
+        case_hr_dir = hr_u_path.parent
+        try:
+            rel_case = case_hr_dir.relative_to(hr_root_p)
+        except ValueError:
+            continue
+        case_key = rel_case.as_posix()
+        case_lr_dir = lr_root_p / rel_case
+        pairs.append(PairCase(case_key=case_key, lr_dir=str(case_lr_dir), hr_dir=str(case_hr_dir)))
+
+    return sorted(pairs, key=lambda item: item.case_key)
+
+
 def safe_remove(path: str) -> None:
     if not os.path.lexists(path):
         return
@@ -121,43 +180,112 @@ def resolve_time_end(lr_u: str, hr_u: str) -> int | None:
         return None
 
 
+def make_csv_row(lr_paths: dict[str, str], hr_paths: dict[str, str], venc: float, time_end: int | None) -> dict[str, str]:
+    venc_text = f"{venc}"
+    return {
+        "lr_u": os.path.relpath(lr_paths["u"]),
+        "lr_v": os.path.relpath(lr_paths["v"]),
+        "lr_w": os.path.relpath(lr_paths["w"]),
+        "lr_mag_u": os.path.relpath(lr_paths["mag"]),
+        "lr_mag_v": os.path.relpath(lr_paths["mag"]),
+        "lr_mag_w": os.path.relpath(lr_paths["mag"]),
+        "hr_u": os.path.relpath(hr_paths["u"]),
+        "hr_v": os.path.relpath(hr_paths["v"]),
+        "hr_w": os.path.relpath(hr_paths["w"]),
+        "hr_mag": os.path.relpath(hr_paths["mag"]),
+        "mask": "",
+        "venc": venc_text,
+        "venc_u": venc_text,
+        "venc_v": venc_text,
+        "venc_w": venc_text,
+        "time_start": "0",
+        "time_end": str(time_end) if time_end is not None else "",
+        "time_index": "",
+    }
+
+
 def main() -> None:
     args = parse_args()
+    lr_root = args.existing_lr_root or os.path.join(args.output_root, "lr_3t")
+    hr_root = args.existing_hr_root or os.path.join(args.output_root, "hr_7t_in_3t")
 
-    pairs = discover_pairs(
-        temporal_dir=args.temporal_dir,
-        registered_dir=args.registered_dir,
-        fixed_suffix=args.fixed_suffix,
-        moving_suffix=args.moving_suffix,
-    )
+    if args.csv_only:
+        if not os.path.isdir(lr_root):
+            raise SystemExit(f"LR root not found for --csv-only: {lr_root}")
+        if not os.path.isdir(hr_root):
+            raise SystemExit(f"HR root not found for --csv-only: {hr_root}")
+        pairs = discover_existing_pairs(hr_root=hr_root, lr_root=lr_root, hr_u_name=args.out_u_name)
+    else:
+        if not args.temporal_dir or not args.registered_dir:
+            raise SystemExit("--temporal-dir and --registered-dir are required unless --csv-only is set.")
+        pairs = discover_pairs(
+            temporal_dir=args.temporal_dir,
+            registered_dir=args.registered_dir,
+            fixed_suffix=args.fixed_suffix,
+            moving_suffix=args.moving_suffix,
+        )
+        os.makedirs(lr_root, exist_ok=True)
+        os.makedirs(hr_root, exist_ok=True)
+
     if not pairs:
-        raise SystemExit("No paired cases found to export.")
-
-    lr_root = os.path.join(args.output_root, "lr_3t")
-    hr_root = os.path.join(args.output_root, "hr_7t_in_3t")
-    os.makedirs(lr_root, exist_ok=True)
-    os.makedirs(hr_root, exist_ok=True)
+        raise SystemExit("No paired cases found.")
 
     csv_path = args.csv_path or os.path.join(args.output_root, "paired_nifti_cases.csv")
+    os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
     rows: list[dict[str, str]] = []
     success = 0
     failed = 0
 
     for pair in pairs:
-        lr_src = {
-            "u": os.path.join(pair.lr_dir, args.lr_u_name),
-            "v": os.path.join(pair.lr_dir, args.lr_v_name),
-            "w": os.path.join(pair.lr_dir, args.lr_w_name),
-            "mag": os.path.join(pair.lr_dir, args.lr_mag_name),
-        }
-        hr_src = {
-            "u": os.path.join(pair.hr_dir, args.hr_u_name),
-            "v": os.path.join(pair.hr_dir, args.hr_v_name),
-            "w": os.path.join(pair.hr_dir, args.hr_w_name),
-            "mag": os.path.join(pair.hr_dir, args.hr_mag_name),
-        }
+        if args.csv_only:
+            lr_paths = {
+                "u": os.path.join(pair.lr_dir, args.out_u_name),
+                "v": os.path.join(pair.lr_dir, args.out_v_name),
+                "w": os.path.join(pair.lr_dir, args.out_w_name),
+                "mag": os.path.join(pair.lr_dir, args.out_mag_name),
+            }
+            hr_paths = {
+                "u": os.path.join(pair.hr_dir, args.out_u_name),
+                "v": os.path.join(pair.hr_dir, args.out_v_name),
+                "w": os.path.join(pair.hr_dir, args.out_w_name),
+                "mag": os.path.join(pair.hr_dir, args.out_mag_name),
+            }
+        else:
+            lr_src = {
+                "u": os.path.join(pair.lr_dir, args.lr_u_name),
+                "v": os.path.join(pair.lr_dir, args.lr_v_name),
+                "w": os.path.join(pair.lr_dir, args.lr_w_name),
+                "mag": os.path.join(pair.lr_dir, args.lr_mag_name),
+            }
+            hr_src = {
+                "u": os.path.join(pair.hr_dir, args.hr_u_name),
+                "v": os.path.join(pair.hr_dir, args.hr_v_name),
+                "w": os.path.join(pair.hr_dir, args.hr_w_name),
+                "mag": os.path.join(pair.hr_dir, args.hr_mag_name),
+            }
 
-        missing = [name for name, path in {**{f"lr_{k}": v for k, v in lr_src.items()}, **{f"hr_{k}": v for k, v in hr_src.items()}}.items() if not os.path.isfile(path)]
+            lr_case = os.path.join(lr_root, pair.case_key)
+            hr_case = os.path.join(hr_root, pair.case_key)
+            os.makedirs(lr_case, exist_ok=True)
+            os.makedirs(hr_case, exist_ok=True)
+
+            lr_paths = {
+                "u": os.path.join(lr_case, args.out_u_name),
+                "v": os.path.join(lr_case, args.out_v_name),
+                "w": os.path.join(lr_case, args.out_w_name),
+                "mag": os.path.join(lr_case, args.out_mag_name),
+            }
+            hr_paths = {
+                "u": os.path.join(hr_case, args.out_u_name),
+                "v": os.path.join(hr_case, args.out_v_name),
+                "w": os.path.join(hr_case, args.out_w_name),
+                "mag": os.path.join(hr_case, args.out_mag_name),
+            }
+
+        check_paths = {**{f"lr_{k}": v for k, v in lr_paths.items()}, **{f"hr_{k}": v for k, v in hr_paths.items()}}
+        if not args.csv_only:
+            check_paths = {**{f"lr_{k}": v for k, v in lr_src.items()}, **{f"hr_{k}": v for k, v in hr_src.items()}}
+        missing = [name for name, path in check_paths.items() if not os.path.isfile(path)]
         if missing:
             failed += 1
             print(f"[FAIL] {pair.case_key}: missing {', '.join(missing)}")
@@ -165,70 +293,20 @@ def main() -> None:
                 raise SystemExit(1)
             continue
 
-        lr_case = os.path.join(lr_root, pair.case_key)
-        hr_case = os.path.join(hr_root, pair.case_key)
-        os.makedirs(lr_case, exist_ok=True)
-        os.makedirs(hr_case, exist_ok=True)
+        if not args.csv_only:
+            for key in ("u", "v", "w", "mag"):
+                transfer_file(lr_src[key], lr_paths[key], args.mode, args.overwrite)
+                transfer_file(hr_src[key], hr_paths[key], args.mode, args.overwrite)
 
-        lr_dst = {
-            "u": os.path.join(lr_case, args.out_u_name),
-            "v": os.path.join(lr_case, args.out_v_name),
-            "w": os.path.join(lr_case, args.out_w_name),
-            "mag": os.path.join(lr_case, args.out_mag_name),
-        }
-        hr_dst = {
-            "u": os.path.join(hr_case, args.out_u_name),
-            "v": os.path.join(hr_case, args.out_v_name),
-            "w": os.path.join(hr_case, args.out_w_name),
-            "mag": os.path.join(hr_case, args.out_mag_name),
-        }
-
-        for key in ("u", "v", "w", "mag"):
-            transfer_file(lr_src[key], lr_dst[key], args.mode, args.overwrite)
-            transfer_file(hr_src[key], hr_dst[key], args.mode, args.overwrite)
-
-        time_end = resolve_time_end(lr_dst["u"], hr_dst["u"])
-        rows.append(
-            {
-                "lr_u": os.path.relpath(lr_dst["u"]),
-                "lr_v": os.path.relpath(lr_dst["v"]),
-                "lr_w": os.path.relpath(lr_dst["w"]),
-                "lr_mag_u": os.path.relpath(lr_dst["mag"]),
-                "lr_mag_v": os.path.relpath(lr_dst["mag"]),
-                "lr_mag_w": os.path.relpath(lr_dst["mag"]),
-                "hr_u": os.path.relpath(hr_dst["u"]),
-                "hr_v": os.path.relpath(hr_dst["v"]),
-                "hr_w": os.path.relpath(hr_dst["w"]),
-                "hr_mag": os.path.relpath(hr_dst["mag"]),
-                "mask": "",
-                "venc": f"{args.venc}",
-                "time_start": "0",
-                "time_end": str(time_end) if time_end is not None else "",
-            }
-        )
+        time_end = resolve_time_end(lr_paths["u"], hr_paths["u"])
+        rows.append(make_csv_row(lr_paths=lr_paths, hr_paths=hr_paths, venc=args.venc, time_end=time_end))
 
         success += 1
         if args.verbose:
             print(f"[OK] {pair.case_key}")
 
     with open(csv_path, "w", newline="", encoding="utf-8") as handle:
-        fieldnames = [
-            "lr_u",
-            "lr_v",
-            "lr_w",
-            "lr_mag_u",
-            "lr_mag_v",
-            "lr_mag_w",
-            "hr_u",
-            "hr_v",
-            "hr_w",
-            "hr_mag",
-            "mask",
-            "venc",
-            "time_start",
-            "time_end",
-        ]
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
 

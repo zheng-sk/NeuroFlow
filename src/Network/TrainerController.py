@@ -9,6 +9,7 @@ import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 from . import h5util, loss_utils, utility
@@ -28,6 +29,9 @@ class TrainerController:
         hi_resblock=4,
         predict_mag=False,
         mag_loss_weight=1.0,
+        tb_image_every_n_epochs=10,
+        tb_image_axis=2,
+        tb_image_batch_index=0,
     ):
         """
         TrainerController constructor.
@@ -49,6 +53,9 @@ class TrainerController:
         self.QUICKSAVE_ENABLED = quicksave_enable
         self.predict_mag = bool(predict_mag)
         self.mag_loss_weight = float(mag_loss_weight)
+        self.tb_image_every_n_epochs = max(int(tb_image_every_n_epochs), 0)
+        self.tb_image_axis = int(tb_image_axis)
+        self.tb_image_batch_index = max(int(tb_image_batch_index), 0)
 
         # Network
         self.network_name = network_name
@@ -80,6 +87,11 @@ class TrainerController:
         print(f"Predict magnitude head: {self.predict_mag}")
         if self.predict_mag:
             print(f"Magnitude loss weight: {self.mag_loss_weight}")
+        if self.tb_image_every_n_epochs > 0:
+            print(
+                f"TensorBoard validation recon images every {self.tb_image_every_n_epochs} epochs "
+                f"(axis={self.tb_image_axis}, batch_index={self.tb_image_batch_index})"
+            )
         print(f"Using device: {self.device}")
 
         # Learning rate and optimizer (weight_decay replicates L2 regularization)
@@ -173,6 +185,148 @@ class TrainerController:
 
         return fluid_mse + non_fluid_mse
 
+    @staticmethod
+    def _extract_slice_2d(vol_3d, axis, index):
+        if axis == 0:
+            return vol_3d[index, :, :]
+        if axis == 1:
+            return vol_3d[:, index, :]
+        return vol_3d[:, :, index]
+
+    @staticmethod
+    def _resize_2d(img_2d, target_hw, mode="bilinear"):
+        t = torch.as_tensor(img_2d, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        if mode == "nearest":
+            out = F.interpolate(t, size=target_hw, mode="nearest")
+        else:
+            out = F.interpolate(t, size=target_hw, mode="bilinear", align_corners=False)
+        return out.squeeze(0).squeeze(0).cpu().numpy()
+
+    @staticmethod
+    def _robust_limits(arrays, signed):
+        vals = []
+        for a in arrays:
+            x = np.asarray(a, dtype=np.float32).ravel()
+            x = x[np.isfinite(x)]
+            if x.size > 0:
+                vals.append(x)
+        if not vals:
+            return (-1.0, 1.0) if signed else (0.0, 1.0)
+        merged = np.concatenate(vals, axis=0)
+        if signed:
+            vmax = float(np.percentile(np.abs(merged), 99.5))
+            vmax = max(vmax, 1e-6)
+            return -vmax, vmax
+        lo = float(np.percentile(merged, 0.5))
+        hi = float(np.percentile(merged, 99.5))
+        if hi - lo < 1e-6:
+            hi = lo + 1e-6
+        return lo, hi
+
+    @staticmethod
+    def _normalize_signed(img, vabs):
+        return np.clip((img / max(float(vabs), 1e-6) + 1.0) * 0.5, 0.0, 1.0).astype(np.float32)
+
+    @staticmethod
+    def _normalize_unsigned(img, lo, hi):
+        denom = max(float(hi - lo), 1e-6)
+        return np.clip((img - lo) / denom, 0.0, 1.0).astype(np.float32)
+
+    @staticmethod
+    def _tile_images_h(tiles, sep=2):
+        h = int(tiles[0].shape[0])
+        separator = np.full((h, int(sep)), 0.15, dtype=np.float32)
+        out = tiles[0]
+        for t in tiles[1:]:
+            out = np.concatenate((out, separator, t), axis=1)
+        return out.astype(np.float32)
+
+    def _log_validation_reconstructions(self, epoch_nr, u, v, w, u_mag, hires, mask, predictions):
+        if self.tb_image_every_n_epochs <= 0:
+            return
+
+        if predictions.ndim != 5 or hires.ndim != 5 or mask.ndim != 4:
+            return
+
+        b_idx = min(int(self.tb_image_batch_index), int(predictions.shape[0] - 1))
+        axis = int(np.clip(self.tb_image_axis, 0, 2))
+
+        mask_np = mask[b_idx].detach().float().cpu().numpy()
+        channel_specs = [
+            ("u", u[b_idx, 0], predictions[b_idx, 0], hires[b_idx, 0], True),
+            ("v", v[b_idx, 0], predictions[b_idx, 1], hires[b_idx, 1], True),
+            ("w", w[b_idx, 0], predictions[b_idx, 2], hires[b_idx, 2], True),
+        ]
+        if self.predict_mag and predictions.shape[1] > 3 and hires.shape[1] > 3:
+            channel_specs.append(("mag", u_mag[b_idx, 0], predictions[b_idx, 3], hires[b_idx, 3], False))
+
+        for ch_name, inp_t, pred_t, gt_t, signed in channel_specs:
+            inp_3d = inp_t.detach().float().cpu().numpy()
+            pred_3d = pred_t.detach().float().cpu().numpy()
+            gt_3d = gt_t.detach().float().cpu().numpy()
+
+            gt_n = gt_3d.shape[axis]
+            if gt_n <= 0:
+                continue
+            gt_idx = int(gt_n // 2)
+            inp_n = inp_3d.shape[axis]
+            if inp_n <= 1 or gt_n <= 1:
+                inp_idx = 0
+            else:
+                inp_idx = int(round(gt_idx * (inp_n - 1) / float(gt_n - 1)))
+            mask_idx = min(gt_idx, mask_np.shape[axis] - 1)
+
+            inp_2d = self._extract_slice_2d(inp_3d, axis, inp_idx)
+            pred_2d = self._extract_slice_2d(pred_3d, axis, gt_idx)
+            gt_2d = self._extract_slice_2d(gt_3d, axis, gt_idx)
+            mask_2d = self._extract_slice_2d(mask_np, axis, mask_idx)
+
+            target_hw = gt_2d.shape
+            if inp_2d.shape != target_hw:
+                inp_2d = self._resize_2d(inp_2d, target_hw, mode="bilinear")
+            if mask_2d.shape != target_hw:
+                mask_2d = self._resize_2d(mask_2d, target_hw, mode="nearest")
+            mask_2d = (mask_2d > 0.5).astype(np.float32)
+
+            err_2d = np.abs(pred_2d - gt_2d).astype(np.float32)
+            err_in_mask = err_2d[mask_2d > 0.5]
+            if err_in_mask.size == 0:
+                err_hi = float(np.percentile(err_2d, 99.5))
+                mae_mask = float(np.mean(err_2d))
+            else:
+                err_hi = float(np.percentile(err_in_mask, 99.5))
+                mae_mask = float(np.mean(err_in_mask))
+            err_hi = max(err_hi, 1e-6)
+
+            if signed:
+                _, vmax = self._robust_limits([inp_2d, pred_2d, gt_2d], signed=True)
+                vabs = abs(float(vmax))
+                inp_img = self._normalize_signed(inp_2d, vabs)
+                pred_img = self._normalize_signed(pred_2d, vabs)
+                gt_img = self._normalize_signed(gt_2d, vabs)
+            else:
+                lo, hi = self._robust_limits([inp_2d, pred_2d, gt_2d], signed=False)
+                inp_img = self._normalize_unsigned(inp_2d, lo, hi)
+                pred_img = self._normalize_unsigned(pred_2d, lo, hi)
+                gt_img = self._normalize_unsigned(gt_2d, lo, hi)
+
+            err_img = np.clip(err_2d / err_hi, 0.0, 1.0).astype(np.float32)
+            tiled = self._tile_images_h([inp_img, pred_img, gt_img, err_img, mask_2d], sep=2)
+
+            self.val_writer.add_image(
+                f"{self.network_name}/reconstruction/{ch_name}",
+                tiled[None, ...],
+                global_step=int(epoch_nr),
+                dataformats="CHW",
+            )
+            self.val_writer.add_scalar(
+                f"{self.network_name}/reconstruction_mae/{ch_name}",
+                mae_mask,
+                int(epoch_nr),
+            )
+
+        self.val_writer.flush()
+
     def init_model_dir(self):
         """
         Create model directory to save the weights with a [network_name]_[datetime] format.
@@ -258,13 +412,15 @@ class TrainerController:
         self.optimizer.step()
 
     @torch.no_grad()
-    def test_step(self, data_pairs):
+    def test_step(self, data_pairs, return_visuals=False):
         self.model.eval()
         u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _ = self._prepare_batch(data_pairs)
         del venc
 
         predictions = self.model(u, v, w, u_mag, v_mag, w_mag)
         self.calculate_and_update_metrics(hires, predictions, mask, "val")
+        if return_visuals:
+            return predictions, (u, v, w, u_mag, hires, mask)
         return predictions
 
     def calculate_and_update_metrics(self, hires, predictions, mask, metric_set):
@@ -314,8 +470,18 @@ class TrainerController:
                 print(f"\r{message}", end="")
 
             # --- Validation ---
+            log_recon_this_epoch = (
+                self.tb_image_every_n_epochs > 0
+                and ((epoch + 1) % self.tb_image_every_n_epochs == 0)
+            )
+            recon_logged = False
             for i, data_pairs in enumerate(valset):
-                self.test_step(data_pairs)
+                if log_recon_this_epoch and not recon_logged:
+                    predictions, visual_tensors = self.test_step(data_pairs, return_visuals=True)
+                    self._log_validation_reconstructions(epoch + 1, *visual_tensors, predictions)
+                    recon_logged = True
+                else:
+                    self.test_step(data_pairs)
                 message = (
                     f"Epoch {epoch + 1} Validation batch {i + 1}/{total_batch_val} | "
                     f"loss: {self._metric_value('val_loss'):.5f} "

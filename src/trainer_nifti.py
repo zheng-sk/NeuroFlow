@@ -97,6 +97,25 @@ def main():
         default=0.5,
         help="Rotation augmentation probability in training (ignored with --no-augmentation).",
     )
+    parser.add_argument(
+        "--tb-image-every-epochs",
+        type=int,
+        default=10,
+        help="Log validation reconstruction images to TensorBoard every N epochs (0 disables).",
+    )
+    parser.add_argument(
+        "--tb-image-axis",
+        type=int,
+        default=2,
+        choices=[0, 1, 2],
+        help="Slice axis for TensorBoard validation reconstruction images.",
+    )
+    parser.add_argument(
+        "--tb-image-batch-index",
+        type=int,
+        default=0,
+        help="Batch index used for TensorBoard validation reconstruction images.",
+    )
     parser.add_argument("--restore", action="store_true", help="Restore training from an existing checkpoint.")
     parser.add_argument("--restore-dir", type=str, default="", help="Checkpoint directory to restore from.")
     parser.add_argument("--restore-file", type=str, default="", help="Checkpoint filename (.pt).")
@@ -176,6 +195,9 @@ def main():
         hi_resblock=args.hi_resblock,
         predict_mag=args.predict_mag,
         mag_loss_weight=args.mag_loss_weight,
+        tb_image_every_n_epochs=args.tb_image_every_epochs,
+        tb_image_axis=args.tb_image_axis,
+        tb_image_batch_index=args.tb_image_batch_index,
     )
     network.init_model_dir()
 

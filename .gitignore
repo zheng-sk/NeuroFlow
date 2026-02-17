@@ -12,3 +12,4 @@ pytorch_venv/
 *.out
 .venv*
 *.venv*
+output/

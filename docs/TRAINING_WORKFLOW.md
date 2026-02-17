@@ -158,7 +158,76 @@ loss = vel_mse + mag_loss_weight * mag_mse
 
 Relative error metric is computed over masked regions.
 
-## 8) Training Command
+## 8) Build x2 Experiments via Downsampling (0.5)
+
+Goal:
+
+- create synthetic LR inputs at half spatial resolution (`scale=0.5`)
+- then train SR with `--res-increase 2`
+
+Tools:
+
+- `code/preprocessing/downsample_nifti_tree.py`
+- `code/preprocessing/remap_case_csv_for_x2.py`
+
+### 8.1 Option A (recommended): downsample 7T to create LR
+
+Use this when you want a clean synthetic-LR setup where target HR stays in 7T space.
+
+1) Downsample 7T tree:
+
+```bash
+python code/preprocessing/downsample_nifti_tree.py \
+  --input-root data/paired_dataset/hr_7t_in_3t \
+  --output-root data/paired_dataset/lr_from_7t_x05 \
+  --scale 0.5 \
+  --time-axis -1
+```
+
+2) Build a new paired CSV where `lr_*` points to the downsampled 7T tree:
+
+```bash
+python code/preprocessing/remap_case_csv_for_x2.py \
+  --in-csv data/paired_dataset/train_random_1_src.csv \
+  --out-csv data/paired_dataset/train_random_1_x2_from7t.csv \
+  --mode lr_from_hr \
+  --source-root data/paired_dataset/hr_7t_in_3t \
+  --new-lr-root data/paired_dataset/lr_from_7t_x05
+```
+
+### 8.2 Option B: downsample 3T to create even lower LR
+
+Use this when you want to test robustness from a more degraded clinical-like input.
+
+1) Downsample 3T tree:
+
+```bash
+python code/preprocessing/downsample_nifti_tree.py \
+  --input-root data/paired_dataset/lr_3t \
+  --output-root data/paired_dataset/lr_3t_x05 \
+  --scale 0.5 \
+  --time-axis -1
+```
+
+2) Build a new paired CSV where `lr_*` points to the downsampled 3T tree:
+
+```bash
+python code/preprocessing/remap_case_csv_for_x2.py \
+  --in-csv data/paired_dataset/train_random_1_src.csv \
+  --out-csv data/paired_dataset/train_random_1_x2_from3t.csv \
+  --mode lr_from_lr \
+  --source-root data/paired_dataset/lr_3t \
+  --new-lr-root data/paired_dataset/lr_3t_x05
+```
+
+Important:
+
+- Keep `hr_*` and `mask` in HR grid (do not downsample them for this x2 SR setup).
+- Use `--res-increase 2` in training.
+- Mask/seg files are automatically resampled with nearest-neighbor when filename contains:
+  - `mask`, `seg`, or `label`
+
+## 9) Training Command
 
 ```bash
 cd src

@@ -48,7 +48,12 @@ def main() -> None:
         type=int,
         nargs="*",
         default=None,
-        help="Optional frame indices to process. If omitted, uses CSV time_index or [time_start,time_end).",
+        help="Optional frame indices to process. If omitted, all available frames are processed.",
+    )
+    parser.add_argument(
+        "--use-csv-frame-selection",
+        action="store_true",
+        help="If set and --frame-index is not provided, use CSV time_index/time_start/time_end instead of all frames.",
     )
 
     parser.add_argument("--patch-size", type=int, default=16, help="Sliding-window ROI size per axis.")
@@ -104,11 +109,20 @@ def main() -> None:
 
     # Determine frame indices with a first-pass load to know t_count.
     preview = _read_case_volumes(case=case, time_axis=int(args.time_axis))
-    frame_indices = choose_frame_indices(
-        case=case,
-        t_count=int(preview["t_count"]),
-        explicit_indices=_parse_frame_indices(args.frame_index),
-    )
+    explicit = _parse_frame_indices(args.frame_index)
+    if explicit:
+        frame_indices = explicit
+        frame_mode = "explicit"
+    elif args.use_csv_frame_selection:
+        frame_indices = choose_frame_indices(
+            case=case,
+            t_count=int(preview["t_count"]),
+            explicit_indices=None,
+        )
+        frame_mode = "csv"
+    else:
+        frame_indices = list(range(int(preview["t_count"])))
+        frame_mode = "all"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, predict_mag_flag = load_sr_model(
@@ -128,6 +142,7 @@ def main() -> None:
 
     print(f"Device: {device}")
     print(f"Selected case: {case_idx}/{len(cases)-1}")
+    print(f"Frame selection mode: {frame_mode}")
     print(f"Frames: {frame_indices}")
 
     payload = run_case_inference(
@@ -165,6 +180,7 @@ def main() -> None:
         "case_csv": str(Path(args.case_csv).resolve()),
         "case_index": int(case_idx),
         "frame_indices": [int(x) for x in frame_indices],
+        "frame_selection_mode": frame_mode,
         "model_path": str(Path(args.model_path).resolve()),
         "predict_mag": bool(predict_mag_flag),
         "raw_phase_input": bool(args.raw_phase_input),

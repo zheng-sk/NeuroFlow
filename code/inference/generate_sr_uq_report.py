@@ -101,26 +101,51 @@ def _table2_rows(
     flow_axis: int,
     min_voxels: int,
 ) -> Tuple[List[Dict[str, Any]], List[int], List[float], List[float]]:
-    slice_count = speed_ref.shape[flow_axis]
+    # Inputs are 4D: [T, X, Y, Z]. We aggregate slice statistics across all frames.
+    if speed_ref.ndim != 4:
+        raise ValueError(f"Expected speed_ref with shape [T,X,Y,Z], got {speed_ref.shape}")
+
+    t_count = speed_ref.shape[0]
+    slice_count = speed_ref.shape[flow_axis + 1]
     rows: List[Dict[str, Any]] = []
     valid_slices: List[int] = []
     re_base_all: List[float] = []
     re_sr_all: List[float] = []
 
     for s in range(slice_count):
-        mask_sl = _extract_slice(mask_ref, flow_axis, s) > 0.5
-        if int(mask_sl.sum()) < int(min_voxels):
+        sv_ref_parts: List[np.ndarray] = []
+        sv_base_parts: List[np.ndarray] = []
+        sv_sr_parts: List[np.ndarray] = []
+        vo_ref_parts: List[np.ndarray] = []
+        vo_base_parts: List[np.ndarray] = []
+        vo_sr_parts: List[np.ndarray] = []
+
+        total_vox = 0
+        for t in range(t_count):
+            mask_sl = _extract_slice(mask_ref[t], flow_axis, s) > 0.5
+            if int(mask_sl.sum()) == 0:
+                continue
+
+            sv_ref_parts.append(_extract_slice(speed_ref[t], flow_axis, s)[mask_sl])
+            sv_base_parts.append(_extract_slice(speed_base[t], flow_axis, s)[mask_sl])
+            sv_sr_parts.append(_extract_slice(speed_sr[t], flow_axis, s)[mask_sl])
+
+            vo_ref_parts.append(_extract_slice(vort_ref[t], flow_axis, s)[mask_sl])
+            vo_base_parts.append(_extract_slice(vort_base[t], flow_axis, s)[mask_sl])
+            vo_sr_parts.append(_extract_slice(vort_sr[t], flow_axis, s)[mask_sl])
+            total_vox += int(mask_sl.sum())
+
+        if total_vox < int(min_voxels):
             continue
 
         valid_slices.append(s)
 
-        sv_ref = _extract_slice(speed_ref, flow_axis, s)[mask_sl]
-        sv_base = _extract_slice(speed_base, flow_axis, s)[mask_sl]
-        sv_sr = _extract_slice(speed_sr, flow_axis, s)[mask_sl]
-
-        vo_ref = _extract_slice(vort_ref, flow_axis, s)[mask_sl]
-        vo_base = _extract_slice(vort_base, flow_axis, s)[mask_sl]
-        vo_sr = _extract_slice(vort_sr, flow_axis, s)[mask_sl]
+        sv_ref = np.concatenate(sv_ref_parts, axis=0)
+        sv_base = np.concatenate(sv_base_parts, axis=0)
+        sv_sr = np.concatenate(sv_sr_parts, axis=0)
+        vo_ref = np.concatenate(vo_ref_parts, axis=0)
+        vo_base = np.concatenate(vo_base_parts, axis=0)
+        vo_sr = np.concatenate(vo_sr_parts, axis=0)
 
         metric_defs = [
             ("Mean velocity [m/s]", lambda a: float(np.mean(a)), sv_ref, sv_base, sv_sr),
@@ -408,6 +433,18 @@ def _html_table(rows: List[Dict[str, Any]], columns: Sequence[str]) -> str:
     return f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def _autodetect_reference_label(metadata: Dict[str, Any]) -> str:
+    try:
+        hr_u = str(metadata.get("case_paths", {}).get("hr_u", "")).lower()
+    except Exception:
+        hr_u = ""
+    if "cfd" in hr_u:
+        return "CFD"
+    if "7t" in hr_u:
+        return "7T"
+    return "Reference"
+
+
 def _save_channel_figure(
     out_path: Path,
     ch_name: str,
@@ -475,7 +512,12 @@ def main() -> None:
     parser.add_argument("--flow-axis", type=int, default=2, choices=[0, 1, 2], help="Axis used for cross-sectional flow integration")
     parser.add_argument("--selected-frame", type=int, default=0, help="Frame index (within payload) used for visual panel")
     parser.add_argument("--max-display-slices", type=int, default=12, help="Max slices per visual panel")
-    parser.add_argument("--mask-min-slice-voxels", type=int, default=25, help="Min in-mask voxels per slice for slice-wise stats")
+    parser.add_argument(
+        "--mask-min-slice-voxels",
+        type=int,
+        default=25,
+        help="Min aggregated in-mask voxels per slice across all processed frames for slice-wise stats",
+    )
 
     parser.add_argument("--q-ref", type=float, default=float("nan"), help="Reference flow rate in ml/s (paper uses calibrated reference).")
     parser.add_argument("--cca-range", type=str, default="", help="Optional slice range start:end for CCA-only flow stats.")
@@ -485,7 +527,7 @@ def main() -> None:
 
     parser.add_argument("--baseline-label", default="3T", help="Label for baseline (native/LR) method")
     parser.add_argument("--sr-label", default="3T SR", help="Label for super-resolved method")
-    parser.add_argument("--ref-label", default="CFD", help="Label for reference method")
+    parser.add_argument("--ref-label", default="auto", help="Label for reference method. Use 'auto' to infer from metadata.")
     parser.add_argument("--report-title", default="4D Flow SR Uncertainty Quantification Report", help="Report title")
 
     args = parser.parse_args()
@@ -503,6 +545,10 @@ def main() -> None:
         mpath = Path(args.metadata_json)
         if mpath.exists():
             metadata = json.loads(mpath.read_text())
+
+    ref_label = args.ref_label
+    if str(ref_label).lower() == "auto":
+        ref_label = _autodetect_reference_label(metadata)
 
     lr_norm = payload["lr_norm"].astype(np.float32)  # [T,6,X,Y,Z]
     pred_norm = payload["pred_norm"].astype(np.float32)  # [T,4,X,Y,Z]
@@ -557,20 +603,16 @@ def main() -> None:
         )
         channel_figs[name] = str(out_img.name)
 
-    # Mean fields for paper-style stats
-    mask_ref = (mask.mean(axis=0) >= 0.5).astype(np.float32)
-    pred_vel_mean = pred_phys[:, :3].mean(axis=0)
-    gt_vel_mean = gt_phys[:, :3].mean(axis=0)
-    lr_vel_mean = lr_vel_phys.mean(axis=0)
-
+    # Multi-frame fields for paper-style stats
+    mask_ref = (mask > 0.5).astype(np.float32)
     spacing_m = tuple(float(s) / 1000.0 for s in hr_spacing)
-    speed_ref = np.sqrt((gt_vel_mean**2).sum(axis=0)).astype(np.float32)
-    speed_base = np.sqrt((lr_vel_mean**2).sum(axis=0)).astype(np.float32)
-    speed_sr = np.sqrt((pred_vel_mean**2).sum(axis=0)).astype(np.float32)
+    speed_ref = np.sqrt((gt_phys[:, :3] ** 2).sum(axis=1)).astype(np.float32)  # [T,X,Y,Z]
+    speed_base = np.sqrt((lr_vel_phys**2).sum(axis=1)).astype(np.float32)  # [T,X,Y,Z]
+    speed_sr = np.sqrt((pred_phys[:, :3] ** 2).sum(axis=1)).astype(np.float32)  # [T,X,Y,Z]
 
-    vort_ref = _vorticity_magnitude(gt_vel_mean, spacing_m)
-    vort_base = _vorticity_magnitude(lr_vel_mean, spacing_m)
-    vort_sr = _vorticity_magnitude(pred_vel_mean, spacing_m)
+    vort_ref = np.stack([_vorticity_magnitude(gt_phys[t, :3], spacing_m) for t in range(t_count)], axis=0)
+    vort_base = np.stack([_vorticity_magnitude(lr_vel_phys[t], spacing_m) for t in range(t_count)], axis=0)
+    vort_sr = np.stack([_vorticity_magnitude(pred_phys[t, :3], spacing_m) for t in range(t_count)], axis=0)
 
     table2_all, valid_slices, re_base_all, re_sr_all = _table2_rows(
         speed_ref=speed_ref,
@@ -636,7 +678,7 @@ def main() -> None:
 
     all_idx = np.arange(q_ref_mean.shape[0])
     flow_rows = [
-        flow_summary(args.ref_label, q_ref_mean, q_ref_sd, all_idx),
+        flow_summary(ref_label, q_ref_mean, q_ref_sd, all_idx),
         flow_summary(args.baseline_label, q_base_mean, q_base_sd, all_idx),
         flow_summary(args.sr_label, q_sr_mean, q_sr_sd, all_idx),
     ]
@@ -649,7 +691,7 @@ def main() -> None:
             if cca_idx.size > 0:
                 flow_rows.extend(
                     [
-                        {**flow_summary(args.ref_label, q_ref_mean, q_ref_sd, cca_idx), "method": f"{args.ref_label} (CCA)"},
+                        {**flow_summary(ref_label, q_ref_mean, q_ref_sd, cca_idx), "method": f"{ref_label} (CCA)"},
                         {
                             **flow_summary(args.baseline_label, q_base_mean, q_base_sd, cca_idx),
                             "method": f"{args.baseline_label} (CCA)",
@@ -672,7 +714,7 @@ def main() -> None:
     fig_flow = fig_dir / "flow_rate_profile.png"
     x = np.arange(q_ref_mean.shape[0])
     fig = plt.figure(figsize=(10, 5))
-    plt.plot(x, q_ref_mean, label=args.ref_label, linewidth=2)
+    plt.plot(x, q_ref_mean, label=ref_label, linewidth=2)
     plt.fill_between(x, q_ref_mean - q_ref_sd, q_ref_mean + q_ref_sd, alpha=0.2)
     plt.plot(x, q_base_mean, label=args.baseline_label, linewidth=2)
     plt.fill_between(x, q_base_mean - q_base_sd, q_base_mean + q_base_sd, alpha=0.2)
@@ -687,31 +729,49 @@ def main() -> None:
     fig.savefig(fig_flow, dpi=180)
     plt.close(fig)
 
-    # 3) WSS statistics (Table-3-like)
-    tau_ref = _compute_wss_distribution(
-        uvw_mean=gt_vel_mean,
-        mask_ref=mask_ref,
-        spacing_mm=hr_spacing,
-        mu_pa_s=float(args.mu_pa_s),
-        max_points=int(args.max_wall_points),
-        seed=7,
-    )
-    tau_base = _compute_wss_distribution(
-        uvw_mean=lr_vel_mean,
-        mask_ref=mask_ref,
-        spacing_mm=hr_spacing,
-        mu_pa_s=float(args.mu_pa_s),
-        max_points=int(args.max_wall_points),
-        seed=7,
-    )
-    tau_sr = _compute_wss_distribution(
-        uvw_mean=pred_vel_mean,
-        mask_ref=mask_ref,
-        spacing_mm=hr_spacing,
-        mu_pa_s=float(args.mu_pa_s),
-        max_points=int(args.max_wall_points),
-        seed=7,
-    )
+    # 3) WSS statistics (Table-3-like), aggregated across all frames
+    tau_ref_parts: List[np.ndarray] = []
+    tau_base_parts: List[np.ndarray] = []
+    tau_sr_parts: List[np.ndarray] = []
+
+    for t in range(t_count):
+        mask_t = (mask[t] > 0.5).astype(np.float32)
+        if int(mask_t.sum()) < 25:
+            continue
+
+        tau_ref_t = _compute_wss_distribution(
+            uvw_mean=gt_phys[t, :3],
+            mask_ref=mask_t,
+            spacing_mm=hr_spacing,
+            mu_pa_s=float(args.mu_pa_s),
+            max_points=int(args.max_wall_points),
+            seed=7 + t,
+        )
+        tau_base_t = _compute_wss_distribution(
+            uvw_mean=lr_vel_phys[t],
+            mask_ref=mask_t,
+            spacing_mm=hr_spacing,
+            mu_pa_s=float(args.mu_pa_s),
+            max_points=int(args.max_wall_points),
+            seed=7 + t,
+        )
+        tau_sr_t = _compute_wss_distribution(
+            uvw_mean=pred_phys[t, :3],
+            mask_ref=mask_t,
+            spacing_mm=hr_spacing,
+            mu_pa_s=float(args.mu_pa_s),
+            max_points=int(args.max_wall_points),
+            seed=7 + t,
+        )
+
+        if tau_ref_t.size > 0 and tau_base_t.size > 0 and tau_sr_t.size > 0:
+            tau_ref_parts.append(tau_ref_t)
+            tau_base_parts.append(tau_base_t)
+            tau_sr_parts.append(tau_sr_t)
+
+    tau_ref = np.concatenate(tau_ref_parts, axis=0) if tau_ref_parts else np.zeros((0,), dtype=np.float64)
+    tau_base = np.concatenate(tau_base_parts, axis=0) if tau_base_parts else np.zeros((0,), dtype=np.float64)
+    tau_sr = np.concatenate(tau_sr_parts, axis=0) if tau_sr_parts else np.zeros((0,), dtype=np.float64)
 
     wss_ref = _wss_summary(tau_ref)
     wss_base = _wss_summary(tau_base)
@@ -748,7 +808,7 @@ def main() -> None:
     fig = plt.figure(figsize=(9, 5))
     bins = 80
     if tau_ref.size > 0:
-        plt.hist(tau_ref, bins=bins, alpha=0.4, density=True, label=args.ref_label)
+        plt.hist(tau_ref, bins=bins, alpha=0.4, density=True, label=ref_label)
     if tau_base.size > 0:
         plt.hist(tau_base, bins=bins, alpha=0.4, density=True, label=args.baseline_label)
     if tau_sr.size > 0:
@@ -835,7 +895,7 @@ def main() -> None:
     summary = {
         "report_title": args.report_title,
         "labels": {
-            "reference": args.ref_label,
+            "reference": ref_label,
             "baseline": args.baseline_label,
             "super_resolved": args.sr_label,
         },
@@ -917,7 +977,7 @@ def main() -> None:
   <p class=\"muted\">Generated from payload: <code>{Path(args.payload_npz).resolve()}</code></p>
 
   <p>
-    <span class=\"pill\">Reference: {args.ref_label}</span>
+    <span class=\"pill\">Reference: {ref_label}</span>
     <span class=\"pill\">Baseline: {args.baseline_label}</span>
     <span class=\"pill\">Super-resolved: {args.sr_label}</span>
   </p>
@@ -937,7 +997,7 @@ def main() -> None:
   <img src=\"figures/{fig_flow.name}\" alt=\"Flow profile\"/>
 
   <h2>Paper-style Table 2 (Representative Locations)</h2>
-  <p class=\"muted\">Variables: mean/SD/skewness/kurtosis of intraluminal velocity and vorticity.</p>
+  <p class=\"muted\">Variables: mean/SD/skewness/kurtosis of intraluminal velocity and vorticity (aggregated over all processed frames).</p>
   {t2_comp_html}
 
   <h2>Paper-style Flow Metrics</h2>
@@ -945,7 +1005,7 @@ def main() -> None:
   {flow_html}
 
   <h2>Paper-style Table 3 (WSS)</h2>
-  <p class=\"muted\">WSS estimated from boundary-normal finite differences (2-point polynomial approximation).</p>
+  <p class=\"muted\">WSS estimated from boundary-normal finite differences (2-point polynomial approximation), aggregated over all processed frames.</p>
   {t3_html}
   <img src=\"figures/{fig_wss.name}\" alt=\"WSS distribution\"/>
 

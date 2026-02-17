@@ -188,9 +188,18 @@ def _read_case_volumes(case: Dict[str, Any], time_axis: int) -> Dict[str, Any]:
         raise ValueError("Case does not include hr_mag but 4-channel workflow requires hr_mag.")
     hr_mag_4d, _ = load_nifti(case["hr_mag"])
 
-    mask_4d = None
+    mask_data = None
+    mask_time_resolved = False
     if case.get("mask"):
-        mask_4d, _ = load_nifti(case["mask"])
+        mask_raw, _ = load_nifti(case["mask"])
+        if mask_raw.ndim == 4:
+            mask_data = ensure_time_first(mask_raw, time_axis)
+            mask_time_resolved = True
+        elif mask_raw.ndim == 3:
+            mask_data = mask_raw.astype(np.float32)
+            mask_time_resolved = False
+        else:
+            raise ValueError(f"Mask must be 3D/4D, got shape {mask_raw.shape}")
 
     out = {
         "lr_u": ensure_time_first(lr_u_4d, time_axis),
@@ -203,7 +212,8 @@ def _read_case_volumes(case: Dict[str, Any], time_axis: int) -> Dict[str, Any]:
         "hr_v": ensure_time_first(hr_v_4d, time_axis),
         "hr_w": ensure_time_first(hr_w_4d, time_axis),
         "hr_mag": ensure_time_first(hr_mag_4d, time_axis),
-        "mask": ensure_time_first(mask_4d, time_axis) if mask_4d is not None else None,
+        "mask": mask_data,
+        "mask_time_resolved": bool(mask_time_resolved),
         "lr_img": lr_u_img,
         "hr_img": hr_u_img,
     }
@@ -220,7 +230,7 @@ def _read_case_volumes(case: Dict[str, Any], time_axis: int) -> Dict[str, Any]:
         out["hr_w"].shape[0],
         out["hr_mag"].shape[0],
     )
-    if out["mask"] is not None:
+    if out["mask"] is not None and out["mask_time_resolved"]:
         t_count = min(t_count, out["mask"].shape[0])
     out["t_count"] = int(t_count)
     return out
@@ -250,7 +260,12 @@ def _prepare_frame(
     lr_mv = volumes["lr_mv"][frame_idx].astype(np.float32)
     lr_mw = volumes["lr_mw"][frame_idx].astype(np.float32)
 
-    mask_arr = volumes["mask"][frame_idx].astype(np.float32) if volumes["mask"] is not None else np.ones_like(hr_u, dtype=np.float32)
+    if volumes["mask"] is None:
+        mask_arr = np.ones_like(hr_u, dtype=np.float32)
+    elif volumes.get("mask_time_resolved", False):
+        mask_arr = volumes["mask"][frame_idx].astype(np.float32)
+    else:
+        mask_arr = volumes["mask"].astype(np.float32)
     mask_bin = (mask_arr >= float(mask_threshold)).astype(np.float32)
 
     venc_u = resolve_component_venc(case, "venc_u")

@@ -21,6 +21,7 @@ def main() -> None:
 
     parser.add_argument("--time-axis", type=int, default=-1)
     parser.add_argument("--frame-index", type=int, nargs="*", default=None)
+    parser.add_argument("--use-csv-frame-selection", action="store_true")
 
     parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--sw-batch-size", type=int, default=2)
@@ -91,6 +92,8 @@ def main() -> None:
     if args.frame_index:
         infer_cmd.append("--frame-index")
         infer_cmd.extend([str(x) for x in args.frame_index])
+    if args.use_csv_frame_selection:
+        infer_cmd.append("--use-csv-frame-selection")
     if args.predict_mag is not None:
         infer_cmd.append("--predict-mag" if args.predict_mag else "--no-predict-mag")
     if args.raw_phase_input:

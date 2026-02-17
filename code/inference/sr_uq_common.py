@@ -1,5 +1,6 @@
 import json
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -7,6 +8,19 @@ import nibabel as nib
 import numpy as np
 import torch
 from monai.inferers import sliding_window_inference
+
+# External-library compatibility warnings (PyTorch/MONAI/CUDA bindings).
+warnings.filterwarnings(
+    "ignore",
+    message=r"The cuda\.cudart module is deprecated and will be removed in a future release",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Using a non-tuple sequence for multidimensional indexing is deprecated",
+    category=UserWarning,
+    module=r"monai\.inferers\.utils",
+)
 
 
 def _repo_root() -> Path:
@@ -161,14 +175,21 @@ def _predict_with_sliding_window(
 
     lr_tensor = torch.from_numpy(lr_input_norm).unsqueeze(0).to(device)
     with torch.no_grad():
-        pred = sliding_window_inference(
-            inputs=lr_tensor,
-            roi_size=roi_size,
-            sw_batch_size=int(sw_batch_size),
-            predictor=predictor_fn,
-            overlap=float(overlap),
-            mode="gaussian",
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Using a non-tuple sequence for multidimensional indexing is deprecated",
+                category=UserWarning,
+                module=r"monai\.inferers\.utils",
+            )
+            pred = sliding_window_inference(
+                inputs=lr_tensor,
+                roi_size=roi_size,
+                sw_batch_size=int(sw_batch_size),
+                predictor=predictor_fn,
+                overlap=float(overlap),
+                mode="gaussian",
+            )
     return pred.squeeze(0).detach().cpu().numpy().astype(np.float32)
 
 

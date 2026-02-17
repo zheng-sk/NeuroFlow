@@ -41,7 +41,10 @@ def main() -> None:
 
     parser.add_argument("--flow-axis", type=str, default="auto", choices=["auto", "0", "1", "2"])
     parser.add_argument("--selected-frame", type=int, default=0)
-    parser.add_argument("--max-display-slices", type=int, default=12)
+    parser.add_argument("--max-display-slices", type=int, default=8)
+    parser.add_argument("--panel-cols", type=int, default=4)
+    parser.add_argument("--hist-bins", type=int, default=120)
+    parser.add_argument("--lr-mag-channel", type=int, default=0, choices=[0, 1, 2])
     parser.add_argument("--mask-min-slice-voxels", type=int, default=25)
     parser.add_argument("--q-ref", type=float, default=float("nan"))
     parser.add_argument("--cca-range", type=str, default="")
@@ -123,6 +126,12 @@ def main() -> None:
         str(args.selected_frame),
         "--max-display-slices",
         str(args.max_display_slices),
+        "--panel-cols",
+        str(args.panel_cols),
+        "--hist-bins",
+        str(args.hist_bins),
+        "--lr-mag-channel",
+        str(args.lr_mag_channel),
         "--mask-min-slice-voxels",
         str(args.mask_min_slice_voxels),
         "--mu-pa-s",

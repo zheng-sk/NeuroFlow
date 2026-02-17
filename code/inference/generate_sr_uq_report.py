@@ -1,12 +1,23 @@
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+
+plt.rcParams.update(
+    {
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "axes.titleweight": "semibold",
+        "axes.grid": False,
+        "font.size": 10,
+    }
+)
 
 try:
     from scipy import stats
@@ -491,6 +502,146 @@ def _autodetect_reference_label(metadata: Dict[str, Any]) -> str:
     return "Reference"
 
 
+def _robust_range(
+    arrays: Sequence[np.ndarray],
+    symmetric: bool,
+    lower_q: float = 0.5,
+    upper_q: float = 99.5,
+) -> Tuple[float, float]:
+    vals: List[np.ndarray] = []
+    for arr in arrays:
+        v = np.asarray(arr, dtype=np.float32).ravel()
+        v = v[np.isfinite(v)]
+        if v.size > 0:
+            vals.append(v)
+
+    if not vals:
+        return (-1.0, 1.0) if symmetric else (0.0, 1.0)
+
+    merged = np.concatenate(vals, axis=0)
+    if symmetric:
+        abs_m = np.abs(merged)
+        vmax = float(np.nanpercentile(abs_m, upper_q))
+        if not np.isfinite(vmax) or vmax <= 1e-8:
+            vmax = float(np.nanmax(abs_m))
+        vmax = max(vmax, 1e-6)
+        return -vmax, vmax
+
+    vmin = float(np.nanpercentile(merged, lower_q))
+    vmax = float(np.nanpercentile(merged, upper_q))
+    if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax - vmin < 1e-8):
+        vmin = float(np.nanmin(merged))
+        vmax = float(np.nanmax(merged))
+    if vmax - vmin < 1e-8:
+        pad = max(1e-3, 0.05 * max(abs(vmin), abs(vmax), 1.0))
+        vmin -= pad
+        vmax += pad
+    return vmin, vmax
+
+
+def _subsample_for_plot(x: np.ndarray, max_samples: int = 350000, seed: int = 11) -> np.ndarray:
+    if x.size <= int(max_samples):
+        return x
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(x.size, size=int(max_samples), replace=False)
+    return x[idx]
+
+
+def _distribution_row(channel: str, method: str, values: np.ndarray) -> Dict[str, Any]:
+    v = np.asarray(values, dtype=np.float64)
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return {
+            "channel": channel,
+            "method": method,
+            "count": 0,
+            "mean": float("nan"),
+            "std": float("nan"),
+            "median": float("nan"),
+            "p05": float("nan"),
+            "p95": float("nan"),
+            "min": float("nan"),
+            "max": float("nan"),
+        }
+
+    return {
+        "channel": channel,
+        "method": method,
+        "count": int(v.size),
+        "mean": float(np.mean(v)),
+        "std": float(np.std(v, ddof=1)) if v.size > 1 else float("nan"),
+        "median": float(np.median(v)),
+        "p05": float(np.quantile(v, 0.05)),
+        "p95": float(np.quantile(v, 0.95)),
+        "min": float(np.min(v)),
+        "max": float(np.max(v)),
+    }
+
+
+def _save_voxel_histograms(
+    out_path: Path,
+    baseline_4ch: np.ndarray,
+    pred_4ch: np.ndarray,
+    gt_4ch: np.ndarray,
+    mask: np.ndarray,
+    bins: int,
+    baseline_label: str,
+    sr_label: str,
+    ref_label: str,
+) -> List[Dict[str, Any]]:
+    mask_bool = mask > 0.5
+    if int(mask_bool.sum()) == 0:
+        mask_bool = np.ones_like(mask, dtype=bool)
+
+    channel_names = ["u", "v", "w", "mag"]
+    colors = {"ref": "#111827", "base": "#1d4ed8", "sr": "#b91c1c"}
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+    axes_f = axes.ravel()
+    rows: List[Dict[str, Any]] = []
+
+    for c, ch in enumerate(channel_names):
+        ax = axes_f[c]
+        ref_vals = gt_4ch[:, c][mask_bool]
+        base_vals = baseline_4ch[:, c][mask_bool]
+        sr_vals = pred_4ch[:, c][mask_bool]
+
+        rows.append(_distribution_row(ch, ref_label, ref_vals))
+        rows.append(_distribution_row(ch, baseline_label, base_vals))
+        rows.append(_distribution_row(ch, sr_label, sr_vals))
+
+        sym = ch != "mag"
+        vmin, vmax = _robust_range([ref_vals, base_vals, sr_vals], symmetric=sym, lower_q=0.5, upper_q=99.5)
+        bin_edges = np.linspace(vmin, vmax, max(20, int(bins)) + 1)
+
+        for vals, label, color, sseed in [
+            (ref_vals, ref_label, colors["ref"], 21 + c),
+            (base_vals, baseline_label, colors["base"], 31 + c),
+            (sr_vals, sr_label, colors["sr"], 41 + c),
+        ]:
+            vv = np.asarray(vals, dtype=np.float64)
+            vv = vv[np.isfinite(vv)]
+            if vv.size == 0:
+                continue
+            vv = vv[(vv >= vmin) & (vv <= vmax)]
+            vv = _subsample_for_plot(vv, seed=sseed)
+            if vv.size == 0:
+                continue
+            ax.hist(vv, bins=bin_edges, density=True, histtype="step", linewidth=1.7, alpha=0.95, color=color, label=label)
+
+        ax.set_title(f"{ch.upper()} in-mask voxel distribution")
+        ax.set_xlabel("Normalized value")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.25, linestyle=":")
+        ax.legend(fontsize=8)
+
+    fig.suptitle("Voxel-value distribution inside vessel mask", fontsize=14, y=0.995)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=220)
+    plt.close(fig)
+    return rows
+
+
 def _save_channel_figure(
     out_path: Path,
     ch_name: str,
@@ -498,6 +649,7 @@ def _save_channel_figure(
     pred: np.ndarray,
     gt: np.ndarray,
     max_slices: int,
+    n_cols: int = 4,
 ) -> None:
     n_slices = gt.shape[-1]
     if n_slices <= max_slices:
@@ -507,40 +659,51 @@ def _save_channel_figure(
 
     is_mag = ch_name == "mag"
     cmap = "gray" if is_mag else "coolwarm"
-    vmin, vmax = ((0.0, 1.0) if is_mag else (-1.0, 1.0))
+    vmin, vmax = _robust_range([lr_up, pred, gt], symmetric=(not is_mag), lower_q=0.5, upper_q=99.5)
+    _, emax = _robust_range([np.abs(pred - gt)], symmetric=False, lower_q=0.0, upper_q=99.5)
 
-    fig, axes = plt.subplots(4, len(z_idx), figsize=(3.0 * len(z_idx), 10))
-    if len(z_idx) == 1:
-        axes = axes.reshape(4, 1)
+    n_cols = max(1, min(int(n_cols), len(z_idx)))
+    n_blocks = int(math.ceil(len(z_idx) / float(n_cols)))
+    n_rows = 4 * n_blocks
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.4 * n_cols, 2.5 * n_rows), squeeze=False)
+    for rr in range(n_rows):
+        for cc in range(n_cols):
+            axes[rr, cc].axis("off")
 
     for j, z in enumerate(z_idx):
+        blk = j // n_cols
+        col = j % n_cols
+        r0 = 4 * blk
+
         inp = lr_up[:, :, z]
         pd = pred[:, :, z]
         gtz = gt[:, :, z]
         err = np.abs(pd - gtz)
 
-        im0 = axes[0, j].imshow(inp, cmap=cmap, vmin=vmin, vmax=vmax)
-        im1 = axes[1, j].imshow(pd, cmap=cmap, vmin=vmin, vmax=vmax)
-        im2 = axes[2, j].imshow(gtz, cmap=cmap, vmin=vmin, vmax=vmax)
-        im3 = axes[3, j].imshow(err, cmap="magma")
+        axes[r0 + 0, col].imshow(inp, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
+        axes[r0 + 1, col].imshow(pd, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
+        axes[r0 + 2, col].imshow(gtz, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
+        axes[r0 + 3, col].imshow(err, cmap="magma", vmin=0.0, vmax=emax, interpolation="nearest")
 
-        axes[0, j].set_title(f"z={z}", fontsize=10)
-        for r in range(4):
-            axes[r, j].axis("off")
+        axes[r0 + 0, col].set_title(f"z={z}", fontsize=10)
+        for rr in range(4):
+            axes[r0 + rr, col].axis("off")
+            axes[r0 + rr, col].grid(False)
 
-    axes[0, 0].set_ylabel("Input (LR up)", fontsize=11)
-    axes[1, 0].set_ylabel("Prediction", fontsize=11)
-    axes[2, 0].set_ylabel("Ground truth", fontsize=11)
-    axes[3, 0].set_ylabel("|Error|", fontsize=11)
+        if col == 0:
+            axes[r0 + 0, col].set_ylabel("Input (LR up)", fontsize=10)
+            axes[r0 + 1, col].set_ylabel("Prediction", fontsize=10)
+            axes[r0 + 2, col].set_ylabel("Ground truth", fontsize=10)
+            axes[r0 + 3, col].set_ylabel("|Error|", fontsize=10)
 
-    plt.colorbar(im0, ax=axes[0, :], fraction=0.012, pad=0.01)
-    plt.colorbar(im1, ax=axes[1, :], fraction=0.012, pad=0.01)
-    plt.colorbar(im2, ax=axes[2, :], fraction=0.012, pad=0.01)
-    plt.colorbar(im3, ax=axes[3, :], fraction=0.012, pad=0.01)
-
-    fig.suptitle(f"Full-volume comparison: {ch_name}", fontsize=14)
+    fig.suptitle(
+        f"Full-volume comparison: {ch_name}  |  value range [{vmin:.3f}, {vmax:.3f}]  |  error p99.5={emax:.3f}",
+        fontsize=13,
+        y=0.995,
+    )
     fig.tight_layout()
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, dpi=220)
     plt.close(fig)
 
 
@@ -563,7 +726,9 @@ def main() -> None:
         help="Axis used for cross-sectional flow integration. Use 'auto' to select the best axis from reference flow consistency.",
     )
     parser.add_argument("--selected-frame", type=int, default=0, help="Frame index (within payload) used for visual panel")
-    parser.add_argument("--max-display-slices", type=int, default=12, help="Max slices per visual panel")
+    parser.add_argument("--max-display-slices", type=int, default=8, help="Max slices per visual panel")
+    parser.add_argument("--panel-cols", type=int, default=4, help="Number of columns per visual panel block")
+    parser.add_argument("--hist-bins", type=int, default=120, help="Bins for in-mask voxel distribution histograms")
     parser.add_argument(
         "--lr-mag-channel",
         type=int,
@@ -667,8 +832,24 @@ def main() -> None:
             pred=pred_norm[fidx, c],
             gt=gt_norm[fidx, c],
             max_slices=int(args.max_display_slices),
+            n_cols=int(args.panel_cols),
         )
         channel_figs[name] = str(out_img.name)
+
+    fig_voxel_hist = fig_dir / "voxel_histogram_in_mask.png"
+    voxel_dist_rows = _save_voxel_histograms(
+        out_path=fig_voxel_hist,
+        baseline_4ch=lr_up,
+        pred_4ch=pred_norm,
+        gt_4ch=gt_norm,
+        mask=mask,
+        bins=int(args.hist_bins),
+        baseline_label=args.baseline_label,
+        sr_label=args.sr_label,
+        ref_label=ref_label,
+    )
+    voxel_dist_cols = ["channel", "method", "count", "mean", "std", "median", "p05", "p95", "min", "max"]
+    _write_csv(metrics_dir / "voxel_distribution_stats.csv", voxel_dist_rows, voxel_dist_cols)
 
     # Multi-frame fields for paper-style stats
     mask_ref = (mask > 0.5).astype(np.float32)
@@ -985,6 +1166,9 @@ def main() -> None:
         },
         "visualization": {
             "lr_mag_channel_used": int(args.lr_mag_channel),
+            "max_display_slices": int(args.max_display_slices),
+            "panel_cols": int(args.panel_cols),
+            "hist_bins": int(args.hist_bins),
         },
     }
 
@@ -1011,6 +1195,7 @@ def main() -> None:
     t3_html = _html_table(fmt_rows(table3_rows, t3_cols, nd=6), t3_cols)
 
     flow_html = _html_table(fmt_rows(flow_rows, flow_cols, nd=6), flow_cols)
+    voxel_dist_html = _html_table(fmt_rows(voxel_dist_rows, voxel_dist_cols, nd=6), voxel_dist_cols)
     flow_axis_rows = []
     for axis in sorted(flow_axis_scores.keys()):
         d = flow_axis_scores[axis]
@@ -1082,6 +1267,11 @@ def main() -> None:
   <h2>Visual Inspection (Full Volume)</h2>
   {ch_img_tags}
 
+  <h2>Voxel Distribution Inside Mask</h2>
+  <p class=\"muted\">Histogram comparison over all in-mask voxels across all processed frames.</p>
+  <img src=\"figures/{fig_voxel_hist.name}\" alt=\"In-mask voxel histograms\"/>
+  {voxel_dist_html}
+
   <h2>Flow-rate Diagnostics</h2>
   <img src=\"figures/{fig_flow.name}\" alt=\"Flow profile\"/>
   <h3>Flow Axis Selection</h3>
@@ -1114,6 +1304,7 @@ def main() -> None:
     <li><code>metrics/table2_like_compact.csv</code></li>
     <li><code>metrics/flow_metrics.csv</code></li>
     <li><code>metrics/table3_like_wss.csv</code></li>
+    <li><code>metrics/voxel_distribution_stats.csv</code></li>
     <li><code>metrics/summary_metrics.json</code></li>
   </ul>
 

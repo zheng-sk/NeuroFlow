@@ -1,10 +1,17 @@
 import argparse
 import sys
+import warnings
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 import torch
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"The cuda\.cudart module is deprecated and will be removed in a future release",
+    category=FutureWarning,
+)
 
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:

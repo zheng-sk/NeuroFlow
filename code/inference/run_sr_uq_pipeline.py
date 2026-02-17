@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument("--mag-scale", type=float, default=4095.0)
     parser.add_argument("--mask-threshold", type=float, default=0.5)
 
-    parser.add_argument("--flow-axis", type=int, default=2, choices=[0, 1, 2])
+    parser.add_argument("--flow-axis", type=str, default="auto", choices=["auto", "0", "1", "2"])
     parser.add_argument("--selected-frame", type=int, default=0)
     parser.add_argument("--max-display-slices", type=int, default=12)
     parser.add_argument("--mask-min-slice-voxels", type=int, default=25)

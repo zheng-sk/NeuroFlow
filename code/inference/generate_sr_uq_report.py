@@ -206,6 +206,52 @@ def _flow_rate_curves(
     return q
 
 
+def _suggest_flow_axis(
+    vel_ref: np.ndarray,
+    mask: np.ndarray,
+    spacing_mm: Tuple[float, float, float],
+) -> Tuple[int, Dict[int, Dict[str, float]]]:
+    # Heuristic:
+    # - Lower temporal relative SD in per-slice flow
+    # - Smoother mean flow profile along the axis
+    # - Higher slice coverage with substantial flow
+    details: Dict[int, Dict[str, float]] = {}
+
+    for axis in (0, 1, 2):
+        q = _flow_rate_curves(vel_ref, mask, flow_axis=axis, spacing_mm=spacing_mm)
+        q_mean = q.mean(axis=0)
+        q_sd = q.std(axis=0, ddof=1) if q.shape[0] > 1 else np.zeros_like(q_mean)
+
+        abs_mean = np.abs(q_mean)
+        peak = float(np.max(abs_mean)) if abs_mean.size > 0 else 0.0
+        threshold = max(1e-8, 0.10 * peak)
+        valid = abs_mean >= threshold
+        coverage = float(np.mean(valid)) if valid.size > 0 else 0.0
+
+        if np.any(valid):
+            rel_sd = float(np.mean(q_sd[valid] / (abs_mean[valid] + 1e-8)))
+        else:
+            rel_sd = 1e6
+
+        if q_mean.size >= 3:
+            d1 = np.diff(q_mean)
+            d2 = np.diff(q_mean, n=2)
+            smoothness = float(np.mean(np.abs(d2)) / (np.mean(np.abs(d1)) + 1e-8))
+        else:
+            smoothness = 1e6
+
+        score = rel_sd + 0.20 * smoothness - 0.15 * coverage
+        details[axis] = {
+            "score": float(score),
+            "rel_sd": float(rel_sd),
+            "smoothness": float(smoothness),
+            "coverage": float(coverage),
+        }
+
+    best_axis = min(details.keys(), key=lambda a: details[a]["score"])
+    return int(best_axis), details
+
+
 def _wss_boundary_points(mask_ref: np.ndarray, max_points: int, seed: int) -> Tuple[np.ndarray, np.ndarray]:
     mask_bin = mask_ref > 0.5
     eroded = binary_erosion(mask_bin, iterations=1)
@@ -509,9 +555,22 @@ def main() -> None:
     parser.add_argument("--metadata-json", default="", help="Optional inference_metadata.json for richer report context")
     parser.add_argument("--out-dir", required=True, help="Output directory for report artifacts")
 
-    parser.add_argument("--flow-axis", type=int, default=2, choices=[0, 1, 2], help="Axis used for cross-sectional flow integration")
+    parser.add_argument(
+        "--flow-axis",
+        type=str,
+        default="auto",
+        choices=["auto", "0", "1", "2"],
+        help="Axis used for cross-sectional flow integration. Use 'auto' to select the best axis from reference flow consistency.",
+    )
     parser.add_argument("--selected-frame", type=int, default=0, help="Frame index (within payload) used for visual panel")
     parser.add_argument("--max-display-slices", type=int, default=12, help="Max slices per visual panel")
+    parser.add_argument(
+        "--lr-mag-channel",
+        type=int,
+        default=0,
+        choices=[0, 1, 2],
+        help="Which LR magnitude channel to display for 'mag' input (0=u, 1=v, 2=w).",
+    )
     parser.add_argument(
         "--mask-min-slice-voxels",
         type=int,
@@ -572,9 +631,17 @@ def main() -> None:
         gt_phys[t, :3] *= float(venc[t])
         lr_vel_phys[t] *= float(venc[t])
 
-    # Derive LR 4-channel display tensor (u,v,w,mag proxy)
-    lr_mag_proxy = np.sqrt(np.maximum(lr_norm[:, 3], 0.0) ** 2 + np.maximum(lr_norm[:, 4], 0.0) ** 2 + np.maximum(lr_norm[:, 5], 0.0) ** 2)
-    lr_4ch = np.concatenate([lr_norm[:, :3], lr_mag_proxy[:, None]], axis=1).astype(np.float32)
+    # Derive LR 4-channel display tensor (u,v,w,mag) using a single LR magnitude channel.
+    lr_mag_single = lr_norm[:, 3 + int(args.lr_mag_channel)].astype(np.float32)
+    lr_4ch = np.concatenate([lr_norm[:, :3], lr_mag_single[:, None]], axis=1).astype(np.float32)
+
+    # Suggest best flow axis from reference consistency, then resolve selected axis.
+    suggested_flow_axis, flow_axis_scores = _suggest_flow_axis(
+        vel_ref=gt_phys[:, :3],
+        mask=mask,
+        spacing_mm=hr_spacing,
+    )
+    selected_flow_axis = int(suggested_flow_axis) if args.flow_axis == "auto" else int(args.flow_axis)
 
     # Upsample LR display to HR shape for visual side-by-side
     if lr_4ch.shape[2:] != gt_norm.shape[2:]:
@@ -622,7 +689,7 @@ def main() -> None:
         vort_base=vort_base,
         vort_sr=vort_sr,
         mask_ref=mask_ref,
-        flow_axis=int(args.flow_axis),
+        flow_axis=selected_flow_axis,
         min_voxels=int(args.mask_min_slice_voxels),
     )
 
@@ -647,9 +714,9 @@ def main() -> None:
     _write_csv(metrics_dir / "table2_like_compact.csv", table2_compact, t2c_cols)
 
     # 2) Flow-rate metrics
-    q_ref_curves = _flow_rate_curves(gt_phys[:, :3], mask, flow_axis=int(args.flow_axis), spacing_mm=hr_spacing)
-    q_base_curves = _flow_rate_curves(lr_vel_phys, mask, flow_axis=int(args.flow_axis), spacing_mm=hr_spacing)
-    q_sr_curves = _flow_rate_curves(pred_phys[:, :3], mask, flow_axis=int(args.flow_axis), spacing_mm=hr_spacing)
+    q_ref_curves = _flow_rate_curves(gt_phys[:, :3], mask, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
+    q_base_curves = _flow_rate_curves(lr_vel_phys, mask, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
+    q_sr_curves = _flow_rate_curves(pred_phys[:, :3], mask, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
 
     q_ref_mean = q_ref_curves.mean(axis=0)
     q_ref_sd = q_ref_curves.std(axis=0, ddof=1) if q_ref_curves.shape[0] > 1 else np.zeros_like(q_ref_mean)
@@ -721,7 +788,7 @@ def main() -> None:
     plt.plot(x, q_sr_mean, label=args.sr_label, linewidth=2)
     plt.fill_between(x, q_sr_mean - q_sr_sd, q_sr_mean + q_sr_sd, alpha=0.2)
     plt.axhline(q_ref_scalar, linestyle="--", color="black", label=f"Qref={q_ref_scalar:.3f} ml/s")
-    plt.xlabel(f"Slice index along axis {args.flow_axis}")
+    plt.xlabel(f"Slice index along axis {selected_flow_axis}")
     plt.ylabel("Flow rate [ml/s]")
     plt.title("Flow-rate profile (mean ± SD across frames)")
     plt.legend()
@@ -904,14 +971,20 @@ def main() -> None:
         "dimensions": {
             "T": int(t_count),
             "shape_XYZ": [int(x) for x in pred_norm.shape[2:]],
-            "flow_axis": int(args.flow_axis),
+            "flow_axis": int(selected_flow_axis),
+            "flow_axis_mode": str(args.flow_axis),
+            "suggested_flow_axis": int(suggested_flow_axis),
         },
         "statistics": {
             "table2_wilcoxon_p_re_baseline_vs_sr": p_re,
             "flow_wilcoxon_p_abs_err": p_flow,
             "wss_wilcoxon_p_abs_err": p_wss,
             "flow_reference_q_ml_s": q_ref_scalar,
+            "flow_axis_scores": flow_axis_scores,
             "geometry_summary": geom_summary,
+        },
+        "visualization": {
+            "lr_mag_channel_used": int(args.lr_mag_channel),
         },
     }
 
@@ -938,6 +1011,20 @@ def main() -> None:
     t3_html = _html_table(fmt_rows(table3_rows, t3_cols, nd=6), t3_cols)
 
     flow_html = _html_table(fmt_rows(flow_rows, flow_cols, nd=6), flow_cols)
+    flow_axis_rows = []
+    for axis in sorted(flow_axis_scores.keys()):
+        d = flow_axis_scores[axis]
+        flow_axis_rows.append(
+            {
+                "axis": int(axis),
+                "score": d.get("score", float("nan")),
+                "rel_sd": d.get("rel_sd", float("nan")),
+                "smoothness": d.get("smoothness", float("nan")),
+                "coverage": d.get("coverage", float("nan")),
+            }
+        )
+    flow_axis_cols = ["axis", "score", "rel_sd", "smoothness", "coverage"]
+    flow_axis_html = _html_table(fmt_rows(flow_axis_rows, flow_axis_cols, nd=6), flow_axis_cols)
 
     geom_html = _html_table(
         [
@@ -988,6 +1075,8 @@ def main() -> None:
     <li>Flow profile absolute error comparison (Wilcoxon p): <b>{'nan' if not np.isfinite(p_flow) else f'{p_flow:.4g}'}</b></li>
     <li>WSS absolute error comparison (Wilcoxon p): <b>{'nan' if not np.isfinite(p_wss) else f'{p_wss:.4g}'}</b></li>
     <li>Flow reference value used (ml/s): <b>{q_ref_scalar:.6f}</b></li>
+    <li>Flow axis used: <b>{selected_flow_axis}</b> (mode: {args.flow_axis}, suggested: {suggested_flow_axis})</li>
+    <li>LR magnitude channel used for visualization: <b>{args.lr_mag_channel}</b></li>
   </ul>
 
   <h2>Visual Inspection (Full Volume)</h2>
@@ -995,6 +1084,9 @@ def main() -> None:
 
   <h2>Flow-rate Diagnostics</h2>
   <img src=\"figures/{fig_flow.name}\" alt=\"Flow profile\"/>
+  <h3>Flow Axis Selection</h3>
+  <p class=\"muted\">Lower score is better (lower temporal relative SD, smoother profile, higher valid-flow coverage).</p>
+  {flow_axis_html}
 
   <h2>Paper-style Table 2 (Representative Locations)</h2>
   <p class=\"muted\">Variables: mean/SD/skewness/kurtosis of intraluminal velocity and vorticity (aggregated over all processed frames).</p>

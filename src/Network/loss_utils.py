@@ -78,3 +78,13 @@ def calculate_relative_error(u_pred, v_pred, w_pred, u_hi, v_hi, w_hi, binary_ma
     # Calculate the mean from the total non zero accuracy, divided by the masked area
     mean_err = corrected_speed_loss.sum(dim=(1, 2, 3)) / (binary_mask.sum(dim=(1, 2, 3)) + 1)
     return mean_err * 100
+
+
+def calculate_relative_error_mag(mag_pred, mag_hi, binary_mask):
+    epsilon = 1e-5
+    diff_mag = torch.abs(mag_pred - mag_hi)
+    relative_mag_loss = diff_mag / (torch.abs(mag_hi) + epsilon)
+    relative_mag_loss = torch.clamp(relative_mag_loss, 0.0, 1.0)
+    relative_mag_loss = torch.where(binary_mask == 1.0, relative_mag_loss, torch.zeros_like(relative_mag_loss))
+    mean_err = relative_mag_loss.sum(dim=(1, 2, 3)) / (binary_mask.sum(dim=(1, 2, 3)) + 1)
+    return mean_err * 100

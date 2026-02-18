@@ -1,4 +1,8 @@
 import argparse
+import random
+
+import numpy as np
+import torch
 
 from Network.NiftiPatchDataset import create_nifti_patch_dataloader
 from Network.TrainerController import TrainerController
@@ -116,10 +120,84 @@ def main():
         default=0,
         help="Batch index used for TensorBoard validation reconstruction images.",
     )
+    parser.add_argument("--seed", type=int, default=42, help="Global random seed for reproducibility.")
+    parser.add_argument(
+        "--deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable deterministic backend behavior (may reduce performance).",
+    )
+    parser.add_argument(
+        "--accuracy-include-mag",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include magnitude relative error in train/val accuracy when --predict-mag is enabled.",
+    )
+    parser.add_argument(
+        "--accuracy-mag-weight",
+        type=float,
+        default=1.0,
+        help="Weight of magnitude relative error in combined accuracy metric.",
+    )
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="reduce_on_plateau",
+        choices=["none", "reduce_on_plateau"],
+        help="Learning-rate scheduler strategy.",
+    )
+    parser.add_argument("--lr-reduce-factor", type=float, default=0.5, help="LR reduction factor for plateau scheduler.")
+    parser.add_argument("--lr-reduce-patience", type=int, default=8, help="Epoch patience before LR reduction.")
+    parser.add_argument("--lr-min", type=float, default=1e-6, help="Minimum learning rate.")
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=20,
+        help="Stop if val_loss does not improve for N epochs (0 disables).",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum val_loss improvement to reset early-stopping counter.",
+    )
+    parser.add_argument(
+        "--overfit-patience",
+        type=int,
+        default=8,
+        help="Stop if overfitting pattern persists for N epochs (0 disables).",
+    )
+    parser.add_argument(
+        "--overfit-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum val_loss increase used to detect overfitting pattern.",
+    )
     parser.add_argument("--restore", action="store_true", help="Restore training from an existing checkpoint.")
     parser.add_argument("--restore-dir", type=str, default="", help="Checkpoint directory to restore from.")
     parser.add_argument("--restore-file", type=str, default="", help="Checkpoint filename (.pt).")
     args = parser.parse_args()
+
+    if args.seed is not None:
+        seed = int(args.seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        try:
+            from monai.utils import set_determinism
+
+            set_determinism(seed=seed)
+        except Exception:
+            pass
+
+    if args.deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
     if args.cache_dataset and args.num_workers > 0:
         print(
@@ -156,6 +234,7 @@ def main():
         minimum_coverage=args.legacy_minimum_coverage,
         max_sampling_attempts=args.legacy_max_sampling_attempts,
         allow_empty_fallback=not args.legacy_disallow_empty_fallback,
+        seed=args.seed,
     )
     val_loader = create_nifti_patch_dataloader(
         csv_path=args.val_csv,
@@ -182,6 +261,7 @@ def main():
         minimum_coverage=0.0,
         max_sampling_attempts=args.legacy_max_sampling_attempts,
         allow_empty_fallback=True,
+        seed=args.seed,
     )
 
     print(f"4DFlowNet NIfTI patch {args.patch_size}, lr {args.initial_learning_rate}, batch {args.batch_size}")
@@ -198,6 +278,16 @@ def main():
         tb_image_every_n_epochs=args.tb_image_every_epochs,
         tb_image_axis=args.tb_image_axis,
         tb_image_batch_index=args.tb_image_batch_index,
+        accuracy_include_mag=args.accuracy_include_mag,
+        accuracy_mag_weight=args.accuracy_mag_weight,
+        lr_scheduler=args.lr_scheduler,
+        lr_reduce_factor=args.lr_reduce_factor,
+        lr_reduce_patience=args.lr_reduce_patience,
+        lr_min=args.lr_min,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
+        overfit_patience=args.overfit_patience,
+        overfit_min_delta=args.overfit_min_delta,
     )
     network.init_model_dir()
 

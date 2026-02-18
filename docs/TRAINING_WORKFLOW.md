@@ -294,3 +294,29 @@ Performance-oriented options:
 ```bash
 --deterministic-train-patches
 ```
+
+## 10) Training Stability and Reproducibility
+
+Recommended options for stable runs:
+
+```bash
+--seed 42 \
+--deterministic \
+--accuracy-include-mag \
+--accuracy-mag-weight 1.0 \
+--lr-scheduler reduce_on_plateau \
+--lr-reduce-factor 0.5 \
+--lr-reduce-patience 8 \
+--lr-min 1e-6 \
+--early-stopping-patience 20 \
+--early-stopping-min-delta 0.0 \
+--overfit-patience 8 \
+--overfit-min-delta 0.0
+```
+
+Notes:
+
+- `val_accuracy` includes magnitude only when `--predict-mag` and `--accuracy-include-mag` are enabled.
+- Early stop can trigger by:
+  - no validation improvement (`--early-stopping-*`)
+  - sustained overfitting pattern (train improves while val worsens, `--overfit-*`).

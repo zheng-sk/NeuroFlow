@@ -32,6 +32,16 @@ class TrainerController:
         tb_image_every_n_epochs=10,
         tb_image_axis=2,
         tb_image_batch_index=0,
+        accuracy_include_mag=True,
+        accuracy_mag_weight=1.0,
+        lr_scheduler="reduce_on_plateau",
+        lr_reduce_factor=0.5,
+        lr_reduce_patience=8,
+        lr_min=1e-6,
+        early_stopping_patience=20,
+        early_stopping_min_delta=0.0,
+        overfit_patience=8,
+        overfit_min_delta=0.0,
     ):
         """
         TrainerController constructor.
@@ -56,6 +66,16 @@ class TrainerController:
         self.tb_image_every_n_epochs = max(int(tb_image_every_n_epochs), 0)
         self.tb_image_axis = int(tb_image_axis)
         self.tb_image_batch_index = max(int(tb_image_batch_index), 0)
+        self.accuracy_include_mag = bool(accuracy_include_mag)
+        self.accuracy_mag_weight = max(float(accuracy_mag_weight), 0.0)
+        self.lr_scheduler_name = str(lr_scheduler).lower()
+        self.lr_reduce_factor = float(lr_reduce_factor)
+        self.lr_reduce_patience = int(lr_reduce_patience)
+        self.lr_min = float(lr_min)
+        self.early_stopping_patience = max(int(early_stopping_patience), 0)
+        self.early_stopping_min_delta = float(early_stopping_min_delta)
+        self.overfit_patience = max(int(overfit_patience), 0)
+        self.overfit_min_delta = float(overfit_min_delta)
 
         # Network
         self.network_name = network_name
@@ -80,6 +100,8 @@ class TrainerController:
         ]
         if self.predict_mag:
             self.metric_keys.extend(["train_mag_mse", "val_mag_mse"])
+            if self.accuracy_include_mag:
+                self.metric_keys.extend(["train_mag_accuracy", "val_mag_accuracy"])
         self.accuracy_metric = "val_loss"
 
         print(f"Divergence loss2 * {self.div_weight}")
@@ -92,11 +114,30 @@ class TrainerController:
                 f"TensorBoard validation recon images every {self.tb_image_every_n_epochs} epochs "
                 f"(axis={self.tb_image_axis}, batch_index={self.tb_image_batch_index})"
             )
+        if self.predict_mag and self.accuracy_include_mag:
+            print(f"Accuracy metric includes magnitude error (weight={self.accuracy_mag_weight})")
+        print(f"LR scheduler: {self.lr_scheduler_name}")
+        if self.early_stopping_patience > 0:
+            print(
+                f"Early stopping on val_loss: patience={self.early_stopping_patience}, "
+                f"min_delta={self.early_stopping_min_delta}"
+            )
+        if self.overfit_patience > 0:
+            print(f"Overfitting stop: patience={self.overfit_patience}, min_delta={self.overfit_min_delta}")
         print(f"Using device: {self.device}")
 
         # Learning rate and optimizer (weight_decay replicates L2 regularization)
         self.learning_rate = initial_learning_rate
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=5e-7)
+        self.scheduler = None
+        if self.lr_scheduler_name == "reduce_on_plateau":
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode="min",
+                factor=self.lr_reduce_factor,
+                patience=self.lr_reduce_patience,
+                min_lr=self.lr_min,
+            )
         self._reset_metric_storage()
 
     def _reset_metric_storage(self):
@@ -120,6 +161,7 @@ class TrainerController:
                     "epoch": epoch,
                     "model_state_dict": self.model.state_dict(),
                     "optimizer_state_dict": self.optimizer.state_dict(),
+                    "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
                     "learning_rate": self.learning_rate,
                     "network_name": self.network_name,
                     "predict_mag": self.predict_mag,
@@ -163,7 +205,15 @@ class TrainerController:
         """
         u, v, w = y_true[:, 0], y_true[:, 1], y_true[:, 2]
         u_pred, v_pred, w_pred = y_pred[:, 0], y_pred[:, 1], y_pred[:, 2]
-        return loss_utils.calculate_relative_error(u_pred, v_pred, w_pred, u, v, w, mask)
+        vel_rel = loss_utils.calculate_relative_error(u_pred, v_pred, w_pred, u, v, w, mask)
+
+        if self.predict_mag and self.accuracy_include_mag and y_true.shape[1] >= 4 and y_pred.shape[1] >= 4:
+            mag_rel = loss_utils.calculate_relative_error_mag(y_pred[:, 3], y_true[:, 3], mask)
+            w_mag = self.accuracy_mag_weight
+            combined = (vel_rel + (w_mag * mag_rel)) / (1.0 + w_mag)
+            return combined, vel_rel, mag_rel
+
+        return vel_rel, vel_rel, None
 
     @staticmethod
     def calculate_mse(u, v, w, u_pred, v_pred, w_pred):
@@ -356,7 +406,24 @@ class TrainerController:
         utility.log_to_file(self.logfile, f"Network: {self.network_name}\n")
         utility.log_to_file(self.logfile, f"Initial learning rate: {self.learning_rate}\n")
         utility.log_to_file(self.logfile, f"Accuracy metric: {self.accuracy_metric}\n")
+        utility.log_to_file(
+            self.logfile,
+            f"Accuracy include magnitude: {self.predict_mag and self.accuracy_include_mag} "
+            f"(weight={self.accuracy_mag_weight})\n",
+        )
         utility.log_to_file(self.logfile, f"Divergence weight: {self.div_weight}\n")
+        utility.log_to_file(
+            self.logfile,
+            f"LR scheduler: {self.lr_scheduler_name} "
+            f"(factor={self.lr_reduce_factor}, patience={self.lr_reduce_patience}, min_lr={self.lr_min})\n",
+        )
+        utility.log_to_file(
+            self.logfile,
+            f"Early stopping patience: {self.early_stopping_patience}, "
+            f"min_delta: {self.early_stopping_min_delta}, "
+            f"overfit_patience: {self.overfit_patience}, "
+            f"overfit_min_delta: {self.overfit_min_delta}\n",
+        )
 
         stat_names = ",".join(self.metric_keys)
         utility.log_to_file(
@@ -425,7 +492,7 @@ class TrainerController:
 
     def calculate_and_update_metrics(self, hires, predictions, mask, metric_set):
         total_loss, mse, divloss, mag_mse = self.loss_function(hires, predictions, mask)
-        rel_error = self.accuracy_function(hires, predictions, mask)
+        rel_error, _vel_rel_error, mag_rel_error = self.accuracy_function(hires, predictions, mask)
 
         batch_size = hires.shape[0]
         if metric_set == "train":
@@ -436,6 +503,8 @@ class TrainerController:
         self._update_metric(f"{metric_set}_div", divloss.mean().item(), batch_size)
         if self.predict_mag:
             self._update_metric(f"{metric_set}_mag_mse", mag_mse.mean().item(), batch_size)
+            if self.accuracy_include_mag and mag_rel_error is not None:
+                self._update_metric(f"{metric_set}_mag_accuracy", mag_rel_error.mean().item(), batch_size)
         self._update_metric(f"{metric_set}_accuracy", rel_error.mean().item(), batch_size)
         return total_loss.mean()
 
@@ -452,6 +521,11 @@ class TrainerController:
         start_time = time.time()
 
         previous_loss = np.inf
+        no_improve_epochs = 0
+        overfit_epochs = 0
+        prev_epoch_train_loss = None
+        prev_epoch_val_loss = None
+        stopped_early = False
         total_batch_train = len(trainset)
         total_batch_val = len(valset)
 
@@ -502,12 +576,19 @@ class TrainerController:
             lr = self.optimizer.param_groups[0]["lr"]
             log_line = f"{epoch + 1},{loss_str},{lr:.6f},{time.time() - start_loop:.1f}"
 
+            train_loss_epoch = self._metric_value("train_loss")
+            val_loss_epoch = self._metric_value("val_loss")
+
+            if self.scheduler is not None:
+                self.scheduler.step(val_loss_epoch)
+
             self._update_summary_logging(epoch)
             self.save_latest_model(epoch + 1)
 
-            if self._metric_value(self.accuracy_metric) < previous_loss:
+            if self._metric_value(self.accuracy_metric) < (previous_loss - self.early_stopping_min_delta):
                 self.save_best_model(epoch + 1)
                 previous_loss = self._metric_value(self.accuracy_metric)
+                no_improve_epochs = 0
 
                 message += " **"
                 log_line += ",**"
@@ -521,12 +602,49 @@ class TrainerController:
 
                     message += f" Benchmark loss: {quick_loss:.5f} ({quick_accuracy:.1f} %)"
                     log_line += f", {quick_loss:.7f}, {quick_accuracy:.2f}%, {quick_mse:.7f}, {quick_div:.7f}"
+            else:
+                no_improve_epochs += 1
+
+            if prev_epoch_train_loss is not None and prev_epoch_val_loss is not None:
+                train_improved = train_loss_epoch < (prev_epoch_train_loss - 1e-12)
+                val_worsened = val_loss_epoch > (prev_epoch_val_loss + self.overfit_min_delta)
+                if train_improved and val_worsened:
+                    overfit_epochs += 1
+                else:
+                    overfit_epochs = 0
+            prev_epoch_train_loss = train_loss_epoch
+            prev_epoch_val_loss = val_loss_epoch
 
             print(message)
             utility.log_to_file(self.logfile, log_line + "\n")
 
+            stop_due_to_no_improve = (
+                self.early_stopping_patience > 0
+                and no_improve_epochs >= self.early_stopping_patience
+                and (val_loss_epoch >= previous_loss - self.early_stopping_min_delta)
+            )
+            stop_due_to_overfit = self.overfit_patience > 0 and overfit_epochs >= self.overfit_patience
+
+            if stop_due_to_no_improve or stop_due_to_overfit:
+                if stop_due_to_no_improve:
+                    reason = (
+                        f"Early stopping: no val_loss improvement for {no_improve_epochs} epochs "
+                        f"(patience={self.early_stopping_patience})."
+                    )
+                else:
+                    reason = (
+                        f"Overfitting detected: val_loss worsened while train_loss improved for "
+                        f"{overfit_epochs} consecutive epochs (patience={self.overfit_patience})."
+                    )
+                print(reason)
+                utility.log_to_file(self.logfile, reason + "\n")
+                stopped_early = True
+                break
+
         hrs, mins, secs = utility.calculate_time_elapsed(start_time)
         message = f"\nTraining {self.network_name} completed! - name: {self.unique_model_name}"
+        if stopped_early:
+            message += "\nStopped early."
         message += f"\nTotal training time: {hrs} hrs {mins} mins {secs} secs."
         message += f"\nFinished at {time.ctime()}"
         message += "\n==================== END TRAINING ================="
@@ -544,6 +662,7 @@ class TrainerController:
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
             "learning_rate": self.optimizer.param_groups[0]["lr"],
             "network_name": self.network_name,
             "predict_mag": self.predict_mag,
@@ -562,6 +681,8 @@ class TrainerController:
             self.model.load_state_dict(checkpoint["model_state_dict"])
             if "optimizer_state_dict" in checkpoint:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if self.scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
+                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             if "learning_rate" in checkpoint:
                 for group in self.optimizer.param_groups:
                     group["lr"] = checkpoint["learning_rate"]
@@ -584,6 +705,8 @@ class TrainerController:
         }
         if self.predict_mag:
             train_metrics["mag_mse"] = self._metric_value("train_mag_mse")
+            if self.accuracy_include_mag:
+                train_metrics["mag_accuracy"] = self._metric_value("train_mag_accuracy")
         for key, value in train_metrics.items():
             self.train_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -595,6 +718,8 @@ class TrainerController:
         }
         if self.predict_mag:
             val_metrics["mag_mse"] = self._metric_value("val_mag_mse")
+            if self.accuracy_include_mag:
+                val_metrics["mag_accuracy"] = self._metric_value("val_mag_accuracy")
         for key, value in val_metrics.items():
             self.val_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 

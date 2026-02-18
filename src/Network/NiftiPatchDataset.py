@@ -1,6 +1,7 @@
 import csv
 import os
-from typing import Dict, List
+import random
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -667,6 +668,7 @@ def create_nifti_patch_dataloader(
     minimum_coverage: float = 0.0,
     max_sampling_attempts: int = 100,
     allow_empty_fallback: bool = True,
+    seed: Optional[int] = None,
 ):
     cases = load_nifti_case_table(csv_path, include_hr_mag=include_hr_mag)
     dataset = NiftiPatchDataset(
@@ -693,11 +695,27 @@ def create_nifti_patch_dataloader(
         allow_empty_fallback=allow_empty_fallback,
     )
     print(f"NIfTI dataset {csv_path}: {len(cases)} volume(s), {len(dataset)} patch samples")
+    generator = None
+    worker_init_fn = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
+
+        def _seed_worker(worker_id):
+            worker_seed = int(seed) + int(worker_id)
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+            torch.manual_seed(worker_seed)
+
+        worker_init_fn = _seed_worker
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=int(num_workers),
         pin_memory=torch.cuda.is_available(),
+        worker_init_fn=worker_init_fn,
+        generator=generator,
     )
     return loader

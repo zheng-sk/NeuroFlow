@@ -476,21 +476,51 @@ class _PairedRandomPatchd(RandomizableTransform):
         mask = np.ascontiguousarray(d["mask"][hx0 : hx0 + hp, hy0 : hy0 + hp, hz0 : hz0 + hp])
         return lr_vel, lr_mag, hr_vel, hr_mag, mask
 
-    def __call__(self, data):
-        d = dict(data)
-
+    def _compute_valid_lr_starts(self, d):
         _, lx, ly, lz = d["lr_vel"].shape
+        _, hx, hy, hz = d["hr_vel"].shape
+        mx, my, mz = d["mask"].shape
+
         p = self.patch_size
         hp = p * self.res_increase
 
-        if lx < p or ly < p or lz < p:
-            raise ValueError(f"Patch size {p} is larger than LR image size {(lx, ly, lz)}")
+        # LR start must fit LR patch size.
+        max_x_lr = lx - p
+        max_y_lr = ly - p
+        max_z_lr = lz - p
+
+        # LR start is projected to HR space via (start * res_increase), so ensure
+        # HR/mask patches are always complete even when HR!=LR*res_increase by 1 voxel.
+        max_x_hr = (hx - hp) // self.res_increase
+        max_y_hr = (hy - hp) // self.res_increase
+        max_z_hr = (hz - hp) // self.res_increase
+
+        max_x_mask = (mx - hp) // self.res_increase
+        max_y_mask = (my - hp) // self.res_increase
+        max_z_mask = (mz - hp) // self.res_increase
+
+        max_x = min(max_x_lr, max_x_hr, max_x_mask)
+        max_y = min(max_y_lr, max_y_hr, max_y_mask)
+        max_z = min(max_z_lr, max_z_hr, max_z_mask)
+
+        if max_x < 0 or max_y < 0 or max_z < 0:
+            raise ValueError(
+                "Patch size is incompatible with paired LR/HR/mask shapes. "
+                f"patch_size={p}, hr_patch={hp}, lr_shape={(lx, ly, lz)}, "
+                f"hr_shape={(hx, hy, hz)}, mask_shape={(mx, my, mz)}, res_increase={self.res_increase}"
+            )
+        return int(max_x), int(max_y), int(max_z)
+
+    def __call__(self, data):
+        d = dict(data)
+
+        max_x, max_y, max_z = self._compute_valid_lr_starts(d)
 
         # Validation mode: deterministic center patch.
         if not self.random_center:
-            x0 = (lx - p) // 2
-            y0 = (ly - p) // 2
-            z0 = (lz - p) // 2
+            x0 = max_x // 2
+            y0 = max_y // 2
+            z0 = max_z // 2
             lr_vel, lr_mag, hr_vel, hr_mag, mask = self._crop_pair(d, x0, y0, z0)
             d["lr_vel"], d["lr_mag"], d["hr_vel"], d["mask"] = lr_vel, lr_mag, hr_vel, mask
             if self.include_hr_mag and hr_mag is not None:
@@ -503,9 +533,9 @@ class _PairedRandomPatchd(RandomizableTransform):
 
         attempts = max(self.max_sampling_attempts, 1)
         for _ in range(attempts):
-            x0 = self._randint(0, lx - p + 1)
-            y0 = self._randint(0, ly - p + 1)
-            z0 = self._randint(0, lz - p + 1)
+            x0 = self._randint(0, max_x + 1)
+            y0 = self._randint(0, max_y + 1)
+            z0 = self._randint(0, max_z + 1)
 
             lr_vel, lr_mag, hr_vel, hr_mag, mask = self._crop_pair(d, x0, y0, z0)
             coverage = float(mask.mean())

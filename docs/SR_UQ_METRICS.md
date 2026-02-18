@@ -152,8 +152,107 @@ Interpretation:
 - WSS estimates depend on mask quality, spacing, and boundary sampling density.
 - For publication-level comparisons, keep `flow_axis`, `q_ref`, `mu`, and frame selection consistent.
 
-## 10) References
+## 10) Commands (Inference + Metrics)
 
-1. Alzate et al. *Uncertainty Quantification in Hemodynamic Metrics from 4D Flow MRI with Super-resolution in a Carotid Bifurcation Model.* Journal of Digital Imaging (paper provided in project materials).
-2. Wilcoxon F. *Individual Comparisons by Ranking Methods.* Biometrics Bulletin, 1945.
-3. MONAI documentation (sliding-window inference concept used in validation/inference pipelines).
+All examples use relative paths from repository root.
+
+### 10.1 Run SR inference for a case (all frames)
+
+```bash
+python code/inference/run_sr_inference_case.py \
+  --case-csv data/paired_dataset/train_random_1_src.csv \
+  --case-index 0 \
+  --model-path models/4DFlowNet_20260216-1714/4DFlowNet-best.pt \
+  --out-dir output/uq_case0 \
+  --predict-mag \
+  --raw-phase-input \
+  --patch-size 48 \
+  --sw-batch-size 2 \
+  --overlap 0.25 \
+  --res-increase 1
+```
+
+Outputs:
+
+- `output/uq_case0/analysis_payload.npz`
+- `output/uq_case0/inference_metadata.json`
+- predicted NIfTI files in `output/uq_case0/nifti/`
+
+### 10.2 Run SR inference for specific frame(s)
+
+Single frame:
+
+```bash
+python code/inference/run_sr_inference_case.py \
+  --case-csv data/paired_dataset/train_random_1_src.csv \
+  --case-index 0 \
+  --model-path models/4DFlowNet_20260216-1714/4DFlowNet-best.pt \
+  --out-dir output/uq_case0_frame3 \
+  --predict-mag \
+  --raw-phase-input \
+  --frame-index 3 \
+  --patch-size 48 \
+  --sw-batch-size 2 \
+  --overlap 0.25 \
+  --res-increase 1
+```
+
+Multiple frames:
+
+```bash
+--frame-index 0 3 7
+```
+
+### 10.3 Generate UQ report + metrics from payload
+
+```bash
+python code/inference/generate_sr_uq_report.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --metadata-json output/uq_case0/inference_metadata.json \
+  --out-dir output/uq_case0 \
+  --flow-axis auto \
+  --selected-frame 0 \
+  --max-display-slices 8 \
+  --panel-cols 4 \
+  --hist-bins 120 \
+  --lr-mag-channel 0 \
+  --mask-min-slice-voxels 25 \
+  --mu-pa-s 0.0035 \
+  --max-wall-points 30000 \
+  --report-title "4D Flow SR Uncertainty Quantification Report"
+```
+
+Main artifacts:
+
+- `output/uq_case0/report.html`
+- `output/uq_case0/metrics/summary_metrics.json`
+- `output/uq_case0/metrics/table2_like_all_slices.csv`
+- `output/uq_case0/metrics/flow_metrics.csv`
+- `output/uq_case0/metrics/table3_like_wss.csv`
+- `output/uq_case0/metrics/voxel_distribution_stats.csv`
+
+### 10.4 One-command pipeline (inference + report)
+
+```bash
+python code/inference/run_sr_uq_pipeline.py \
+  --case-csv data/paired_dataset/train_random_1_src.csv \
+  --case-index 0 \
+  --model-path models/4DFlowNet_20260216-1714/4DFlowNet-best.pt \
+  --out-dir output/uq_case0 \
+  --predict-mag \
+  --raw-phase-input \
+  --flow-axis auto \
+  --res-increase 1 \
+  --patch-size 48 \
+  --sw-batch-size 2 \
+  --overlap 0.25 \
+  --max-display-slices 8 \
+  --panel-cols 4 \
+  --hist-bins 120
+```
+
+Optional:
+
+- set scalar reference flow: `--q-ref 11.72`
+- set custom CCA range: `--cca-range 8:20`
+

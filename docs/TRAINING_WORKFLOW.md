@@ -320,3 +320,33 @@ Notes:
 - Early stop can trigger by:
   - no validation improvement (`--early-stopping-*`)
   - sustained overfitting pattern (train improves while val worsens, `--overfit-*`).
+
+Complete example command (x2 SR + 4-channel output + reproducibility + scheduler + early stop):
+
+```bash
+python src/trainer_nifti.py \
+  --train-csv data/paired_dataset/train_random_1_x2_from7t.csv \
+  --val-csv data/paired_dataset/val_random_1_x2_from7t.csv \
+  --network-name 4DFlowNet_x2_uq \
+  --patch-size 16 \
+  --res-increase 2 \
+  --batch-size 4 \
+  --epochs 120 \
+  --predict-mag \
+  --mag-loss-weight 1.0 \
+  --raw-phase-input \
+  --mask-threshold 0.5 \
+  --seed 42 \
+  --deterministic \
+  --accuracy-include-mag \
+  --accuracy-mag-weight 1.0 \
+  --lr-scheduler reduce_on_plateau \
+  --lr-reduce-factor 0.5 \
+  --lr-reduce-patience 8 \
+  --lr-min 1e-6 \
+  --early-stopping-patience 20 \
+  --early-stopping-min-delta 0.0 \
+  --overfit-patience 8 \
+  --overfit-min-delta 0.0 \
+  --tb-image-every-epochs 10
+```

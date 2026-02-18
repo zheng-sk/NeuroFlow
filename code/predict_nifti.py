@@ -7,6 +7,7 @@ import nibabel as nib
 import numpy as np
 import torch
 from monai.inferers import sliding_window_inference
+from monai.transforms import ScaleIntensity
 
 # Add src to python path so we can import modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
@@ -80,6 +81,21 @@ def raw_to_velocity(data: np.ndarray, venc: float, raw_center: float, raw_scale:
     if invert_sign:
         out = -out
     return out
+
+
+def normalize_magnitude(data: np.ndarray, mode: str, mag_scale: float) -> np.ndarray:
+    mode = str(mode).strip().lower()
+    arr = data.astype(np.float32)
+    if mode == "divisor":
+        return arr / float(mag_scale)
+    if mode == "monai_minmax":
+        scaler = ScaleIntensity(minv=0.0, maxv=1.0, channel_wise=False)
+        out = scaler(arr)
+        if isinstance(out, torch.Tensor):
+            out = out.detach().cpu().numpy()
+        out = np.asarray(out, dtype=np.float32)
+        return np.clip(out, 0.0, 1.0).astype(np.float32)
+    raise ValueError(f"Unsupported mag_norm_mode={mode!r}. Use 'monai_minmax' or 'divisor'.")
 
 
 def _legacy_compute_padding(shape_xyz, patch_size: int):
@@ -248,7 +264,19 @@ def main():
     )
     parser.add_argument("--raw-center", type=float, default=2048.0, help="Raw phase center value.")
     parser.add_argument("--raw-scale", type=float, default=2048.0, help="Raw phase scaling denominator.")
-    parser.add_argument("--mag-scale", type=float, default=4095.0, help="Magnitude normalization divisor.")
+    parser.add_argument(
+        "--mag-scale",
+        type=float,
+        default=4095.0,
+        help="Magnitude normalization divisor (used only with --mag-norm-mode divisor).",
+    )
+    parser.add_argument(
+        "--mag-norm-mode",
+        type=str,
+        default="monai_minmax",
+        choices=["monai_minmax", "divisor"],
+        help="Magnitude normalization mode. monai_minmax applies MONAI ScaleIntensity to [0,1] per frame.",
+    )
     parser.add_argument("--round-small-values", action="store_true", help="Zero values under venc/2048.")
     parser.add_argument("--time-axis", type=int, default=-1, help="Time axis for 4D NIfTI (default last axis).")
     parser.add_argument("--low-resblock", type=int, default=8, help="Number of low-res residual blocks.")
@@ -343,14 +371,17 @@ def main():
     roi_size = (args.patch_size, args.patch_size, args.patch_size)
 
     for t in range(u.shape[0]):
+        mag_u_norm = normalize_magnitude(mag_u[t], mode=args.mag_norm_mode, mag_scale=args.mag_scale)
+        mag_v_norm = normalize_magnitude(mag_v[t], mode=args.mag_norm_mode, mag_scale=args.mag_scale)
+        mag_w_norm = normalize_magnitude(mag_w[t], mode=args.mag_norm_mode, mag_scale=args.mag_scale)
         lr_input = np.stack(
             [
                 u[t] / venc,
                 v[t] / venc,
                 w[t] / venc,
-                mag_u[t] / args.mag_scale,
-                mag_v[t] / args.mag_scale,
-                mag_w[t] / args.mag_scale,
+                mag_u_norm,
+                mag_v_norm,
+                mag_w_norm,
             ],
             axis=0,
         ).astype(np.float32)
@@ -380,7 +411,7 @@ def main():
             raise ValueError(f"Unexpected model output channels: {pred_np.shape[0]} (expected 3 or 4)")
 
         pred_np[:3] = pred_np[:3] * venc
-        if pred_np.shape[0] == 4:
+        if pred_np.shape[0] == 4 and str(args.mag_norm_mode).strip().lower() == "divisor":
             pred_np[3] = pred_np[3] * float(args.mag_scale)
 
         if args.round_small_values:

@@ -97,7 +97,19 @@ def main() -> None:
     )
     parser.add_argument("--raw-center", type=float, default=2048.0, help="Raw phase center.")
     parser.add_argument("--raw-scale", type=float, default=2048.0, help="Raw phase scale.")
-    parser.add_argument("--mag-scale", type=float, default=4095.0, help="Magnitude normalization divisor.")
+    parser.add_argument(
+        "--mag-scale",
+        type=float,
+        default=4095.0,
+        help="Magnitude normalization divisor (used only with --mag-norm-mode divisor).",
+    )
+    parser.add_argument(
+        "--mag-norm-mode",
+        type=str,
+        default="monai_minmax",
+        choices=["monai_minmax", "divisor"],
+        help="Magnitude normalization mode. monai_minmax applies MONAI ScaleIntensity to [0,1] per frame.",
+    )
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold.")
 
     args = parser.parse_args()
@@ -165,6 +177,7 @@ def main() -> None:
         raw_center=float(args.raw_center),
         raw_scale=float(args.raw_scale),
         mag_scale=float(args.mag_scale),
+        mag_norm_mode=str(args.mag_norm_mode),
         mask_threshold=float(args.mask_threshold),
         time_axis=int(args.time_axis),
     )
@@ -174,6 +187,7 @@ def main() -> None:
         pred_norm=payload["pred_norm"],
         venc_per_frame=payload["venc"],
         mag_scale=float(args.mag_scale),
+        mag_norm_mode=str(args.mag_norm_mode),
         out_prefix=output_prefix,
         lr_affine=payload["lr_affine"],
         res_increase=int(args.res_increase),
@@ -195,6 +209,7 @@ def main() -> None:
         "raw_center": float(args.raw_center),
         "raw_scale": float(args.raw_scale),
         "mag_scale": float(args.mag_scale),
+        "mag_norm_mode": str(args.mag_norm_mode),
         "mask_threshold": float(args.mask_threshold),
         "patch_size": int(args.patch_size),
         "sw_batch_size": int(args.sw_batch_size),

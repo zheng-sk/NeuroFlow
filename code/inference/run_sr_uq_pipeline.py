@@ -37,6 +37,12 @@ def main() -> None:
     parser.add_argument("--raw-center", type=float, default=2048.0)
     parser.add_argument("--raw-scale", type=float, default=2048.0)
     parser.add_argument("--mag-scale", type=float, default=4095.0)
+    parser.add_argument(
+        "--mag-norm-mode",
+        type=str,
+        default="monai_minmax",
+        choices=["monai_minmax", "divisor"],
+    )
     parser.add_argument("--mask-threshold", type=float, default=0.5)
 
     parser.add_argument("--flow-axis", type=str, default="auto", choices=["auto", "0", "1", "2"])
@@ -89,6 +95,8 @@ def main() -> None:
         str(args.raw_scale),
         "--mag-scale",
         str(args.mag_scale),
+        "--mag-norm-mode",
+        str(args.mag_norm_mode),
         "--mask-threshold",
         str(args.mask_threshold),
     ]

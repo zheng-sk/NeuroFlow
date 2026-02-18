@@ -92,13 +92,26 @@ W_norm = W / venc_global
 
 ### 3.3 Magnitude normalization
 
+Default (recommended):
+
+```text
+MAG_norm = ScaleIntensity(MAG, minv=0, maxv=1)   # MONAI min-max per frame
+```
+
+Legacy optional mode:
+
 ```text
 MAG_norm = MAG / mag_scale
 ```
 
-Default:
+Legacy default value:
 
 - `mag_scale = 4095`
+
+CLI:
+
+- `--mag-norm-mode monai_minmax` (default)
+- `--mag-norm-mode divisor --mag-scale 4095`
 
 ## 4) 4D Handling
 

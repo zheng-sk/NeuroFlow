@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 from monai.data import CacheDataset, DataLoader, Dataset as MonaiDataset
-from monai.transforms import Compose, EnsureChannelFirstd, LoadImaged, RandomizableTransform
+from monai.transforms import Compose, EnsureChannelFirstd, LoadImaged, RandomizableTransform, ScaleIntensity
 from torch.utils.data import Dataset
 
 from .PatchHandler3D import rotate180_3d, rotate90
@@ -141,7 +141,8 @@ class _StackNormalizeFieldsd(RandomizableTransform):
     def __init__(
         self,
         mag_scale: float,
-        mask_threshold: float,
+        mag_norm_mode: str = "monai_minmax",
+        mask_threshold: float = 0.5,
         include_hr_mag: bool = False,
         raw_phase_input: bool = True,
         invert_uv_sign_on_raw: bool = False,
@@ -153,6 +154,9 @@ class _StackNormalizeFieldsd(RandomizableTransform):
     ):
         super().__init__()
         self.mag_scale = float(mag_scale)
+        self.mag_norm_mode = str(mag_norm_mode).strip().lower()
+        if self.mag_norm_mode not in {"monai_minmax", "divisor"}:
+            raise ValueError(f"Unsupported mag_norm_mode={mag_norm_mode!r}. Use 'monai_minmax' or 'divisor'.")
         self.mask_threshold = float(mask_threshold)
         self.include_hr_mag = bool(include_hr_mag)
         self.raw_phase_input = bool(raw_phase_input)
@@ -162,6 +166,7 @@ class _StackNormalizeFieldsd(RandomizableTransform):
         self.random_time_frame = bool(random_time_frame)
         self.time_axis = int(time_axis)
         self.fixed_time_index = int(fixed_time_index)
+        self._mag_scaler = ScaleIntensity(minv=0.0, maxv=1.0, channel_wise=False)
 
     def _normalize_time_axis(self, ndim: int) -> int:
         axis = self.time_axis
@@ -216,6 +221,13 @@ class _StackNormalizeFieldsd(RandomizableTransform):
         if invert_sign:
             vel = -vel
         return vel
+
+    def _normalize_magnitude_monai(self, arr: np.ndarray) -> np.ndarray:
+        scaled = self._mag_scaler(arr.astype(np.float32))
+        if isinstance(scaled, torch.Tensor):
+            scaled = scaled.detach().cpu().numpy()
+        scaled = np.asarray(scaled, dtype=np.float32)
+        return np.clip(scaled, 0.0, 1.0).astype(np.float32)
 
     def __call__(self, data):
         d = dict(data)
@@ -320,8 +332,6 @@ class _StackNormalizeFieldsd(RandomizableTransform):
 
         lr_vel = np.stack([lr_u, lr_v, lr_w], axis=0).astype(np.float32)
         hr_vel = np.stack([hr_u, hr_v, hr_w], axis=0).astype(np.float32)
-        lr_mag = np.stack([mag_u, mag_v, mag_w], axis=0).astype(np.float32)
-
         venc = float(max(venc_u, venc_v, venc_w))
         if venc <= 0:
             venc = float(np.max(np.abs(lr_vel)))
@@ -330,9 +340,21 @@ class _StackNormalizeFieldsd(RandomizableTransform):
 
         lr_vel = lr_vel / venc
         hr_vel = hr_vel / venc
-        lr_mag = lr_mag / self.mag_scale
-        if hr_mag is not None:
-            hr_mag = hr_mag.astype(np.float32) / self.mag_scale
+        if self.mag_norm_mode == "monai_minmax":
+            lr_mag = np.stack(
+                [
+                    self._normalize_magnitude_monai(mag_u),
+                    self._normalize_magnitude_monai(mag_v),
+                    self._normalize_magnitude_monai(mag_w),
+                ],
+                axis=0,
+            ).astype(np.float32)
+            if hr_mag is not None:
+                hr_mag = self._normalize_magnitude_monai(hr_mag)
+        else:
+            lr_mag = np.stack([mag_u, mag_v, mag_w], axis=0).astype(np.float32) / self.mag_scale
+            if hr_mag is not None:
+                hr_mag = hr_mag.astype(np.float32) / self.mag_scale
 
         if mask is not None:
             mask = (mask >= self.mask_threshold).astype(np.float32)
@@ -526,6 +548,7 @@ class NiftiPatchDataset(Dataset):
         random_patch_sampling: bool | None = None,
         rotation_prob: float | None = None,
         mag_scale: float = 4095.0,
+        mag_norm_mode: str = "monai_minmax",
         mask_threshold: float = 0.5,
         raw_phase_input: bool = True,
         invert_uv_sign_on_raw: bool = False,
@@ -563,6 +586,7 @@ class NiftiPatchDataset(Dataset):
             # Converts loaded arrays to normalized tensors and selects time frame.
             _StackNormalizeFieldsd(
                 mag_scale=mag_scale,
+                mag_norm_mode=mag_norm_mode,
                 mask_threshold=mask_threshold,
                 include_hr_mag=self.include_hr_mag,
                 raw_phase_input=raw_phase_input,
@@ -659,6 +683,7 @@ def create_nifti_patch_dataloader(
     rotation_prob: float | None = None,
     num_workers: int = 0,
     mag_scale: float = 4095.0,
+    mag_norm_mode: str = "monai_minmax",
     mask_threshold: float = 0.5,
     raw_phase_input: bool = True,
     invert_uv_sign_on_raw: bool = False,
@@ -684,6 +709,7 @@ def create_nifti_patch_dataloader(
         random_patch_sampling=random_patch_sampling,
         rotation_prob=rotation_prob,
         mag_scale=mag_scale,
+        mag_norm_mode=mag_norm_mode,
         mask_threshold=mask_threshold,
         raw_phase_input=raw_phase_input,
         invert_uv_sign_on_raw=invert_uv_sign_on_raw,

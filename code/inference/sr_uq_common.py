@@ -8,6 +8,7 @@ import nibabel as nib
 import numpy as np
 import torch
 from monai.inferers import sliding_window_inference
+from monai.transforms import ScaleIntensity
 
 # External-library compatibility warnings (PyTorch/MONAI/CUDA bindings).
 warnings.filterwarnings(
@@ -99,6 +100,21 @@ def resolve_component_venc(case: Dict[str, Any], key: str) -> float:
     if v_comp > 0:
         return v_comp
     return float(case.get("venc", 0.0))
+
+
+def normalize_magnitude_volume(arr: np.ndarray, mode: str, mag_scale: float) -> np.ndarray:
+    mode = str(mode).strip().lower()
+    vol = arr.astype(np.float32)
+    if mode == "divisor":
+        return vol / float(mag_scale)
+    if mode == "monai_minmax":
+        scaler = ScaleIntensity(minv=0.0, maxv=1.0, channel_wise=False)
+        out = scaler(vol)
+        if isinstance(out, torch.Tensor):
+            out = out.detach().cpu().numpy()
+        out = np.asarray(out, dtype=np.float32)
+        return np.clip(out, 0.0, 1.0).astype(np.float32)
+    raise ValueError(f"Unsupported mag_norm_mode={mode!r}. Use 'monai_minmax' or 'divisor'.")
 
 
 def choose_frame_indices(case: Dict[str, Any], t_count: int, explicit_indices: Optional[List[int]] = None) -> List[int]:
@@ -266,6 +282,7 @@ def _prepare_frame(
     raw_center: float,
     raw_scale: float,
     mag_scale: float,
+    mag_norm_mode: str,
     mask_threshold: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     lr_u = volumes["lr_u"][frame_idx].astype(np.float32)
@@ -324,8 +341,15 @@ def _prepare_frame(
 
     lr_vel_norm = np.stack([lr_u, lr_v, lr_w], axis=0).astype(np.float32) / venc_scalar
     hr_vel_norm = np.stack([hr_u, hr_v, hr_w], axis=0).astype(np.float32) / venc_scalar
-    lr_mag_norm = np.stack([lr_mu, lr_mv, lr_mw], axis=0).astype(np.float32) / float(mag_scale)
-    hr_mag_norm = hr_mag.astype(np.float32)[None, ...] / float(mag_scale)
+    lr_mag_norm = np.stack(
+        [
+            normalize_magnitude_volume(lr_mu, mag_norm_mode, mag_scale),
+            normalize_magnitude_volume(lr_mv, mag_norm_mode, mag_scale),
+            normalize_magnitude_volume(lr_mw, mag_norm_mode, mag_scale),
+        ],
+        axis=0,
+    ).astype(np.float32)
+    hr_mag_norm = normalize_magnitude_volume(hr_mag, mag_norm_mode, mag_scale)[None, ...]
 
     lr_input_norm = np.concatenate([lr_vel_norm, lr_mag_norm], axis=0).astype(np.float32)
     gt_4ch_norm = np.concatenate([hr_vel_norm, hr_mag_norm], axis=0).astype(np.float32)
@@ -345,6 +369,7 @@ def run_case_inference(
     raw_center: float,
     raw_scale: float,
     mag_scale: float,
+    mag_norm_mode: str,
     mask_threshold: float,
     time_axis: int,
 ) -> Dict[str, Any]:
@@ -366,6 +391,7 @@ def run_case_inference(
             raw_center=raw_center,
             raw_scale=raw_scale,
             mag_scale=mag_scale,
+            mag_norm_mode=mag_norm_mode,
             mask_threshold=mask_threshold,
         )
 
@@ -407,6 +433,7 @@ def save_predicted_nifti(
     pred_norm: np.ndarray,
     venc_per_frame: np.ndarray,
     mag_scale: float,
+    mag_norm_mode: str,
     out_prefix: str,
     lr_affine: np.ndarray,
     res_increase: int,
@@ -416,7 +443,8 @@ def save_predicted_nifti(
     pred_phys = pred_norm.astype(np.float32).copy()
     for t in range(pred_phys.shape[0]):
         pred_phys[t, :3] *= float(venc_per_frame[t])
-    pred_phys[:, 3] *= float(mag_scale)
+    if str(mag_norm_mode).strip().lower() == "divisor":
+        pred_phys[:, 3] *= float(mag_scale)
 
     out_affine = adjust_affine_for_upsample(lr_affine, res_increase=res_increase)
 

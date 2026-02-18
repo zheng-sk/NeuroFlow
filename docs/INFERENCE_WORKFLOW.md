@@ -36,13 +36,21 @@ Then normalization:
 U_norm = U / venc
 V_norm = V / venc
 W_norm = W / venc
-MAG_norm = MAG / mag_scale
+MAG_norm = ScaleIntensity(MAG, minv=0, maxv=1)   # default: --mag-norm-mode monai_minmax
+```
+
+Legacy optional mode:
+
+```text
+MAG_norm = MAG / mag_scale   # --mag-norm-mode divisor
 ```
 
 Model predicts normalized HR outputs:
 
 - velocity channels (`u,v,w`) are rescaled by `venc`
-- magnitude channel (`mag`, when enabled) is rescaled by `mag_scale`
+- magnitude channel (`mag`, when enabled):
+  - stays in `[0,1]` for `--mag-norm-mode monai_minmax`
+  - is rescaled by `mag_scale` only for `--mag-norm-mode divisor`
 
 ## 3) Sliding Window Modes
 

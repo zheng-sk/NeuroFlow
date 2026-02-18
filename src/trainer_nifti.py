@@ -22,7 +22,19 @@ def main():
     parser.add_argument("--hi-resblock", type=int, default=4, help="Number of high-res residual blocks.")
     parser.add_argument("--train-samples-per-volume", type=int, default=64, help="Random patch samples per train volume per epoch.")
     parser.add_argument("--val-samples-per-volume", type=int, default=16, help="Patch samples per validation volume per epoch.")
-    parser.add_argument("--mag-scale", type=float, default=4095.0, help="Magnitude normalization divisor.")
+    parser.add_argument(
+        "--mag-scale",
+        type=float,
+        default=4095.0,
+        help="Magnitude normalization divisor (used only with --mag-norm-mode divisor).",
+    )
+    parser.add_argument(
+        "--mag-norm-mode",
+        type=str,
+        default="monai_minmax",
+        choices=["monai_minmax", "divisor"],
+        help="Magnitude normalization mode. monai_minmax applies MONAI ScaleIntensity to [0,1] per frame.",
+    )
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold.")
     parser.add_argument(
         "--predict-mag",
@@ -225,6 +237,7 @@ def main():
         rotation_prob=train_rotation_prob,
         num_workers=args.num_workers,
         mag_scale=args.mag_scale,
+        mag_norm_mode=args.mag_norm_mode,
         mask_threshold=args.mask_threshold,
         raw_phase_input=args.raw_phase_input,
         invert_uv_sign_on_raw=args.legacy_invert_uv_sign_on_raw,
@@ -252,6 +265,7 @@ def main():
         rotation_prob=0.0,
         num_workers=args.num_workers,
         mag_scale=args.mag_scale,
+        mag_norm_mode=args.mag_norm_mode,
         mask_threshold=args.mask_threshold,
         raw_phase_input=args.raw_phase_input,
         invert_uv_sign_on_raw=args.legacy_invert_uv_sign_on_raw,

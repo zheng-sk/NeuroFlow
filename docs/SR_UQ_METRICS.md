@@ -154,6 +154,8 @@ Interpretation:
 - RE can become unstable when reference values are near zero; inspect raw values jointly.
 - WSS estimates depend on mask quality, spacing, and boundary sampling density.
 - For publication-level comparisons, keep `flow_axis`, `q_ref`, `mu`, and frame selection consistent.
+- If LR baseline is downsampled (`LR shape != HR shape`), the report upsamples LR velocity to HR grid for metric computation.
+- ROI analysis is supported via `--roi-bbox` or `--roi-json`; mask-based metrics are restricted to that bbox.
 
 ## 10) Commands (Inference + Metrics)
 
@@ -223,6 +225,45 @@ python code/inference/generate_sr_uq_report.py \
   --mu-pa-s 0.0035 \
   --max-wall-points 30000 \
   --report-title "4D Flow SR Uncertainty Quantification Report"
+```
+
+ROI-restricted report (using bbox in HR voxel coordinates):
+
+```bash
+python code/inference/generate_sr_uq_report.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --metadata-json output/uq_case0/inference_metadata.json \
+  --out-dir output/uq_case0 \
+  --roi-bbox 30 90 40 120 12 44
+```
+
+ROI from JSON (recommended with interactive selector):
+
+```bash
+python code/inference/generate_sr_uq_report.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --metadata-json output/uq_case0/inference_metadata.json \
+  --out-dir output/uq_case0 \
+  --roi-json output/uq_case0/roi_bbox.json
+```
+
+Interactive selector (exports `bbox_hr_xyz` + mapped `bbox_lr_xyz`):
+
+```bash
+python code/inference/select_metric_roi_bbox.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --out-json output/uq_case0/roi_bbox.json \
+  --temporal-mode union
+```
+
+Selector + export directo del reporte ROI:
+
+```bash
+python code/inference/select_metric_roi_bbox.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --out-json output/uq_case0/roi_bbox.json \
+  --temporal-mode union \
+  --run-report
 ```
 
 Main artifacts:

@@ -594,6 +594,92 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: Sequence[str]
             writer.writerow(r)
 
 
+def _upsample_spatial(arr: np.ndarray, out_shape_xyz: Tuple[int, int, int], mode: str = "trilinear") -> np.ndarray:
+    """Upsample [T,C,X,Y,Z] or [T,X,Y,Z] arrays to a target spatial shape."""
+    if arr.ndim not in (4, 5):
+        raise ValueError(f"Expected 4D/5D array, got shape {arr.shape}")
+
+    if arr.ndim == 4:
+        x = torch.from_numpy(arr[:, None, ...].astype(np.float32))
+    else:
+        x = torch.from_numpy(arr.astype(np.float32))
+
+    if mode == "nearest":
+        y = torch.nn.functional.interpolate(x, size=out_shape_xyz, mode=mode)
+    else:
+        y = torch.nn.functional.interpolate(x, size=out_shape_xyz, mode=mode, align_corners=False)
+
+    out = y.numpy()
+    if arr.ndim == 4:
+        out = out[:, 0]
+    return out.astype(np.float32)
+
+
+def _clip_bbox_xyz(bbox_xyz: Sequence[int], shape_xyz: Tuple[int, int, int]) -> Tuple[int, int, int, int, int, int]:
+    if len(bbox_xyz) != 6:
+        raise ValueError(f"ROI bbox expects 6 integers [x0,x1,y0,y1,z0,z1), got {bbox_xyz}")
+    x0, x1, y0, y1, z0, z1 = [int(v) for v in bbox_xyz]
+    sx, sy, sz = [int(v) for v in shape_xyz]
+    x0 = max(0, min(x0, sx - 1))
+    y0 = max(0, min(y0, sy - 1))
+    z0 = max(0, min(z0, sz - 1))
+    x1 = max(x0 + 1, min(x1, sx))
+    y1 = max(y0 + 1, min(y1, sy))
+    z1 = max(z0 + 1, min(z1, sz))
+    return x0, x1, y0, y1, z0, z1
+
+
+def _resolve_roi_bbox(
+    roi_bbox_cli: Optional[Sequence[int]],
+    roi_json_path: str,
+    shape_xyz: Tuple[int, int, int],
+) -> Optional[Tuple[int, int, int, int, int, int]]:
+    bbox_raw: Optional[Sequence[int]] = None
+
+    if roi_json_path:
+        p = Path(roi_json_path)
+        if not p.exists():
+            raise FileNotFoundError(f"ROI json not found: {p}")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        for key in ("bbox_hr_xyz", "bbox_xyz", "roi_bbox_hr_xyz", "roi_bbox_xyz"):
+            val = data.get(key)
+            if isinstance(val, list) and len(val) == 6:
+                bbox_raw = [int(v) for v in val]
+                break
+        if bbox_raw is None:
+            raise ValueError(
+                f"ROI json {p} does not contain bbox field in one of "
+                f"{['bbox_hr_xyz', 'bbox_xyz', 'roi_bbox_hr_xyz', 'roi_bbox_xyz']}"
+            )
+
+    if roi_bbox_cli is not None and len(roi_bbox_cli) == 6:
+        bbox_raw = [int(v) for v in roi_bbox_cli]
+
+    if bbox_raw is None:
+        return None
+
+    return _clip_bbox_xyz(bbox_raw, shape_xyz)
+
+
+def _apply_roi_to_mask(
+    mask_txyz: np.ndarray,
+    bbox_xyz: Optional[Tuple[int, int, int, int, int, int]],
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    if bbox_xyz is None:
+        return mask_txyz.astype(np.float32), {"enabled": False}
+
+    x0, x1, y0, y1, z0, z1 = bbox_xyz
+    roi = np.zeros(mask_txyz.shape[1:], dtype=np.float32)
+    roi[x0:x1, y0:y1, z0:z1] = 1.0
+    out = (mask_txyz > 0.5).astype(np.float32) * roi[None, ...]
+    info = {
+        "enabled": True,
+        "bbox_xyz": [int(x0), int(x1), int(y0), int(y1), int(z0), int(z1)],
+        "bbox_size_xyz": [int(x1 - x0), int(y1 - y0), int(z1 - z0)],
+    }
+    return out.astype(np.float32), info
+
+
 def _html_table(rows: List[Dict[str, Any]], columns: Sequence[str]) -> str:
     th = "".join(f"<th>{c}</th>" for c in columns)
     body_parts = []
@@ -862,6 +948,19 @@ def main() -> None:
 
     parser.add_argument("--mu-pa-s", type=float, default=0.0035, help="Dynamic viscosity for WSS estimation (Pa*s)")
     parser.add_argument("--max-wall-points", type=int, default=30000, help="Max wall points sampled for WSS distribution")
+    parser.add_argument(
+        "--roi-bbox",
+        type=int,
+        nargs=6,
+        default=None,
+        metavar=("X0", "X1", "Y0", "Y1", "Z0", "Z1"),
+        help="Optional ROI bbox in HR voxel indices [x0,x1,y0,y1,z0,z1) to restrict mask-based metrics.",
+    )
+    parser.add_argument(
+        "--roi-json",
+        default="",
+        help="Optional ROI JSON (from interactive selector). Supports keys: bbox_hr_xyz / bbox_xyz.",
+    )
 
     parser.add_argument("--baseline-label", default="3T", help="Label for baseline (native/LR) method")
     parser.add_argument("--sr-label", default="3T SR", help="Label for super-resolved method")
@@ -914,6 +1013,22 @@ def main() -> None:
         gt_phys[t, :3] *= float(venc[t])
         lr_vel_phys[t] *= float(venc[t])
 
+    # If LR baseline is spatially smaller (downsampled input), upsample to HR grid for fair metric comparison.
+    if lr_vel_phys.shape[2:] != gt_phys.shape[2:]:
+        lr_vel_phys_metrics = _upsample_spatial(lr_vel_phys, out_shape_xyz=tuple(int(v) for v in gt_phys.shape[2:]), mode="trilinear")
+    else:
+        lr_vel_phys_metrics = lr_vel_phys
+
+    # Optional ROI bbox to restrict mask-based metrics.
+    roi_bbox = _resolve_roi_bbox(
+        roi_bbox_cli=args.roi_bbox,
+        roi_json_path=str(args.roi_json),
+        shape_xyz=tuple(int(v) for v in mask.shape[1:]),
+    )
+    mask_metrics, roi_info = _apply_roi_to_mask(mask_txyz=mask, bbox_xyz=roi_bbox)
+    if int((mask_metrics > 0.5).sum()) == 0:
+        raise ValueError("Selected ROI produced an empty in-mask region. Please adjust ROI bbox.")
+
     # Derive LR 4-channel display tensor (u,v,w,mag) using a single LR magnitude channel.
     lr_mag_single = lr_norm[:, 3 + int(args.lr_mag_channel)].astype(np.float32)
     lr_4ch = np.concatenate([lr_norm[:, :3], lr_mag_single[:, None]], axis=1).astype(np.float32)
@@ -921,7 +1036,7 @@ def main() -> None:
     # Suggest best flow axis from reference consistency, then resolve selected axis.
     suggested_flow_axis, flow_axis_scores = _suggest_flow_axis(
         vel_ref=gt_phys[:, :3],
-        mask=mask,
+        mask=mask_metrics,
         spacing_mm=hr_spacing,
     )
     selected_flow_axis = int(suggested_flow_axis) if args.flow_axis == "auto" else int(args.flow_axis)
@@ -960,7 +1075,7 @@ def main() -> None:
         baseline_4ch=lr_up,
         pred_4ch=pred_norm,
         gt_4ch=gt_norm,
-        mask=mask,
+        mask=mask_metrics,
         bins=int(args.hist_bins),
         baseline_label=args.baseline_label,
         sr_label=args.sr_label,
@@ -970,14 +1085,14 @@ def main() -> None:
     _write_csv(metrics_dir / "voxel_distribution_stats.csv", voxel_dist_rows, voxel_dist_cols)
 
     # Multi-frame fields for paper-style stats
-    mask_ref = (mask > 0.5).astype(np.float32)
+    mask_ref = (mask_metrics > 0.5).astype(np.float32)
     spacing_m = tuple(float(s) / 1000.0 for s in hr_spacing)
     speed_ref = np.sqrt((gt_phys[:, :3] ** 2).sum(axis=1)).astype(np.float32)  # [T,X,Y,Z]
-    speed_base = np.sqrt((lr_vel_phys**2).sum(axis=1)).astype(np.float32)  # [T,X,Y,Z]
+    speed_base = np.sqrt((lr_vel_phys_metrics**2).sum(axis=1)).astype(np.float32)  # [T,X,Y,Z]
     speed_sr = np.sqrt((pred_phys[:, :3] ** 2).sum(axis=1)).astype(np.float32)  # [T,X,Y,Z]
 
     vort_ref = np.stack([_vorticity_magnitude(gt_phys[t, :3], spacing_m) for t in range(t_count)], axis=0)
-    vort_base = np.stack([_vorticity_magnitude(lr_vel_phys[t], spacing_m) for t in range(t_count)], axis=0)
+    vort_base = np.stack([_vorticity_magnitude(lr_vel_phys_metrics[t], spacing_m) for t in range(t_count)], axis=0)
     vort_sr = np.stack([_vorticity_magnitude(pred_phys[t, :3], spacing_m) for t in range(t_count)], axis=0)
 
     table2_all, valid_slices, re_base_all, re_sr_all = _table2_rows(
@@ -1028,9 +1143,9 @@ def main() -> None:
     _write_csv(metrics_dir / "table2_like_compact.csv", table2_compact, t2c_cols)
 
     # 2) Flow-rate metrics
-    q_ref_curves = _flow_rate_curves(gt_phys[:, :3], mask, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
-    q_base_curves = _flow_rate_curves(lr_vel_phys, mask, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
-    q_sr_curves = _flow_rate_curves(pred_phys[:, :3], mask, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
+    q_ref_curves = _flow_rate_curves(gt_phys[:, :3], mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
+    q_base_curves = _flow_rate_curves(lr_vel_phys_metrics, mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
+    q_sr_curves = _flow_rate_curves(pred_phys[:, :3], mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
 
     q_ref_mean = q_ref_curves.mean(axis=0)
     q_ref_sd = q_ref_curves.std(axis=0, ddof=1) if q_ref_curves.shape[0] > 1 else np.zeros_like(q_ref_mean)
@@ -1159,7 +1274,7 @@ def main() -> None:
     wss_metric_names = ["Maximum", "Mean", "SD", "Quantile_97_5", "Median", "Quantile_2_5", "IQR_75_25"]
 
     for t in range(t_count):
-        mask_t = (mask[t] > 0.5).astype(np.float32)
+        mask_t = (mask_metrics[t] > 0.5).astype(np.float32)
         if int(mask_t.sum()) < 25:
             continue
 
@@ -1172,7 +1287,7 @@ def main() -> None:
             seed=7 + t,
         )
         tau_base_t = _compute_wss_distribution(
-            uvw_mean=lr_vel_phys[t],
+            uvw_mean=lr_vel_phys_metrics[t],
             mask_ref=mask_t,
             spacing_mm=hr_spacing,
             mu_pa_s=float(args.mu_pa_s),
@@ -1289,8 +1404,8 @@ def main() -> None:
     geom_rows: List[Dict[str, Any]] = []
     geom_status = "not_available_single_frame"
     geom_note = "Computed across temporal masks when multiple frames are available."
-    if mask.shape[0] > 1:
-        mask_u8 = (mask > 0.5).astype(np.uint8)
+    if mask_metrics.shape[0] > 1:
+        mask_u8 = (mask_metrics > 0.5).astype(np.uint8)
         ref_mask = mask_u8[0]
         static_mask = bool(np.all(mask_u8 == ref_mask[None, ...]))
         if static_mask:
@@ -1340,7 +1455,7 @@ def main() -> None:
             }
     else:
         geom_note = "Temporal geometry metrics require at least two frames; marked as N/A."
-        for t in range(mask.shape[0]):
+        for t in range(mask_metrics.shape[0]):
             geom_rows.append(
                 {
                     "frame": int(t),
@@ -1415,6 +1530,7 @@ def main() -> None:
         "dimensions": {
             "T": int(t_count),
             "frame_source_indices": [int(x) for x in frame_source_indices.tolist()],
+            "lr_shape_xyz": [int(x) for x in lr_norm.shape[2:]],
             "shape_XYZ": [int(x) for x in pred_norm.shape[2:]],
             "flow_axis": int(selected_flow_axis),
             "flow_axis_mode": str(args.flow_axis),
@@ -1429,6 +1545,7 @@ def main() -> None:
             "geometry_status": geom_status,
             "geometry_note": geom_note,
             "geometry_summary": geom_summary,
+            "roi": roi_info,
         },
         "visualization": {
             "lr_mag_channel_used": int(args.lr_mag_channel),
@@ -1528,13 +1645,15 @@ def main() -> None:
     <li>Flow reference value used (ml/s): <b>{q_ref_scalar:.6f}</b></li>
     <li>Flow axis used: <b>{selected_flow_axis}</b> (mode: {args.flow_axis}, suggested: {suggested_flow_axis})</li>
     <li>LR magnitude channel used for visualization: <b>{args.lr_mag_channel}</b></li>
+    <li>ROI mode: <b>{'enabled' if roi_info.get('enabled', False) else 'disabled'}</b>{'' if not roi_info.get('enabled', False) else f" (bbox xyz: {roi_info.get('bbox_xyz')})"}</li>
+    <li>Baseline LR alignment for metrics: <b>{'upsampled to HR grid' if tuple(lr_norm.shape[2:]) != tuple(gt_norm.shape[2:]) else 'native HR size'}</b></li>
   </ul>
 
   <h2>Visual Inspection (Full Volume)</h2>
   {ch_img_tags}
 
   <h2>Voxel Distribution Inside Mask</h2>
-  <p class=\"muted\">Histogram comparison over all in-mask voxels across all processed frames.</p>
+  <p class=\"muted\">Histogram comparison over all in-mask voxels across all processed frames{'' if not roi_info.get('enabled', False) else ' (restricted to ROI bbox)'}.</p>
   <img src=\"figures/{fig_voxel_hist.name}\" alt=\"In-mask voxel histograms\"/>
   {voxel_dist_html}
 

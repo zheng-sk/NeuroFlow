@@ -56,6 +56,8 @@ def main() -> None:
     parser.add_argument("--cca-range", type=str, default="")
     parser.add_argument("--mu-pa-s", type=float, default=0.0035)
     parser.add_argument("--max-wall-points", type=int, default=30000)
+    parser.add_argument("--roi-bbox", type=int, nargs=6, default=None, metavar=("X0", "X1", "Y0", "Y1", "Z0", "Z1"))
+    parser.add_argument("--roi-json", default="")
     parser.add_argument("--report-title", default="4D Flow SR Uncertainty Quantification Report")
 
     args = parser.parse_args()
@@ -153,6 +155,11 @@ def main() -> None:
         report_cmd.extend(["--cca-range", args.cca_range])
     if str(args.q_ref) != "nan":
         report_cmd.extend(["--q-ref", str(args.q_ref)])
+    if args.roi_bbox and len(args.roi_bbox) == 6:
+        report_cmd.append("--roi-bbox")
+        report_cmd.extend([str(v) for v in args.roi_bbox])
+    if args.roi_json:
+        report_cmd.extend(["--roi-json", str(args.roi_json)])
 
     _run(report_cmd)
 

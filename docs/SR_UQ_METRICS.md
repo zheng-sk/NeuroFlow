@@ -89,6 +89,9 @@ If multiple temporal masks are available, per-frame surface distances are comput
 
 The report includes an aggregated geometry summary.
 
+If all temporal masks are identical (for example, frame-0 mask propagated to all registered frames),
+geometry temporal metrics are marked as **N/A** (NaN) and labeled accordingly in the summary/CSV.
+
 ## 6) Voxel-value distribution inside mask
 
 The report also includes histogram-based comparisons (inside mask, all processed frames) for:
@@ -227,8 +230,13 @@ Main artifacts:
 - `output/uq_case0/report.html`
 - `output/uq_case0/metrics/summary_metrics.json`
 - `output/uq_case0/metrics/table2_like_all_slices.csv`
+- `output/uq_case0/metrics/table2_like_per_frame_all_slices.csv`
 - `output/uq_case0/metrics/flow_metrics.csv`
+- `output/uq_case0/metrics/flow_metrics_per_frame.csv`
+- `output/uq_case0/metrics/flow_rate_curves_per_frame.csv`
 - `output/uq_case0/metrics/table3_like_wss.csv`
+- `output/uq_case0/metrics/table3_like_wss_per_frame.csv`
+- `output/uq_case0/metrics/geometry_temporal_surface_metrics.csv`
 - `output/uq_case0/metrics/voxel_distribution_stats.csv`
 
 ### 10.4 One-command pipeline (inference + report)
@@ -255,4 +263,3 @@ Optional:
 
 - set scalar reference flow: `--q-ref 11.72`
 - set custom CCA range: `--cca-range 8:20`
-

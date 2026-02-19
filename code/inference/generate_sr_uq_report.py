@@ -192,6 +192,47 @@ def _table2_rows(
     return rows, valid_slices, re_base_all, re_sr_all
 
 
+def _table2_rows_per_frame(
+    speed_ref: np.ndarray,
+    speed_base: np.ndarray,
+    speed_sr: np.ndarray,
+    vort_ref: np.ndarray,
+    vort_base: np.ndarray,
+    vort_sr: np.ndarray,
+    mask_ref: np.ndarray,
+    flow_axis: int,
+    min_voxels: int,
+    frame_source_indices: np.ndarray,
+) -> List[Dict[str, Any]]:
+    if speed_ref.ndim != 4:
+        raise ValueError(f"Expected speed_ref with shape [T,X,Y,Z], got {speed_ref.shape}")
+
+    t_count = speed_ref.shape[0]
+    if frame_source_indices.shape[0] != t_count:
+        frame_source_indices = np.arange(t_count, dtype=np.int32)
+
+    out_rows: List[Dict[str, Any]] = []
+    for t in range(t_count):
+        t_rows, _, _, _ = _table2_rows(
+            speed_ref=speed_ref[t : t + 1],
+            speed_base=speed_base[t : t + 1],
+            speed_sr=speed_sr[t : t + 1],
+            vort_ref=vort_ref[t : t + 1],
+            vort_base=vort_base[t : t + 1],
+            vort_sr=vort_sr[t : t + 1],
+            mask_ref=mask_ref[t : t + 1],
+            flow_axis=flow_axis,
+            min_voxels=min_voxels,
+        )
+        for row in t_rows:
+            rr = dict(row)
+            rr["frame_payload_index"] = int(t)
+            rr["frame_source_index"] = int(frame_source_indices[t])
+            out_rows.append(rr)
+
+    return out_rows
+
+
 def _flow_rate_curves(
     vel: np.ndarray,
     mask: np.ndarray,
@@ -215,6 +256,79 @@ def _flow_rate_curves(
             plane_m = _extract_slice(m, flow_axis, s)
             q[t, s] = float(np.sum(plane_v[plane_m]) * area_mm2)
     return q
+
+
+def _flow_rows_per_frame_slice(
+    q_ref_curves: np.ndarray,
+    q_base_curves: np.ndarray,
+    q_sr_curves: np.ndarray,
+    q_ref_scalar: float,
+    frame_source_indices: np.ndarray,
+) -> List[Dict[str, Any]]:
+    t_count, n_slices = q_ref_curves.shape
+    if frame_source_indices.shape[0] != t_count:
+        frame_source_indices = np.arange(t_count, dtype=np.int32)
+
+    rows: List[Dict[str, Any]] = []
+    for t in range(t_count):
+        for s in range(n_slices):
+            q_ref = float(q_ref_curves[t, s])
+            q_base = float(q_base_curves[t, s])
+            q_sr = float(q_sr_curves[t, s])
+            rows.append(
+                {
+                    "frame_payload_index": int(t),
+                    "frame_source_index": int(frame_source_indices[t]),
+                    "slice_index": int(s),
+                    "q_ref_ml_s": q_ref,
+                    "q_baseline_ml_s": q_base,
+                    "q_sr_ml_s": q_sr,
+                    "abs_err_baseline_vs_ref_ml_s": abs(q_base - q_ref),
+                    "abs_err_sr_vs_ref_ml_s": abs(q_sr - q_ref),
+                    "abs_err_baseline_vs_qref_ml_s": abs(q_base - float(q_ref_scalar)),
+                    "abs_err_sr_vs_qref_ml_s": abs(q_sr - float(q_ref_scalar)),
+                }
+            )
+    return rows
+
+
+def _flow_summary_rows_per_frame(
+    q_ref_curves: np.ndarray,
+    q_base_curves: np.ndarray,
+    q_sr_curves: np.ndarray,
+    q_ref_scalar: float,
+    frame_source_indices: np.ndarray,
+    ref_label: str,
+    baseline_label: str,
+    sr_label: str,
+) -> List[Dict[str, Any]]:
+    t_count, _ = q_ref_curves.shape
+    if frame_source_indices.shape[0] != t_count:
+        frame_source_indices = np.arange(t_count, dtype=np.int32)
+
+    rows: List[Dict[str, Any]] = []
+    for t in range(t_count):
+        ref_t = q_ref_curves[t]
+        base_t = q_base_curves[t]
+        sr_t = q_sr_curves[t]
+
+        def _append(method: str, q_method_t: np.ndarray) -> None:
+            rows.append(
+                {
+                    "frame_payload_index": int(t),
+                    "frame_source_index": int(frame_source_indices[t]),
+                    "method": method,
+                    "mean_Q_ml_s": float(np.mean(q_method_t)),
+                    "MAD_Q_vs_qref_ml_s": float(np.mean(np.abs(q_method_t - float(q_ref_scalar)))),
+                    "MAD_Q_vs_ref_profile_ml_s": float(np.mean(np.abs(q_method_t - ref_t))),
+                }
+            )
+
+        _append(ref_label, ref_t)
+        _append(baseline_label, base_t)
+        _append(sr_label, sr_t)
+
+    return rows
 
 
 def _suggest_flow_axis(
@@ -785,6 +899,10 @@ def main() -> None:
         raise ValueError(f"Expected 4-channel pred/gt tensors. Got pred={pred_norm.shape}, gt={gt_norm.shape}")
 
     t_count = pred_norm.shape[0]
+    if "frame_indices" in payload and np.asarray(payload["frame_indices"]).shape[0] == t_count:
+        frame_source_indices = np.asarray(payload["frame_indices"], dtype=np.int32)
+    else:
+        frame_source_indices = np.arange(t_count, dtype=np.int32)
     fidx = int(np.clip(args.selected_frame, 0, t_count - 1))
 
     # Denormalize to physical units for velocity-related metrics
@@ -873,6 +991,18 @@ def main() -> None:
         flow_axis=selected_flow_axis,
         min_voxels=int(args.mask_min_slice_voxels),
     )
+    table2_per_frame = _table2_rows_per_frame(
+        speed_ref=speed_ref,
+        speed_base=speed_base,
+        speed_sr=speed_sr,
+        vort_ref=vort_ref,
+        vort_base=vort_base,
+        vort_sr=vort_sr,
+        mask_ref=mask_ref,
+        flow_axis=selected_flow_axis,
+        min_voxels=int(args.mask_min_slice_voxels),
+        frame_source_indices=frame_source_indices,
+    )
 
     p_re = _wilcoxon_p(re_base_all, re_sr_all)
 
@@ -890,6 +1020,9 @@ def main() -> None:
     # Save table2 CSVs
     t2_cols = ["slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
     _write_csv(metrics_dir / "table2_like_all_slices.csv", table2_all, t2_cols)
+
+    t2pf_cols = ["frame_payload_index", "frame_source_index", "slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
+    _write_csv(metrics_dir / "table2_like_per_frame_all_slices.csv", table2_per_frame, t2pf_cols)
 
     t2c_cols = ["location", "slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
     _write_csv(metrics_dir / "table2_like_compact.csv", table2_compact, t2c_cols)
@@ -958,6 +1091,47 @@ def main() -> None:
     flow_cols = ["method", "mean_Q_ml_s", "MAD_Q_ml_s", "MAD_Q_pct_ref", "mean_SD_Q_ml_s", "mean_SD_Q_pct_ref"]
     _write_csv(metrics_dir / "flow_metrics.csv", flow_rows, flow_cols)
 
+    flow_slice_rows = _flow_rows_per_frame_slice(
+        q_ref_curves=q_ref_curves,
+        q_base_curves=q_base_curves,
+        q_sr_curves=q_sr_curves,
+        q_ref_scalar=q_ref_scalar,
+        frame_source_indices=frame_source_indices,
+    )
+    flow_slice_cols = [
+        "frame_payload_index",
+        "frame_source_index",
+        "slice_index",
+        "q_ref_ml_s",
+        "q_baseline_ml_s",
+        "q_sr_ml_s",
+        "abs_err_baseline_vs_ref_ml_s",
+        "abs_err_sr_vs_ref_ml_s",
+        "abs_err_baseline_vs_qref_ml_s",
+        "abs_err_sr_vs_qref_ml_s",
+    ]
+    _write_csv(metrics_dir / "flow_rate_curves_per_frame.csv", flow_slice_rows, flow_slice_cols)
+
+    flow_per_frame_rows = _flow_summary_rows_per_frame(
+        q_ref_curves=q_ref_curves,
+        q_base_curves=q_base_curves,
+        q_sr_curves=q_sr_curves,
+        q_ref_scalar=q_ref_scalar,
+        frame_source_indices=frame_source_indices,
+        ref_label=ref_label,
+        baseline_label=args.baseline_label,
+        sr_label=args.sr_label,
+    )
+    flow_per_frame_cols = [
+        "frame_payload_index",
+        "frame_source_index",
+        "method",
+        "mean_Q_ml_s",
+        "MAD_Q_vs_qref_ml_s",
+        "MAD_Q_vs_ref_profile_ml_s",
+    ]
+    _write_csv(metrics_dir / "flow_metrics_per_frame.csv", flow_per_frame_rows, flow_per_frame_cols)
+
     # Flow figure
     fig_flow = fig_dir / "flow_rate_profile.png"
     x = np.arange(q_ref_mean.shape[0])
@@ -981,6 +1155,8 @@ def main() -> None:
     tau_ref_parts: List[np.ndarray] = []
     tau_base_parts: List[np.ndarray] = []
     tau_sr_parts: List[np.ndarray] = []
+    table3_per_frame_rows: List[Dict[str, Any]] = []
+    wss_metric_names = ["Maximum", "Mean", "SD", "Quantile_97_5", "Median", "Quantile_2_5", "IQR_75_25"]
 
     for t in range(t_count):
         mask_t = (mask[t] > 0.5).astype(np.float32)
@@ -1017,6 +1193,29 @@ def main() -> None:
             tau_base_parts.append(tau_base_t)
             tau_sr_parts.append(tau_sr_t)
 
+            wss_ref_t = _wss_summary(tau_ref_t)
+            wss_base_t = _wss_summary(tau_base_t)
+            wss_sr_t = _wss_summary(tau_sr_t)
+            for key in wss_metric_names:
+                ref_v_t = wss_ref_t[key]
+                base_v_t = wss_base_t[key]
+                sr_v_t = wss_sr_t[key]
+                table3_per_frame_rows.append(
+                    {
+                        "frame_payload_index": int(t),
+                        "frame_source_index": int(frame_source_indices[t]),
+                        "metric": key,
+                        "ref": ref_v_t,
+                        "baseline": base_v_t,
+                        "sr": sr_v_t,
+                        "re_baseline": _relative_error(base_v_t, ref_v_t),
+                        "re_sr": _relative_error(sr_v_t, ref_v_t),
+                        "n_ref": int(tau_ref_t.size),
+                        "n_baseline": int(tau_base_t.size),
+                        "n_sr": int(tau_sr_t.size),
+                    }
+                )
+
     tau_ref = np.concatenate(tau_ref_parts, axis=0) if tau_ref_parts else np.zeros((0,), dtype=np.float64)
     tau_base = np.concatenate(tau_base_parts, axis=0) if tau_base_parts else np.zeros((0,), dtype=np.float64)
     tau_sr = np.concatenate(tau_sr_parts, axis=0) if tau_sr_parts else np.zeros((0,), dtype=np.float64)
@@ -1026,7 +1225,7 @@ def main() -> None:
     wss_sr = _wss_summary(tau_sr)
 
     table3_rows = []
-    for key in ["Maximum", "Mean", "SD", "Quantile_97_5", "Median", "Quantile_2_5", "IQR_75_25"]:
+    for key in wss_metric_names:
         ref_v = wss_ref[key]
         base_v = wss_base[key]
         sr_v = wss_sr[key]
@@ -1042,6 +1241,23 @@ def main() -> None:
         )
 
     _write_csv(metrics_dir / "table3_like_wss.csv", table3_rows, ["metric", "ref", "baseline", "sr", "re_baseline", "re_sr"])
+    _write_csv(
+        metrics_dir / "table3_like_wss_per_frame.csv",
+        table3_per_frame_rows,
+        [
+            "frame_payload_index",
+            "frame_source_index",
+            "metric",
+            "ref",
+            "baseline",
+            "sr",
+            "re_baseline",
+            "re_sr",
+            "n_ref",
+            "n_baseline",
+            "n_sr",
+        ],
+    )
 
     # WSS p-value comparing pointwise absolute errors (paired by sampling seed/order)
     n_pair = min(tau_ref.size, tau_base.size, tau_sr.size)
@@ -1071,26 +1287,71 @@ def main() -> None:
 
     # 4) Geometry metrics (paper-like) from temporal mask variability
     geom_rows: List[Dict[str, Any]] = []
+    geom_status = "not_available_single_frame"
+    geom_note = "Computed across temporal masks when multiple frames are available."
     if mask.shape[0] > 1:
-        ref_mask = (mask[0] > 0.5).astype(np.uint8)
-        per_frame = []
-        for t in range(mask.shape[0]):
-            m_t = (mask[t] > 0.5).astype(np.uint8)
-            m = _surface_distance_metrics(m_t, ref_mask, hr_spacing)
-            m["frame"] = int(t)
-            per_frame.append(m)
+        mask_u8 = (mask > 0.5).astype(np.uint8)
+        ref_mask = mask_u8[0]
+        static_mask = bool(np.all(mask_u8 == ref_mask[None, ...]))
+        if static_mask:
+            geom_status = "not_applicable_static_mask"
+            geom_note = (
+                "Temporal geometry metrics marked as N/A because all frames share the same binary mask "
+                "(e.g., registered sequence with frame-0 mask propagated)."
+            )
+            for t in range(mask_u8.shape[0]):
+                geom_rows.append(
+                    {
+                        "frame": int(t),
+                        "frame_source_index": int(frame_source_indices[t]),
+                        "status": geom_status,
+                        "mean_surface_distance_a_to_b_mm": float("nan"),
+                        "std_surface_distance_a_to_b_mm": float("nan"),
+                        "symmetric_mean_surface_distance_mm": float("nan"),
+                        "hausdorff_distance_mm": float("nan"),
+                    }
+                )
+            geom_summary = {
+                "mean_surface_distance_mm": float("nan"),
+                "std_surface_distance_mm": float("nan"),
+                "mean_hausdorff_distance_mm": float("nan"),
+            }
+        else:
+            geom_status = "computed"
+            geom_note = "Computed from frame-wise mask surfaces against frame 0."
+            per_frame = []
+            for t in range(mask_u8.shape[0]):
+                m_t = mask_u8[t]
+                m = _surface_distance_metrics(m_t, ref_mask, hr_spacing)
+                m["frame"] = int(t)
+                m["frame_source_index"] = int(frame_source_indices[t])
+                m["status"] = geom_status
+                per_frame.append(m)
 
-        for item in per_frame:
-            geom_rows.append(item)
+            for item in per_frame:
+                geom_rows.append(item)
 
-        msd = np.asarray([x["mean_surface_distance_a_to_b_mm"] for x in per_frame], dtype=np.float64)
-        hd = np.asarray([x["hausdorff_distance_mm"] for x in per_frame], dtype=np.float64)
-        geom_summary = {
-            "mean_surface_distance_mm": float(np.nanmean(msd)),
-            "std_surface_distance_mm": float(np.nanstd(msd, ddof=1)) if np.isfinite(msd).sum() > 1 else float("nan"),
-            "mean_hausdorff_distance_mm": float(np.nanmean(hd)),
-        }
+            msd = np.asarray([x["mean_surface_distance_a_to_b_mm"] for x in per_frame], dtype=np.float64)
+            hd = np.asarray([x["hausdorff_distance_mm"] for x in per_frame], dtype=np.float64)
+            geom_summary = {
+                "mean_surface_distance_mm": float(np.nanmean(msd)),
+                "std_surface_distance_mm": float(np.nanstd(msd, ddof=1)) if np.isfinite(msd).sum() > 1 else float("nan"),
+                "mean_hausdorff_distance_mm": float(np.nanmean(hd)),
+            }
     else:
+        geom_note = "Temporal geometry metrics require at least two frames; marked as N/A."
+        for t in range(mask.shape[0]):
+            geom_rows.append(
+                {
+                    "frame": int(t),
+                    "frame_source_index": int(frame_source_indices[t]),
+                    "status": geom_status,
+                    "mean_surface_distance_a_to_b_mm": float("nan"),
+                    "std_surface_distance_a_to_b_mm": float("nan"),
+                    "symmetric_mean_surface_distance_mm": float("nan"),
+                    "hausdorff_distance_mm": float("nan"),
+                }
+            )
         geom_summary = {
             "mean_surface_distance_mm": float("nan"),
             "std_surface_distance_mm": float("nan"),
@@ -1103,6 +1364,8 @@ def main() -> None:
             geom_rows,
             [
                 "frame",
+                "frame_source_index",
+                "status",
                 "mean_surface_distance_a_to_b_mm",
                 "std_surface_distance_a_to_b_mm",
                 "symmetric_mean_surface_distance_mm",
@@ -1151,6 +1414,7 @@ def main() -> None:
         "metadata": metadata,
         "dimensions": {
             "T": int(t_count),
+            "frame_source_indices": [int(x) for x in frame_source_indices.tolist()],
             "shape_XYZ": [int(x) for x in pred_norm.shape[2:]],
             "flow_axis": int(selected_flow_axis),
             "flow_axis_mode": str(args.flow_axis),
@@ -1162,6 +1426,8 @@ def main() -> None:
             "wss_wilcoxon_p_abs_err": p_wss,
             "flow_reference_q_ml_s": q_ref_scalar,
             "flow_axis_scores": flow_axis_scores,
+            "geometry_status": geom_status,
+            "geometry_note": geom_note,
             "geometry_summary": geom_summary,
         },
         "visualization": {
@@ -1292,7 +1558,7 @@ def main() -> None:
   <img src=\"figures/{fig_wss.name}\" alt=\"WSS distribution\"/>
 
   <h2>Geometry Uncertainty (Surface/Hausdorff)</h2>
-  <p class=\"muted\">Computed across temporal masks when multiple frames are available.</p>
+  <p class=\"muted\">{geom_note}</p>
   {geom_html}
 
   <h2>Bland-Altman</h2>
@@ -1301,9 +1567,14 @@ def main() -> None:
   <h2>Saved Artifacts</h2>
   <ul>
     <li><code>metrics/table2_like_all_slices.csv</code></li>
+    <li><code>metrics/table2_like_per_frame_all_slices.csv</code></li>
     <li><code>metrics/table2_like_compact.csv</code></li>
     <li><code>metrics/flow_metrics.csv</code></li>
+    <li><code>metrics/flow_metrics_per_frame.csv</code></li>
+    <li><code>metrics/flow_rate_curves_per_frame.csv</code></li>
     <li><code>metrics/table3_like_wss.csv</code></li>
+    <li><code>metrics/table3_like_wss_per_frame.csv</code></li>
+    <li><code>metrics/geometry_temporal_surface_metrics.csv</code></li>
     <li><code>metrics/voxel_distribution_stats.csv</code></li>
     <li><code>metrics/summary_metrics.json</code></li>
   </ul>

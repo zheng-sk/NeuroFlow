@@ -304,3 +304,79 @@ Optional:
 
 - set scalar reference flow: `--q-ref 11.72`
 - set custom CCA range: `--cca-range 8:20`
+
+### 10.5 Prediction-only metrics from NIfTI (no baseline/reference)
+
+Use this mode when you only have predicted NIfTI files (`u,v,w`, optional `mag`, optional `mask`).
+It computes absolute metrics (no relative error vs reference).
+
+```bash
+python code/inference/generate_pred_only_uq_report.py \
+  --u-path output/uq_case0/nifti/pred_u.nii.gz \
+  --v-path output/uq_case0/nifti/pred_v.nii.gz \
+  --w-path output/uq_case0/nifti/pred_w.nii.gz \
+  --mag-path output/uq_case0/nifti/pred_mag.nii.gz \
+  --mask-path data/masks/case0_mask.nii.gz \
+  --out-dir output/uq_case0_pred_only \
+  --flow-axis auto \
+  --hist-bins 120
+```
+
+ROI-restricted prediction-only metrics:
+
+```bash
+python code/inference/generate_pred_only_uq_report.py \
+  --u-path output/uq_case0/nifti/pred_u.nii.gz \
+  --v-path output/uq_case0/nifti/pred_v.nii.gz \
+  --w-path output/uq_case0/nifti/pred_w.nii.gz \
+  --mask-path data/masks/case0_mask.nii.gz \
+  --out-dir output/uq_case0_pred_only \
+  --roi-json output/uq_case0/roi_bbox.json
+```
+
+Prediction-only artifacts:
+
+- `output/uq_case0_pred_only/pred_only_report.html`
+- `output/uq_case0_pred_only/metrics/pred_only_summary_metrics.json`
+- `output/uq_case0_pred_only/metrics/pred_only_table2_all_slices.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_table2_per_frame_all_slices.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_table2_compact.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_flow_metrics.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_flow_metrics_per_frame.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_flow_rate_curves_per_frame.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_table3_wss.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_table3_wss_per_frame.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_geometry_temporal_surface_metrics.csv`
+- `output/uq_case0_pred_only/metrics/pred_only_voxel_distribution_stats.csv`
+
+### 10.6 Build comparable payload from NIfTI (pred + 3T LR + 7T HR)
+
+Use this when you already have NIfTI predictions and also want the **same comparative metrics**
+as the standard SR/UQ report (`baseline=3T`, `reference=7T`, `sr=prediction`).
+
+One command (build payload + run full report):
+
+```bash
+python code/inference/build_uq_payload_from_nifti.py \
+  --pred-u output/uq_case0/nifti/pred_u.nii.gz \
+  --pred-v output/uq_case0/nifti/pred_v.nii.gz \
+  --pred-w output/uq_case0/nifti/pred_w.nii.gz \
+  --pred-mag output/uq_case0/nifti/pred_mag.nii.gz \
+  --lr-u data/case0/lr_u.nii.gz \
+  --lr-v data/case0/lr_v.nii.gz \
+  --lr-w data/case0/lr_w.nii.gz \
+  --lr-mag data/case0/lr_mag.nii.gz \
+  --hr-u data/case0/hr_u_7t.nii.gz \
+  --hr-v data/case0/hr_v_7t.nii.gz \
+  --hr-w data/case0/hr_w_7t.nii.gz \
+  --hr-mag data/case0/hr_mag_7t.nii.gz \
+  --mask data/case0/mask.nii.gz \
+  --out-dir output/uq_case0_from_nifti \
+  --baseline-label \"3T\" \
+  --ref-label \"7T\" \
+  --sr-label \"3T SR\" \
+  --run-report
+```
+
+If prediction does not include magnitude, just omit `--pred-mag` (script derives it from speed).
+Likewise, if `--hr-mag` or `--lr-mag` are missing, they are derived automatically from velocity magnitude.

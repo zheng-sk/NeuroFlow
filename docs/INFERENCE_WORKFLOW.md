@@ -104,3 +104,51 @@ Only for old datasets that need legacy correction:
 ```bash
 --legacy-invert-uv-sign-on-raw
 ```
+
+## 7) Prediction-Only Metrics (from predicted NIfTI)
+
+If you only have predicted NIfTI outputs (without baseline/reference), use:
+
+```bash
+python code/inference/generate_pred_only_uq_report.py \
+  --u-path /path/pred_u.nii.gz \
+  --v-path /path/pred_v.nii.gz \
+  --w-path /path/pred_w.nii.gz \
+  --mag-path /path/pred_mag.nii.gz \
+  --mask-path /path/mask.nii.gz \
+  --out-dir /path/pred_only_metrics
+```
+
+This exports absolute metrics (flow, vorticity/velocity stats, WSS, voxel distributions, temporal geometry)
+plus an HTML report at:
+
+- `/path/pred_only_metrics/pred_only_report.html`
+
+## 8) Comparative Metrics from Existing NIfTI (pred + LR + HR)
+
+If you already have:
+- prediction NIfTI (`pred_u/pred_v/pred_w`),
+- baseline LR NIfTI (`lr_u/lr_v/lr_w`),
+- reference HR NIfTI (`hr_u/hr_v/hr_w`),
+
+you can build `analysis_payload.npz` and run the same comparative report as the default SR/UQ flow:
+
+```bash
+python code/inference/build_uq_payload_from_nifti.py \
+  --pred-u /path/pred_u.nii.gz \
+  --pred-v /path/pred_v.nii.gz \
+  --pred-w /path/pred_w.nii.gz \
+  --lr-u /path/lr_u.nii.gz \
+  --lr-v /path/lr_v.nii.gz \
+  --lr-w /path/lr_w.nii.gz \
+  --hr-u /path/hr_u.nii.gz \
+  --hr-v /path/hr_v.nii.gz \
+  --hr-w /path/hr_w.nii.gz \
+  --mask /path/mask.nii.gz \
+  --out-dir /path/uq_from_nifti \
+  --run-report
+```
+
+Notes:
+- `--pred-mag`, `--lr-mag`, and `--hr-mag` are optional.
+- If any magnitude is missing, it is derived from speed (`sqrt(u^2+v^2+w^2)`).

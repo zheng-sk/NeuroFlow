@@ -10,6 +10,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+from monai.inferers import sliding_window_inference
 from torch.utils.tensorboard import SummaryWriter
 
 from . import h5util, loss_utils, utility
@@ -42,6 +43,10 @@ class TrainerController:
         early_stopping_min_delta=0.0,
         overfit_patience=8,
         overfit_min_delta=0.0,
+        val_full_volume=False,
+        val_sw_patch_size=16,
+        val_sw_batch_size=2,
+        val_sw_overlap=0.25,
     ):
         """
         TrainerController constructor.
@@ -76,6 +81,12 @@ class TrainerController:
         self.early_stopping_min_delta = float(early_stopping_min_delta)
         self.overfit_patience = max(int(overfit_patience), 0)
         self.overfit_min_delta = float(overfit_min_delta)
+        self.val_full_volume = bool(val_full_volume)
+        self.val_sw_patch_size = max(int(val_sw_patch_size), 1)
+        self.val_sw_batch_size = max(int(val_sw_batch_size), 1)
+        self.val_sw_overlap = float(val_sw_overlap)
+        if not (0.0 <= self.val_sw_overlap < 1.0):
+            raise ValueError("--val-sw-overlap must be in [0,1).")
 
         # Network
         self.network_name = network_name
@@ -117,6 +128,11 @@ class TrainerController:
         if self.predict_mag and self.accuracy_include_mag:
             print(f"Accuracy metric includes magnitude error (weight={self.accuracy_mag_weight})")
         print(f"LR scheduler: {self.lr_scheduler_name}")
+        if self.val_full_volume:
+            print(
+                f"Validation mode: full-volume sliding window "
+                f"(roi={self.val_sw_patch_size}, sw_batch={self.val_sw_batch_size}, overlap={self.val_sw_overlap})"
+            )
         if self.early_stopping_patience > 0:
             print(
                 f"Early stopping on val_loss: patience={self.early_stopping_patience}, "
@@ -484,7 +500,21 @@ class TrainerController:
         u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _ = self._prepare_batch(data_pairs)
         del venc
 
-        predictions = self.model(u, v, w, u_mag, v_mag, w_mag)
+        if self.val_full_volume:
+            lr_input = torch.cat((u, v, w, u_mag, v_mag, w_mag), dim=1)
+
+            def _predictor(x):
+                return self.model(x[:, 0:1], x[:, 1:2], x[:, 2:3], x[:, 3:4], x[:, 4:5], x[:, 5:6])
+
+            predictions = sliding_window_inference(
+                inputs=lr_input,
+                roi_size=(self.val_sw_patch_size, self.val_sw_patch_size, self.val_sw_patch_size),
+                sw_batch_size=self.val_sw_batch_size,
+                predictor=_predictor,
+                overlap=self.val_sw_overlap,
+            )
+        else:
+            predictions = self.model(u, v, w, u_mag, v_mag, w_mag)
         self.calculate_and_update_metrics(hires, predictions, mask, "val")
         if return_visuals:
             return predictions, (u, v, w, u_mag, hires, mask)

@@ -697,6 +697,110 @@ class NiftiPatchDataset(Dataset):
         return case
 
 
+class NiftiFullVolumeDataset(Dataset):
+    """Case-level dataset for full-volume validation (no patch cropping)."""
+
+    def __init__(
+        self,
+        cases: List[Dict],
+        include_hr_mag: bool = False,
+        cache_dataset: bool = False,
+        cache_eager: bool = True,
+        random_time_frame: bool = False,
+        mag_scale: float = 4095.0,
+        mag_norm_mode: str = "monai_minmax",
+        mask_threshold: float = 0.5,
+        raw_phase_input: bool = True,
+        invert_uv_sign_on_raw: bool = False,
+        raw_center: float = 2048.0,
+        raw_scale: float = 2048.0,
+        time_axis: int = -1,
+    ):
+        self.cases = list(cases)
+        self.include_hr_mag = bool(include_hr_mag)
+        self.cache_dataset = bool(cache_dataset)
+        self.cache_eager = bool(cache_eager)
+
+        load_keys = ["lr_u", "lr_v", "lr_w", "lr_mag_u", "lr_mag_v", "lr_mag_w", "hr_u", "hr_v", "hr_w", "mask"]
+        if self.include_hr_mag:
+            load_keys.append("hr_mag")
+        self.load_transforms = Compose(
+            [
+                LoadImaged(keys=load_keys, image_only=True, allow_missing_keys=True),
+                EnsureChannelFirstd(keys=load_keys, channel_dim="no_channel", allow_missing_keys=True),
+            ]
+        )
+        self.post_transforms = Compose(
+            [
+                _StackNormalizeFieldsd(
+                    mag_scale=mag_scale,
+                    mag_norm_mode=mag_norm_mode,
+                    mask_threshold=mask_threshold,
+                    include_hr_mag=self.include_hr_mag,
+                    raw_phase_input=raw_phase_input,
+                    invert_uv_sign_on_raw=invert_uv_sign_on_raw,
+                    raw_center=raw_center,
+                    raw_scale=raw_scale,
+                    random_time_frame=bool(random_time_frame),
+                    time_axis=time_axis,
+                )
+            ]
+        )
+
+        case_inputs = [self._prepare_case_dict(case_idx) for case_idx in range(len(self.cases))]
+        if self.cache_dataset:
+            print(f"Using MONAI CacheDataset (full-volume) for {len(case_inputs)} case(s)...")
+            if self.cache_eager:
+                print("Cache mode: eager")
+            else:
+                print("Cache mode: runtime-lazy (if supported by current MONAI)")
+        self.case_dataset = _build_monai_case_dataset(
+            cases=case_inputs,
+            load_transform=self.load_transforms,
+            use_cache=self.cache_dataset,
+            cache_eager=self.cache_eager,
+        )
+        if self.cache_dataset:
+            print("MONAI CacheDataset (full-volume) ready.")
+
+    def __len__(self):
+        return len(self.cases)
+
+    def __getitem__(self, idx):
+        sample = self.post_transforms(dict(self.case_dataset[idx]))
+
+        lr_vel = torch.from_numpy(sample["lr_vel"]).float()
+        lr_mag = torch.from_numpy(sample["lr_mag"]).float()
+        hr_vel = torch.from_numpy(sample["hr_vel"]).float()
+        hr_mag = torch.from_numpy(sample["hr_mag"]).float() if self.include_hr_mag else None
+        mask = torch.from_numpy(sample["mask"]).float()
+        venc = torch.tensor(sample["venc"], dtype=torch.float32)
+
+        out = (
+            lr_vel[0:1],
+            lr_vel[1:2],
+            lr_vel[2:3],
+            lr_mag[0:1],
+            lr_mag[1:2],
+            lr_mag[2:3],
+            hr_vel[0:1],
+            hr_vel[1:2],
+            hr_vel[2:3],
+        )
+        if self.include_hr_mag and hr_mag is not None:
+            out = out + (hr_mag.unsqueeze(0),)
+        out = out + (venc, mask)
+        return out
+
+    def _prepare_case_dict(self, case_idx: int) -> dict:
+        case = dict(self.cases[case_idx])
+        if not case.get("mask"):
+            case.pop("mask", None)
+        if not case.get("hr_mag"):
+            case.pop("hr_mag", None)
+        return case
+
+
 def create_nifti_patch_dataloader(
     csv_path: str,
     patch_size: int,
@@ -751,6 +855,68 @@ def create_nifti_patch_dataloader(
         allow_empty_fallback=allow_empty_fallback,
     )
     print(f"NIfTI dataset {csv_path}: {len(cases)} volume(s), {len(dataset)} patch samples")
+    generator = None
+    worker_init_fn = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
+
+        def _seed_worker(worker_id):
+            worker_seed = int(seed) + int(worker_id)
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+            torch.manual_seed(worker_seed)
+
+        worker_init_fn = _seed_worker
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=int(num_workers),
+        pin_memory=torch.cuda.is_available(),
+        worker_init_fn=worker_init_fn,
+        generator=generator,
+    )
+    return loader
+
+
+def create_nifti_full_volume_dataloader(
+    csv_path: str,
+    batch_size: int,
+    shuffle: bool,
+    include_hr_mag: bool = False,
+    cache_dataset: bool = False,
+    cache_eager: bool = True,
+    random_time_frame: bool = False,
+    num_workers: int = 0,
+    mag_scale: float = 4095.0,
+    mag_norm_mode: str = "monai_minmax",
+    mask_threshold: float = 0.5,
+    raw_phase_input: bool = True,
+    invert_uv_sign_on_raw: bool = False,
+    raw_center: float = 2048.0,
+    raw_scale: float = 2048.0,
+    time_axis: int = -1,
+    seed: Optional[int] = None,
+):
+    cases = load_nifti_case_table(csv_path, include_hr_mag=include_hr_mag)
+    dataset = NiftiFullVolumeDataset(
+        cases=cases,
+        include_hr_mag=include_hr_mag,
+        cache_dataset=cache_dataset,
+        cache_eager=cache_eager,
+        random_time_frame=random_time_frame,
+        mag_scale=mag_scale,
+        mag_norm_mode=mag_norm_mode,
+        mask_threshold=mask_threshold,
+        raw_phase_input=raw_phase_input,
+        invert_uv_sign_on_raw=invert_uv_sign_on_raw,
+        raw_center=raw_center,
+        raw_scale=raw_scale,
+        time_axis=time_axis,
+    )
+    print(f"NIfTI full-volume dataset {csv_path}: {len(cases)} volume(s)")
     generator = None
     worker_init_fn = None
     if seed is not None:

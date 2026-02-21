@@ -4,7 +4,7 @@ import random
 import numpy as np
 import torch
 
-from Network.NiftiPatchDataset import create_nifti_patch_dataloader
+from Network.NiftiPatchDataset import create_nifti_full_volume_dataloader, create_nifti_patch_dataloader
 from Network.TrainerController import TrainerController
 
 
@@ -132,6 +132,29 @@ def main():
         default=0,
         help="Batch index used for TensorBoard validation reconstruction images.",
     )
+    parser.add_argument(
+        "--val-full-volume",
+        action="store_true",
+        help="Run validation on full volumes using sliding-window inference instead of center patches.",
+    )
+    parser.add_argument(
+        "--val-sw-patch-size",
+        type=int,
+        default=None,
+        help="Sliding-window ROI size for full-volume validation (default: --patch-size).",
+    )
+    parser.add_argument(
+        "--val-sw-batch-size",
+        type=int,
+        default=2,
+        help="Sliding-window batch size for full-volume validation.",
+    )
+    parser.add_argument(
+        "--val-sw-overlap",
+        type=float,
+        default=0.25,
+        help="Sliding-window overlap [0,1) for full-volume validation.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Global random seed for reproducibility.")
     parser.add_argument(
         "--deterministic",
@@ -249,34 +272,57 @@ def main():
         allow_empty_fallback=not args.legacy_disallow_empty_fallback,
         seed=args.seed,
     )
-    val_loader = create_nifti_patch_dataloader(
-        csv_path=args.val_csv,
-        patch_size=args.patch_size,
-        res_increase=args.res_increase,
-        batch_size=args.batch_size,
-        samples_per_volume=args.val_samples_per_volume,
-        shuffle=False,
-        augment=False,
-        include_hr_mag=args.predict_mag,
-        cache_dataset=args.cache_dataset,
-        cache_eager=args.cache_eager,
-        random_time_frame=False,
-        random_patch_sampling=False,
-        rotation_prob=0.0,
-        num_workers=args.num_workers,
-        mag_scale=args.mag_scale,
-        mag_norm_mode=args.mag_norm_mode,
-        mask_threshold=args.mask_threshold,
-        raw_phase_input=args.raw_phase_input,
-        invert_uv_sign_on_raw=args.legacy_invert_uv_sign_on_raw,
-        raw_center=args.raw_center,
-        raw_scale=args.raw_scale,
-        time_axis=args.time_axis,
-        minimum_coverage=0.0,
-        max_sampling_attempts=args.legacy_max_sampling_attempts,
-        allow_empty_fallback=True,
-        seed=args.seed,
-    )
+    if args.val_full_volume:
+        if args.batch_size != 1:
+            print("Validation full-volume mode forces val batch size to 1.")
+        val_loader = create_nifti_full_volume_dataloader(
+            csv_path=args.val_csv,
+            batch_size=1,
+            shuffle=False,
+            include_hr_mag=args.predict_mag,
+            cache_dataset=args.cache_dataset,
+            cache_eager=args.cache_eager,
+            random_time_frame=False,
+            num_workers=args.num_workers,
+            mag_scale=args.mag_scale,
+            mag_norm_mode=args.mag_norm_mode,
+            mask_threshold=args.mask_threshold,
+            raw_phase_input=args.raw_phase_input,
+            invert_uv_sign_on_raw=args.legacy_invert_uv_sign_on_raw,
+            raw_center=args.raw_center,
+            raw_scale=args.raw_scale,
+            time_axis=args.time_axis,
+            seed=args.seed,
+        )
+    else:
+        val_loader = create_nifti_patch_dataloader(
+            csv_path=args.val_csv,
+            patch_size=args.patch_size,
+            res_increase=args.res_increase,
+            batch_size=args.batch_size,
+            samples_per_volume=args.val_samples_per_volume,
+            shuffle=False,
+            augment=False,
+            include_hr_mag=args.predict_mag,
+            cache_dataset=args.cache_dataset,
+            cache_eager=args.cache_eager,
+            random_time_frame=False,
+            random_patch_sampling=False,
+            rotation_prob=0.0,
+            num_workers=args.num_workers,
+            mag_scale=args.mag_scale,
+            mag_norm_mode=args.mag_norm_mode,
+            mask_threshold=args.mask_threshold,
+            raw_phase_input=args.raw_phase_input,
+            invert_uv_sign_on_raw=args.legacy_invert_uv_sign_on_raw,
+            raw_center=args.raw_center,
+            raw_scale=args.raw_scale,
+            time_axis=args.time_axis,
+            minimum_coverage=0.0,
+            max_sampling_attempts=args.legacy_max_sampling_attempts,
+            allow_empty_fallback=True,
+            seed=args.seed,
+        )
 
     print(f"4DFlowNet NIfTI patch {args.patch_size}, lr {args.initial_learning_rate}, batch {args.batch_size}")
     network = TrainerController(
@@ -302,6 +348,10 @@ def main():
         early_stopping_min_delta=args.early_stopping_min_delta,
         overfit_patience=args.overfit_patience,
         overfit_min_delta=args.overfit_min_delta,
+        val_full_volume=args.val_full_volume,
+        val_sw_patch_size=args.val_sw_patch_size if args.val_sw_patch_size is not None else args.patch_size,
+        val_sw_batch_size=args.val_sw_batch_size,
+        val_sw_overlap=args.val_sw_overlap,
     )
     network.init_model_dir()
 

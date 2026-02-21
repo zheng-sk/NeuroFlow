@@ -85,6 +85,33 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--csv-path", default=None, help="Output CSV for NIfTI paired cases")
     parser.add_argument("--venc", type=float, default=0.9, help="VENC value stored in CSV")
+    parser.add_argument(
+        "--apply-hr-mask",
+        action="store_true",
+        help="Apply a binary mask to exported HR files (u/v/w/mag) before writing CSV rows.",
+    )
+    parser.add_argument(
+        "--hr-mask-root",
+        default=None,
+        help="Root folder containing per-case masks (required with --apply-hr-mask).",
+    )
+    parser.add_argument(
+        "--hr-mask-name",
+        default="cow_seg_final.nii.gz",
+        help="Mask filename expected under <hr-mask-root>/<case_key>/ (default: cow_seg_final.nii.gz).",
+    )
+    parser.add_argument(
+        "--hr-mask-threshold",
+        type=float,
+        default=0.5,
+        help="Threshold used to binarize mask values.",
+    )
+    parser.add_argument(
+        "--hr-mask-time-index",
+        type=int,
+        default=0,
+        help="Mask time frame index when mask is 4D and HR volume is 3D.",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
@@ -162,6 +189,62 @@ def transfer_file(src: str, dst: str, mode: str, overwrite: bool) -> None:
         os.symlink(os.path.abspath(src), dst)
 
 
+def _select_3d_mask(mask_data: np.ndarray, time_index: int) -> np.ndarray:
+    import numpy as np
+
+    if mask_data.ndim == 3:
+        return mask_data
+    if mask_data.ndim != 4:
+        raise ValueError(f"Unsupported mask shape {mask_data.shape}: expected 3D or 4D.")
+    if not (0 <= time_index < mask_data.shape[3]):
+        raise ValueError(
+            f"Invalid --hr-mask-time-index={time_index} for 4D mask shape={mask_data.shape}."
+        )
+    return np.asarray(mask_data[..., time_index], dtype=np.float32)
+
+
+def _broadcast_mask(mask_3d: np.ndarray, target_shape: tuple[int, ...]) -> np.ndarray:
+    import numpy as np
+
+    if len(target_shape) == 3:
+        return mask_3d
+    if len(target_shape) == 4:
+        return np.broadcast_to(mask_3d[..., np.newaxis], target_shape)
+    raise ValueError(f"Unsupported HR shape {target_shape}: expected 3D or 4D.")
+
+
+def _load_case_mask(mask_path: str, hr_reference_path: str, threshold: float, time_index: int) -> np.ndarray:
+    import nibabel as nib
+    import nibabel.processing as nibproc
+    import numpy as np
+
+    mask_img = nib.load(mask_path)
+    hr_ref_img = nib.load(hr_reference_path)
+    mask_data = np.asarray(mask_img.dataobj, dtype=np.float32)
+    mask_data = _select_3d_mask(mask_data, time_index=time_index)
+    mask_img_3d = nib.Nifti1Image(mask_data, mask_img.affine, mask_img.header)
+
+    same_shape = tuple(mask_img_3d.shape[:3]) == tuple(hr_ref_img.shape[:3])
+    same_affine = np.allclose(mask_img_3d.affine, hr_ref_img.affine, atol=1e-4)
+    if not (same_shape and same_affine):
+        mask_img_3d = nibproc.resample_from_to(mask_img_3d, (hr_ref_img.shape[:3], hr_ref_img.affine), order=0)
+
+    mask_3d = np.asarray(mask_img_3d.dataobj, dtype=np.float32)
+    return (mask_3d >= float(threshold)).astype(np.float32)
+
+
+def apply_mask_to_hr_file(hr_path: str, mask_3d: np.ndarray) -> None:
+    import nibabel as nib
+    import numpy as np
+
+    hr_img = nib.load(hr_path)
+    hr_data = np.asarray(hr_img.dataobj, dtype=np.float32)
+    mask = _broadcast_mask(mask_3d, hr_data.shape)
+    masked = (hr_data * mask).astype(np.float32)
+    out = nib.Nifti1Image(masked, hr_img.affine, hr_img.header)
+    nib.save(out, hr_path)
+
+
 def resolve_time_end(lr_u: str, hr_u: str) -> int | None:
     try:
         import nibabel as nib
@@ -226,6 +309,18 @@ def main() -> None:
         )
         os.makedirs(lr_root, exist_ok=True)
         os.makedirs(hr_root, exist_ok=True)
+
+    if args.apply_hr_mask and not args.hr_mask_root:
+        raise SystemExit("--hr-mask-root is required when --apply-hr-mask is enabled.")
+    if args.apply_hr_mask:
+        try:
+            import nibabel  # noqa: F401
+            import numpy  # noqa: F401
+        except Exception as exc:
+            raise SystemExit(
+                "--apply-hr-mask requires nibabel and numpy in the active environment."
+            ) from exc
+    mask_root = os.path.abspath(args.hr_mask_root) if args.hr_mask_root else None
 
     if not pairs:
         raise SystemExit("No paired cases found.")
@@ -296,7 +391,41 @@ def main() -> None:
         if not args.csv_only:
             for key in ("u", "v", "w", "mag"):
                 transfer_file(lr_src[key], lr_paths[key], args.mode, args.overwrite)
-                transfer_file(hr_src[key], hr_paths[key], args.mode, args.overwrite)
+                hr_mode = "copy" if args.apply_hr_mask else args.mode
+                transfer_file(hr_src[key], hr_paths[key], hr_mode, args.overwrite)
+
+        if args.apply_hr_mask:
+            if args.csv_only:
+                symlinked = [p for p in hr_paths.values() if os.path.islink(p)]
+                if symlinked:
+                    raise SystemExit(
+                        "Refusing to apply mask in --csv-only mode because HR files are symlinks. "
+                        "Use a copied dataset or rerun export without symlinks."
+                    )
+
+            mask_path = os.path.join(mask_root, pair.case_key, args.hr_mask_name)
+            if not os.path.isfile(mask_path):
+                failed += 1
+                print(f"[FAIL] {pair.case_key}: missing hr mask at {mask_path}")
+                if args.strict:
+                    raise SystemExit(1)
+                continue
+
+            try:
+                case_mask = _load_case_mask(
+                    mask_path=mask_path,
+                    hr_reference_path=hr_paths["u"],
+                    threshold=args.hr_mask_threshold,
+                    time_index=args.hr_mask_time_index,
+                )
+                for key in ("u", "v", "w", "mag"):
+                    apply_mask_to_hr_file(hr_paths[key], case_mask)
+            except Exception as exc:
+                failed += 1
+                print(f"[FAIL] {pair.case_key}: hr mask application failed ({exc})")
+                if args.strict:
+                    raise SystemExit(1)
+                continue
 
         time_end = resolve_time_end(lr_paths["u"], hr_paths["u"])
         rows.append(make_csv_row(lr_paths=lr_paths, hr_paths=hr_paths, venc=args.venc, time_end=time_end))

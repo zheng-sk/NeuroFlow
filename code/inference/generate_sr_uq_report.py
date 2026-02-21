@@ -97,7 +97,7 @@ def _default_slice_triplet(valid_slices: List[int]) -> Tuple[List[int], List[str
         return [], []
     arr = np.asarray(sorted(valid_slices), dtype=int)
     picks = [arr[int(round((len(arr) - 1) * q))] for q in (0.2, 0.5, 0.8)]
-    labels = ["CCA", "Bifurcation", "ICA/ECA"]
+    labels = [f"slice_{int(s)}" for s in picks]
     return [int(x) for x in picks], labels
 
 
@@ -850,8 +850,23 @@ def _save_channel_figure(
     gt: np.ndarray,
     max_slices: int,
     n_cols: int = 4,
+    bbox_xyz: Optional[Sequence[int]] = None,
 ) -> None:
-    n_slices = gt.shape[-1]
+    z_offset = 0
+    if bbox_xyz is not None and len(bbox_xyz) == 6:
+        x0, x1, y0, y1, z0, z1 = [int(v) for v in bbox_xyz]
+        lr_view = lr_up[x0:x1, y0:y1, z0:z1]
+        pred_view = pred[x0:x1, y0:y1, z0:z1]
+        gt_view = gt[x0:x1, y0:y1, z0:z1]
+        z_offset = int(z0)
+    else:
+        lr_view = lr_up
+        pred_view = pred
+        gt_view = gt
+
+    n_slices = gt_view.shape[-1]
+    if n_slices <= 0:
+        raise ValueError("Channel figure received empty ROI after bbox cropping.")
     if n_slices <= max_slices:
         z_idx = list(range(n_slices))
     else:
@@ -859,8 +874,8 @@ def _save_channel_figure(
 
     is_mag = ch_name == "mag"
     cmap = "gray" if is_mag else "coolwarm"
-    vmin, vmax = _robust_range([lr_up, pred, gt], symmetric=(not is_mag), lower_q=0.5, upper_q=99.5)
-    _, emax = _robust_range([np.abs(pred - gt)], symmetric=False, lower_q=0.0, upper_q=99.5)
+    vmin, vmax = _robust_range([lr_view, pred_view, gt_view], symmetric=(not is_mag), lower_q=0.5, upper_q=99.5)
+    _, emax = _robust_range([np.abs(pred_view - gt_view)], symmetric=False, lower_q=0.0, upper_q=99.5)
 
     n_cols = max(1, min(int(n_cols), len(z_idx)))
     n_blocks = int(math.ceil(len(z_idx) / float(n_cols)))
@@ -876,9 +891,9 @@ def _save_channel_figure(
         col = j % n_cols
         r0 = 4 * blk
 
-        inp = lr_up[:, :, z]
-        pd = pred[:, :, z]
-        gtz = gt[:, :, z]
+        inp = lr_view[:, :, z]
+        pd = pred_view[:, :, z]
+        gtz = gt_view[:, :, z]
         err = np.abs(pd - gtz)
 
         axes[r0 + 0, col].imshow(inp, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
@@ -886,7 +901,7 @@ def _save_channel_figure(
         axes[r0 + 2, col].imshow(gtz, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
         axes[r0 + 3, col].imshow(err, cmap="magma", vmin=0.0, vmax=emax, interpolation="nearest")
 
-        axes[r0 + 0, col].set_title(f"z={z}", fontsize=10)
+        axes[r0 + 0, col].set_title(f"z={z + z_offset}", fontsize=10)
         for rr in range(4):
             axes[r0 + rr, col].axis("off")
             axes[r0 + rr, col].grid(False)
@@ -897,11 +912,8 @@ def _save_channel_figure(
             axes[r0 + 2, col].set_ylabel("Ground truth", fontsize=10)
             axes[r0 + 3, col].set_ylabel("|Error|", fontsize=10)
 
-    fig.suptitle(
-        f"Full-volume comparison: {ch_name}  |  value range [{vmin:.3f}, {vmax:.3f}]  |  error p99.5={emax:.3f}",
-        fontsize=13,
-        y=0.995,
-    )
+    region_name = "ROI bbox" if bbox_xyz is not None else "Full volume"
+    fig.suptitle(f"{region_name} comparison: {ch_name}  |  value range [{vmin:.3f}, {vmax:.3f}]  |  error p99.5={emax:.3f}", fontsize=13, y=0.995)
     fig.tight_layout()
     fig.savefig(out_path, dpi=220)
     plt.close(fig)
@@ -1066,6 +1078,7 @@ def main() -> None:
             gt=gt_norm[fidx, c],
             max_slices=int(args.max_display_slices),
             n_cols=int(args.panel_cols),
+            bbox_xyz=roi_bbox,
         )
         channel_figs[name] = str(out_img.name)
 
@@ -1249,18 +1262,30 @@ def main() -> None:
 
     # Flow figure
     fig_flow = fig_dir / "flow_rate_profile.png"
-    x = np.arange(q_ref_mean.shape[0])
+    x = np.arange(q_ref_mean.shape[0], dtype=np.int32)
+    if roi_bbox is not None:
+        bx0, bx1, by0, by1, bz0, bz1 = [int(v) for v in roi_bbox]
+        lohi = [(bx0, bx1), (by0, by1), (bz0, bz1)][int(selected_flow_axis)]
+        s0 = max(0, min(int(lohi[0]), q_ref_mean.shape[0] - 1))
+        s1 = max(s0 + 1, min(int(lohi[1]), q_ref_mean.shape[0]))
+        x = np.arange(s0, s1, dtype=np.int32)
+    q_ref_mean_p = q_ref_mean[x]
+    q_ref_sd_p = q_ref_sd[x]
+    q_base_mean_p = q_base_mean[x]
+    q_base_sd_p = q_base_sd[x]
+    q_sr_mean_p = q_sr_mean[x]
+    q_sr_sd_p = q_sr_sd[x]
     fig = plt.figure(figsize=(10, 5))
-    plt.plot(x, q_ref_mean, label=ref_label, linewidth=2)
-    plt.fill_between(x, q_ref_mean - q_ref_sd, q_ref_mean + q_ref_sd, alpha=0.2)
-    plt.plot(x, q_base_mean, label=args.baseline_label, linewidth=2)
-    plt.fill_between(x, q_base_mean - q_base_sd, q_base_mean + q_base_sd, alpha=0.2)
-    plt.plot(x, q_sr_mean, label=args.sr_label, linewidth=2)
-    plt.fill_between(x, q_sr_mean - q_sr_sd, q_sr_mean + q_sr_sd, alpha=0.2)
+    plt.plot(x, q_ref_mean_p, label=ref_label, linewidth=2)
+    plt.fill_between(x, q_ref_mean_p - q_ref_sd_p, q_ref_mean_p + q_ref_sd_p, alpha=0.2)
+    plt.plot(x, q_base_mean_p, label=args.baseline_label, linewidth=2)
+    plt.fill_between(x, q_base_mean_p - q_base_sd_p, q_base_mean_p + q_base_sd_p, alpha=0.2)
+    plt.plot(x, q_sr_mean_p, label=args.sr_label, linewidth=2)
+    plt.fill_between(x, q_sr_mean_p - q_sr_sd_p, q_sr_mean_p + q_sr_sd_p, alpha=0.2)
     plt.axhline(q_ref_scalar, linestyle="--", color="black", label=f"Qref={q_ref_scalar:.3f} ml/s")
     plt.xlabel(f"Slice index along axis {selected_flow_axis}")
     plt.ylabel("Flow rate [ml/s]")
-    plt.title("Flow-rate profile (mean ± SD across frames)")
+    plt.title(f"Flow-rate profile (mean ± SD across frames){' [ROI bbox]' if roi_bbox is not None else ''}")
     plt.legend()
     plt.tight_layout()
     fig.savefig(fig_flow, dpi=180)
@@ -1649,7 +1674,7 @@ def main() -> None:
     <li>Baseline LR alignment for metrics: <b>{'upsampled to HR grid' if tuple(lr_norm.shape[2:]) != tuple(gt_norm.shape[2:]) else 'native HR size'}</b></li>
   </ul>
 
-  <h2>Visual Inspection (Full Volume)</h2>
+  <h2>{'Visual Inspection (ROI Bounding Box)' if roi_info.get('enabled', False) else 'Visual Inspection (Full Volume)'}</h2>
   {ch_img_tags}
 
   <h2>Voxel Distribution Inside Mask</h2>
@@ -1663,8 +1688,8 @@ def main() -> None:
   <p class=\"muted\">Lower score is better (lower temporal relative SD, smoother profile, higher valid-flow coverage).</p>
   {flow_axis_html}
 
-  <h2>Paper-style Table 2 (Representative Locations)</h2>
-  <p class=\"muted\">Variables: mean/SD/skewness/kurtosis of intraluminal velocity and vorticity (aggregated over all processed frames).</p>
+  <h2>Paper-style Table 2 (Representative Slices)</h2>
+  <p class=\"muted\">Variables: mean/SD/skewness/kurtosis of intraluminal velocity and vorticity (aggregated over all processed frames). Location labels are voxel slice IDs along the selected flow axis.</p>
   {t2_comp_html}
 
   <h2>Paper-style Flow Metrics</h2>

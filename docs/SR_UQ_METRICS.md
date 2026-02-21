@@ -247,7 +247,7 @@ python code/inference/generate_sr_uq_report.py \
   --roi-json output/uq_case0/roi_bbox.json
 ```
 
-Interactive selector (exports `bbox_hr_xyz` + mapped `bbox_lr_xyz`):
+Interactive 3D selector (PyVista box widget; exports `bbox_hr_xyz` + mapped `bbox_lr_xyz`):
 
 ```bash
 python code/inference/select_metric_roi_bbox.py \
@@ -256,7 +256,13 @@ python code/inference/select_metric_roi_bbox.py \
   --temporal-mode union
 ```
 
-Selector + export directo del reporte ROI:
+Controls:
+
+- drag box handles to adjust ROI
+- `Enter` or `Space` to accept
+- `Esc` to cancel
+
+Interactive selector + automatic ROI report:
 
 ```bash
 python code/inference/select_metric_roi_bbox.py \
@@ -265,6 +271,53 @@ python code/inference/select_metric_roi_bbox.py \
   --temporal-mode union \
   --run-report
 ```
+
+When `--run-report` is used and `--report-out-dir` is not provided, the report is saved to a new folder
+whose name includes bbox limits, e.g.:
+
+- `output/uq_case0_bbox_x30-90_y40-120_z12-44`
+
+Requirement: `pyvista` must be installed in your environment.
+If you get `render_window is None` / `IsCurrent` errors, run from a GUI desktop session and ensure off-screen mode is disabled:
+
+```bash
+unset PYVISTA_OFF_SCREEN
+python code/inference/select_metric_roi_bbox.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --out-json output/uq_case0/roi_bbox.json \
+  --temporal-mode union
+```
+
+Selector backend options:
+
+- `--selector-mode auto` (default): PyVista -> Napari -> manual fallback
+- `--selector-mode 3d`: force PyVista 3D box widget
+- `--selector-mode napari`: use Napari 3D viewer with 2 corner points
+- `--selector-mode manual`: terminal prompt only
+
+If your environment still cannot open VTK windows, install Napari and use:
+
+```bash
+pip install "napari[all]"
+python code/inference/select_metric_roi_bbox.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --out-json output/uq_case0/roi_bbox.json \
+  --temporal-mode union \
+  --selector-mode napari
+```
+
+If no GUI backend is available, use terminal fallback:
+
+```bash
+python code/inference/select_metric_roi_bbox.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --out-json output/uq_case0/roi_bbox.json \
+  --temporal-mode union \
+  --selector-mode manual \
+  --run-report
+```
+
+Note: in manual mode, pressing Enter does not accept the default bbox immediately; it asks for explicit confirmation.
 
 Main artifacts:
 

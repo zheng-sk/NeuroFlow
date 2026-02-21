@@ -88,6 +88,8 @@ def run_case(args: argparse.Namespace, patient_dir: Path) -> int:
 
     if args.ai_only:
         cmd.extend(["--no-classic-cow", "--ensemble-mode", "ai"])
+    elif args.classic_only:
+        cmd.extend(["--classic-only", "--ensemble-mode", "classic"])
     else:
         cmd.extend(["--ensemble-mode", args.ensemble_mode])
 
@@ -190,6 +192,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable classic branch and force AI-only output.",
     )
+    parser.add_argument(
+        "--classic-only",
+        action="store_true",
+        help="Skip AI inference and force classic-only output.",
+    )
 
     parser.add_argument("--no-postprocess", action="store_true", help="Disable final mask postprocessing.")
     parser.add_argument("--post-close-radius", type=int, default=1, help="Final closing radius.")
@@ -206,6 +213,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.ai_only and args.classic_only:
+        raise ValueError("--ai-only and --classic-only are mutually exclusive.")
     if not args.mag_pattern:
         args.mag_pattern = ["mag_7T_in_3T.nii.gz", "input_mag_raw.nii.gz"]
 

@@ -413,6 +413,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed-percentile", type=float, default=90.0, help="Percentile over speed(t) for angiography.")
 
     parser.add_argument("--no-classic-cow", action="store_true", help="Disable classic vesselness branch.")
+    parser.add_argument(
+        "--classic-only",
+        action="store_true",
+        help="Skip AI inference and use only the classical vesselness branch.",
+    )
     parser.add_argument("--classic-sigmas", default="1,2,3,4", help="Comma-separated sigmas for frangi/sato.")
     parser.add_argument("--classic-percentile", type=float, default=95.0, help="Percentile threshold over vesselness.")
     parser.add_argument("--classic-morph-radius", type=int, default=1, help="Morphology radius for classic branch.")
@@ -435,6 +440,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.classic_only and args.no_classic_cow:
+        raise ValueError("--classic-only and --no-classic-cow are mutually exclusive.")
     patient_dir = args.patient_dir
     if not patient_dir.exists():
         raise FileNotFoundError(f"Patient folder not found: {patient_dir}")
@@ -463,10 +470,13 @@ def main() -> None:
     analysis_mask_bool = prep["analysis_mask_bool"]
 
     tmp_root = case_out / "_tmp_nnunet"
-    shutil.rmtree(tmp_root, ignore_errors=True)
-    tmp_root.mkdir(parents=True, exist_ok=True)
-
-    ai_mask = predict_ai_mask_from_angio(angio_3d, ref_img, case_id, args.model_dir, tmp_root)
+    if args.classic_only:
+        ai_mask = np.zeros(angio_3d.shape, dtype=np.uint8)
+        print("Skipping AI inference (--classic-only).")
+    else:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        ai_mask = predict_ai_mask_from_angio(angio_3d, ref_img, case_id, args.model_dir, tmp_root)
 
     if args.no_classic_cow:
         classic_mask = np.zeros_like(ai_mask, dtype=np.uint8)
@@ -485,7 +495,7 @@ def main() -> None:
             z_min_frac=args.classic_z_min_frac,
             z_max_frac=args.classic_z_max_frac,
         )
-        effective_mode = args.ensemble_mode
+        effective_mode = "classic" if args.classic_only else args.ensemble_mode
 
     ensemble_mask = ensemble_binary_predictions(ai_mask, classic_mask, effective_mode)
     final_mask = ensemble_mask
@@ -508,7 +518,7 @@ def main() -> None:
         save_3d_with_ref(classic_mask, ref_img, case_out / "cow_seg_classic.nii.gz", dtype=np.uint8)
         save_3d_with_ref(ensemble_mask, ref_img, case_out / "cow_seg_ensemble.nii.gz", dtype=np.uint8)
 
-    if not args.keep_temp:
+    if (not args.classic_only) and (not args.keep_temp):
         shutil.rmtree(tmp_root, ignore_errors=True)
 
     print("Case:", case_id)

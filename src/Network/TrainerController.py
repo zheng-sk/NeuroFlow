@@ -155,6 +155,7 @@ class TrainerController:
                 min_lr=self.lr_min,
             )
         self._reset_metric_storage()
+        self._shape_align_warned = False
 
     def _reset_metric_storage(self):
         self.metric_sums = {k: 0.0 for k in self.metric_keys}
@@ -168,6 +169,57 @@ class TrainerController:
         if self.metric_counts[key] == 0:
             return 0.0
         return self.metric_sums[key] / self.metric_counts[key]
+
+    @staticmethod
+    def _crop_front_5d(tensor, target_shape):
+        tx, ty, tz = target_shape
+        return tensor[:, :, :tx, :ty, :tz]
+
+    @staticmethod
+    def _crop_front_4d(tensor, target_shape):
+        tx, ty, tz = target_shape
+        return tensor[:, :tx, :ty, :tz]
+
+    def _align_spatial_shapes(self, y_true, y_pred, mask):
+        """
+        Align y_true/y_pred/mask spatial sizes by front-cropping to their common
+        minimum size. This is needed when HR dims are not exact multiples of LR
+        dims (e.g., 99 vs 100 with res_increase=2 in full-volume validation).
+        """
+        if y_true.ndim != 5 or y_pred.ndim != 5 or mask.ndim != 4:
+            return y_true, y_pred, mask
+
+        target_shape = (
+            min(int(y_true.shape[2]), int(y_pred.shape[2]), int(mask.shape[1])),
+            min(int(y_true.shape[3]), int(y_pred.shape[3]), int(mask.shape[2])),
+            min(int(y_true.shape[4]), int(y_pred.shape[4]), int(mask.shape[3])),
+        )
+        if min(target_shape) <= 0:
+            raise ValueError(
+                f"Invalid tensor shapes for metric alignment: "
+                f"y_true={tuple(y_true.shape)}, y_pred={tuple(y_pred.shape)}, mask={tuple(mask.shape)}"
+            )
+
+        needs_crop = (
+            tuple(y_true.shape[2:5]) != target_shape
+            or tuple(y_pred.shape[2:5]) != target_shape
+            or tuple(mask.shape[1:4]) != target_shape
+        )
+        if not needs_crop:
+            return y_true, y_pred, mask
+
+        if not self._shape_align_warned:
+            print(
+                "Warning: aligning prediction/target/mask shapes by front-cropping "
+                f"to {target_shape}. Original shapes: "
+                f"y_true={tuple(y_true.shape)}, y_pred={tuple(y_pred.shape)}, mask={tuple(mask.shape)}"
+            )
+            self._shape_align_warned = True
+
+        y_true = self._crop_front_5d(y_true, target_shape)
+        y_pred = self._crop_front_5d(y_pred, target_shape)
+        mask = self._crop_front_4d(mask, target_shape)
+        return y_true, y_pred, mask
 
     def save_latest_model(self, epoch):
         if epoch > 0 and epoch % 10 == 0:
@@ -515,12 +567,15 @@ class TrainerController:
             )
         else:
             predictions = self.model(u, v, w, u_mag, v_mag, w_mag)
+
+        hires, predictions, mask = self._align_spatial_shapes(hires, predictions, mask)
         self.calculate_and_update_metrics(hires, predictions, mask, "val")
         if return_visuals:
             return predictions, (u, v, w, u_mag, hires, mask)
         return predictions
 
     def calculate_and_update_metrics(self, hires, predictions, mask, metric_set):
+        hires, predictions, mask = self._align_spatial_shapes(hires, predictions, mask)
         total_loss, mse, divloss, mag_mse = self.loss_function(hires, predictions, mask)
         rel_error, _vel_rel_error, mag_rel_error = self.accuracy_function(hires, predictions, mask)
 

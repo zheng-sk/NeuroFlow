@@ -61,8 +61,16 @@ def run_case(args: argparse.Namespace, patient_dir: Path) -> int:
         str(args.time_axis),
         "--mask-threshold",
         str(args.mask_threshold),
+        "--angio-mode",
+        str(args.angio_mode),
         "--speed-percentile",
         str(args.speed_percentile),
+        "--mag-projection-method",
+        str(args.mag_projection_method),
+        "--mag-projection-percentile",
+        str(args.mag_projection_percentile),
+        "--mag-projection-topk",
+        str(args.mag_projection_topk),
         "--classic-sigmas",
         args.classic_sigmas,
         "--classic-percentile",
@@ -170,7 +178,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-axis", type=int, default=-1, help="Time axis in input NIfTI.")
     parser.add_argument("--mask-path", type=Path, default=None, help="Optional external mask path.")
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold.")
+    parser.add_argument(
+        "--angio-mode",
+        choices=["mag_speed", "mag_only"],
+        default="mag_speed",
+        help="How to build the 3D angio input for segmentation.",
+    )
     parser.add_argument("--speed-percentile", type=float, default=90.0, help="Percentile over speed(t) for angiography.")
+    parser.add_argument(
+        "--mag-projection-method",
+        choices=["median", "max", "percentile", "topk_mean"],
+        default="percentile",
+        help="Temporal projection method for MAG when --angio-mode mag_only.",
+    )
+    parser.add_argument(
+        "--mag-projection-percentile",
+        type=float,
+        default=95.0,
+        help="Percentile used when --mag-projection-method percentile.",
+    )
+    parser.add_argument(
+        "--mag-projection-topk",
+        type=int,
+        default=3,
+        help="Top-k used when --mag-projection-method topk_mean.",
+    )
 
     parser.add_argument("--classic-sigmas", default="1,2,3,4", help="Comma-separated sigmas for frangi/sato.")
     parser.add_argument("--classic-percentile", type=float, default=95.0, help="Percentile threshold over vesselness.")

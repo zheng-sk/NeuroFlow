@@ -131,6 +131,23 @@ def parse_sigmas(sigmas_str: str):
     return values
 
 
+def temporal_projection(vol4d: np.ndarray, method: str = "max", percentile: float = 95.0, topk: int = 3) -> np.ndarray:
+    if vol4d.ndim != 4:
+        raise ValueError(f"Expected 4D volume for temporal projection, got shape={vol4d.shape}")
+    if method == "median":
+        return np.median(vol4d, axis=3)
+    if method == "max":
+        return np.max(vol4d, axis=3)
+    if method == "percentile":
+        return np.percentile(vol4d, percentile, axis=3)
+    if method == "topk_mean":
+        k = int(max(1, min(topk, vol4d.shape[3])))
+        part = np.partition(vol4d, vol4d.shape[3] - k, axis=3)
+        topk_vals = part[..., -k:]
+        return np.mean(topk_vals, axis=3)
+    raise ValueError(f"Unsupported temporal projection method: {method}")
+
+
 def remove_small_components(mask: np.ndarray, min_size: int, connectivity: int = 1) -> np.ndarray:
     if min_size <= 0:
         return mask.astype(bool)
@@ -178,40 +195,17 @@ def compute_angiography_from_patient(
     mask_path: Path | None,
     mask_threshold: float,
     speed_percentile: float,
+    angio_mode: str,
+    mag_projection_method: str,
+    mag_projection_percentile: float,
+    mag_projection_topk: int,
 ):
     mag_path = patient_dir / mag_name
-    vx_path = patient_dir / vx_name
-    vy_path = patient_dir / vy_name
-    vz_path = patient_dir / vz_name
-
-    for p in [mag_path, vx_path, vy_path, vz_path]:
-        if not p.exists():
-            raise FileNotFoundError(f"Missing required file: {p}")
+    if not mag_path.exists():
+        raise FileNotFoundError(f"Missing required file: {mag_path}")
 
     mag_img = nib.load(str(mag_path))
-    vx_img = nib.load(str(vx_path))
-    vy_img = nib.load(str(vy_path))
-    vz_img = nib.load(str(vz_path))
-
     mag4d = ensure_time_last(np.asarray(mag_img.dataobj, dtype=np.float32), time_axis)
-    vx4d_raw = ensure_time_last(np.asarray(vx_img.dataobj, dtype=np.float32), time_axis)
-    vy4d_raw = ensure_time_last(np.asarray(vy_img.dataobj, dtype=np.float32), time_axis)
-    vz4d_raw = ensure_time_last(np.asarray(vz_img.dataobj, dtype=np.float32), time_axis)
-
-    if not (mag4d.shape == vx4d_raw.shape == vy4d_raw.shape == vz4d_raw.shape):
-        raise ValueError(
-            "Shape mismatch:\n"
-            f"MAG {mag4d.shape}\n"
-            f"Vx  {vx4d_raw.shape}\n"
-            f"Vy  {vy4d_raw.shape}\n"
-            f"Vz  {vz4d_raw.shape}"
-        )
-
-    # Keep repository sign convention from upstream DICOM->NIfTI; no extra CoW-stage U/V flip.
-    vx4d = convert_raw_to_velocity_repo_style(vx4d_raw, venc, invert_sign=False)
-    vy4d = convert_raw_to_velocity_repo_style(vy4d_raw, venc, invert_sign=False)
-    vz4d = convert_raw_to_velocity_repo_style(vz4d_raw, venc, invert_sign=False)
-    speed4d = np.sqrt(vx4d * vx4d + vy4d * vy4d + vz4d * vz4d).astype(np.float32)
 
     if mask_path is not None:
         analysis_mask = load_mask_aligned(mask_path, mag_img, mask_threshold)
@@ -219,10 +213,51 @@ def compute_angiography_from_patient(
         analysis_mask = np.ones(mag4d.shape[:3], dtype=np.float32)
     analysis_mask_bool = analysis_mask > 0
 
-    mag_med = np.median(mag4d, axis=3).astype(np.float32)
-    speed_proj = np.percentile(speed4d, speed_percentile, axis=3).astype(np.float32)
+    if angio_mode == "mag_only":
+        mag_proj = temporal_projection(
+            mag4d,
+            method=mag_projection_method,
+            percentile=mag_projection_percentile,
+            topk=mag_projection_topk,
+        ).astype(np.float32)
+        angio_3d = robust_norm_in_mask(mag_proj, analysis_mask).astype(np.float32)
+    elif angio_mode == "mag_speed":
+        vx_path = patient_dir / vx_name
+        vy_path = patient_dir / vy_name
+        vz_path = patient_dir / vz_name
+        for p in [vx_path, vy_path, vz_path]:
+            if not p.exists():
+                raise FileNotFoundError(f"Missing required file for mag_speed mode: {p}")
 
-    angio_3d = (robust_norm_in_mask(mag_med, analysis_mask) * robust_norm_in_mask(speed_proj, analysis_mask)).astype(np.float32)
+        vx_img = nib.load(str(vx_path))
+        vy_img = nib.load(str(vy_path))
+        vz_img = nib.load(str(vz_path))
+        vx4d_raw = ensure_time_last(np.asarray(vx_img.dataobj, dtype=np.float32), time_axis)
+        vy4d_raw = ensure_time_last(np.asarray(vy_img.dataobj, dtype=np.float32), time_axis)
+        vz4d_raw = ensure_time_last(np.asarray(vz_img.dataobj, dtype=np.float32), time_axis)
+
+        if not (mag4d.shape == vx4d_raw.shape == vy4d_raw.shape == vz4d_raw.shape):
+            raise ValueError(
+                "Shape mismatch:\n"
+                f"MAG {mag4d.shape}\n"
+                f"Vx  {vx4d_raw.shape}\n"
+                f"Vy  {vy4d_raw.shape}\n"
+                f"Vz  {vz4d_raw.shape}"
+            )
+
+        # Keep repository sign convention from upstream DICOM->NIfTI; no extra CoW-stage U/V flip.
+        vx4d = convert_raw_to_velocity_repo_style(vx4d_raw, venc, invert_sign=False)
+        vy4d = convert_raw_to_velocity_repo_style(vy4d_raw, venc, invert_sign=False)
+        vz4d = convert_raw_to_velocity_repo_style(vz4d_raw, venc, invert_sign=False)
+        speed4d = np.sqrt(vx4d * vx4d + vy4d * vy4d + vz4d * vz4d).astype(np.float32)
+
+        mag_med = np.median(mag4d, axis=3).astype(np.float32)
+        speed_proj = np.percentile(speed4d, speed_percentile, axis=3).astype(np.float32)
+        angio_3d = (
+            robust_norm_in_mask(mag_med, analysis_mask) * robust_norm_in_mask(speed_proj, analysis_mask)
+        ).astype(np.float32)
+    else:
+        raise ValueError(f"Unsupported --angio-mode: {angio_mode}")
 
     return {
         "mag_img": mag_img,
@@ -410,7 +445,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-axis", type=int, default=-1, help="Time axis in input NIfTI.")
     parser.add_argument("--mask-path", type=Path, default=None, help="Optional external mask path.")
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold.")
+    parser.add_argument(
+        "--angio-mode",
+        choices=["mag_speed", "mag_only"],
+        default="mag_speed",
+        help="How to build the angio-like 3D volume: MAG*speed proxy (default) or MAG-only temporal projection.",
+    )
     parser.add_argument("--speed-percentile", type=float, default=90.0, help="Percentile over speed(t) for angiography.")
+    parser.add_argument(
+        "--mag-projection-method",
+        choices=["median", "max", "percentile", "topk_mean"],
+        default="percentile",
+        help="Temporal projection method for MAG when --angio-mode mag_only.",
+    )
+    parser.add_argument(
+        "--mag-projection-percentile",
+        type=float,
+        default=95.0,
+        help="Percentile used when --mag-projection-method percentile.",
+    )
+    parser.add_argument(
+        "--mag-projection-topk",
+        type=int,
+        default=3,
+        help="Top-k used when --mag-projection-method topk_mean.",
+    )
 
     parser.add_argument("--no-classic-cow", action="store_true", help="Disable classic vesselness branch.")
     parser.add_argument(
@@ -463,6 +522,10 @@ def main() -> None:
         mask_path=args.mask_path,
         mask_threshold=args.mask_threshold,
         speed_percentile=args.speed_percentile,
+        angio_mode=args.angio_mode,
+        mag_projection_method=args.mag_projection_method,
+        mag_projection_percentile=args.mag_projection_percentile,
+        mag_projection_topk=args.mag_projection_topk,
     )
 
     ref_img = prep["mag_img"]
@@ -526,6 +589,7 @@ def main() -> None:
     print("Output:", case_out.resolve())
     print("Shape (x,y,z,t):", prep["mag_shape_4d"])
     print("Mask voxels:", int(np.sum(analysis_mask_bool)))
+    print("Angio mode:", args.angio_mode)
     print("Classic threshold:", classic_info["threshold"])
     print("AI voxels:", int(np.sum(ai_mask > 0)))
     print("Classic voxels:", int(classic_info["voxels"]))

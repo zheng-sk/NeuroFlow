@@ -93,6 +93,8 @@ def run_case(args: argparse.Namespace, patient_dir: Path) -> int:
 
     if args.mask_path is not None:
         cmd.extend(["--mask-path", str(args.mask_path)])
+    if args.legacy_invert_uv_sign_on_raw:
+        cmd.append("--legacy-invert-uv-sign-on-raw")
 
     if args.ai_only:
         cmd.extend(["--no-classic-cow", "--ensemble-mode", "ai"])
@@ -202,6 +204,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Top-k used when --mag-projection-method topk_mean.",
+    )
+    parser.add_argument(
+        "--legacy-invert-uv-sign-on-raw",
+        action="store_true",
+        help="Legacy mode: invert U/V signs during RAW->velocity conversion in patient pipeline.",
     )
 
     parser.add_argument("--classic-sigmas", default="1,2,3,4", help="Comma-separated sigmas for frangi/sato.")

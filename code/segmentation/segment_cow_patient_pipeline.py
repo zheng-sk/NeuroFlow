@@ -199,6 +199,7 @@ def compute_angiography_from_patient(
     mag_projection_method: str,
     mag_projection_percentile: float,
     mag_projection_topk: int,
+    invert_uv_sign_on_raw: bool,
 ):
     mag_path = patient_dir / mag_name
     if not mag_path.exists():
@@ -246,8 +247,8 @@ def compute_angiography_from_patient(
             )
 
         # Keep repository sign convention from upstream DICOM->NIfTI; no extra CoW-stage U/V flip.
-        vx4d = convert_raw_to_velocity_repo_style(vx4d_raw, venc, invert_sign=False)
-        vy4d = convert_raw_to_velocity_repo_style(vy4d_raw, venc, invert_sign=False)
+        vx4d = convert_raw_to_velocity_repo_style(vx4d_raw, venc, invert_sign=invert_uv_sign_on_raw)
+        vy4d = convert_raw_to_velocity_repo_style(vy4d_raw, venc, invert_sign=invert_uv_sign_on_raw)
         vz4d = convert_raw_to_velocity_repo_style(vz4d_raw, venc, invert_sign=False)
         speed4d = np.sqrt(vx4d * vx4d + vy4d * vy4d + vz4d * vz4d).astype(np.float32)
 
@@ -470,6 +471,14 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Top-k used when --mag-projection-method topk_mean.",
     )
+    parser.add_argument(
+        "--legacy-invert-uv-sign-on-raw",
+        action="store_true",
+        help=(
+            "Legacy mode: invert U/V signs during RAW->velocity conversion "
+            "(matches older CoW patient pipeline behavior)."
+        ),
+    )
 
     parser.add_argument("--no-classic-cow", action="store_true", help="Disable classic vesselness branch.")
     parser.add_argument(
@@ -526,6 +535,7 @@ def main() -> None:
         mag_projection_method=args.mag_projection_method,
         mag_projection_percentile=args.mag_projection_percentile,
         mag_projection_topk=args.mag_projection_topk,
+        invert_uv_sign_on_raw=args.legacy_invert_uv_sign_on_raw,
     )
 
     ref_img = prep["mag_img"]
@@ -590,6 +600,7 @@ def main() -> None:
     print("Shape (x,y,z,t):", prep["mag_shape_4d"])
     print("Mask voxels:", int(np.sum(analysis_mask_bool)))
     print("Angio mode:", args.angio_mode)
+    print("Legacy invert U/V on RAW:", bool(args.legacy_invert_uv_sign_on_raw))
     print("Classic threshold:", classic_info["threshold"])
     print("AI voxels:", int(np.sum(ai_mask > 0)))
     print("Classic voxels:", int(classic_info["voxels"]))

@@ -56,6 +56,7 @@ def main() -> None:
     parser.add_argument("--cca-range", type=str, default="")
     parser.add_argument("--mu-pa-s", type=float, default=0.0035)
     parser.add_argument("--max-wall-points", type=int, default=30000)
+    parser.add_argument("--include-wss", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--roi-bbox", type=int, nargs=6, default=None, metavar=("X0", "X1", "Y0", "Y1", "Z0", "Z1"))
     parser.add_argument("--roi-json", default="")
     parser.add_argument("--report-title", default="4D Flow SR Uncertainty Quantification Report")
@@ -148,6 +149,7 @@ def main() -> None:
         str(args.mu_pa_s),
         "--max-wall-points",
         str(args.max_wall_points),
+        "--include-wss" if bool(args.include_wss) else "--no-include-wss",
         "--report-title",
         args.report_title,
     ]

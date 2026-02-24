@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import math
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -21,7 +22,7 @@ plt.rcParams.update(
 
 try:
     from scipy import stats
-    from scipy.ndimage import binary_erosion, gaussian_filter
+    from scipy.ndimage import binary_closing, binary_erosion, binary_fill_holes, distance_transform_edt, gaussian_filter, label as ndi_label
     from scipy.spatial import cKDTree
 except Exception as exc:
     raise RuntimeError(
@@ -30,6 +31,11 @@ except Exception as exc:
 
 try:
     from skimage.measure import marching_cubes
+    from skimage.morphology import skeletonize
+    try:
+        from skimage.morphology import skeletonize_3d
+    except Exception:  # pragma: no cover
+        skeletonize_3d = None
 except Exception as exc:
     raise RuntimeError("This script requires scikit-image for surface extraction metrics.") from exc
 
@@ -256,6 +262,352 @@ def _flow_rate_curves(
             plane_m = _extract_slice(m, flow_axis, s)
             q[t, s] = float(np.sum(plane_v[plane_m]) * area_mm2)
     return q
+
+
+_N26_OFFSETS = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1) if not (dx == 0 and dy == 0 and dz == 0)]
+
+
+def _pick_centerline_mask(mask_txyz: np.ndarray, mode: str, frame_index: int) -> np.ndarray:
+    if mode == "intersection":
+        return np.all(mask_txyz > 0.5, axis=0).astype(np.uint8)
+    if mode == "frame":
+        f = int(np.clip(frame_index, 0, mask_txyz.shape[0] - 1))
+        return (mask_txyz[f] > 0.5).astype(np.uint8)
+    return np.any(mask_txyz > 0.5, axis=0).astype(np.uint8)
+
+
+def _clean_centerline_mask(mask_xyz: np.ndarray, keep_components: int, closing_iters: int) -> np.ndarray:
+    m = mask_xyz > 0.5
+    if int(m.sum()) == 0:
+        raise ValueError("Centerline mask is empty.")
+
+    m = binary_fill_holes(m)
+    iters = max(0, int(closing_iters))
+    if iters > 0:
+        m = binary_closing(m, structure=np.ones((3, 3, 3), dtype=bool), iterations=iters)
+        m = binary_fill_holes(m)
+
+    labels, n_comp = ndi_label(m)
+    if n_comp <= 0:
+        raise ValueError("Mask connectivity failed: no connected components found.")
+
+    k = max(1, int(keep_components))
+    if n_comp > k:
+        sizes = np.asarray([int(np.count_nonzero(labels == i)) for i in range(1, n_comp + 1)], dtype=np.int64)
+        keep = np.argsort(sizes)[::-1][:k] + 1
+        m = np.isin(labels, keep)
+        m = binary_fill_holes(m)
+    return m.astype(np.uint8)
+
+
+def _graph_components(adj: List[List[int]]) -> List[np.ndarray]:
+    n = len(adj)
+    seen = np.zeros((n,), dtype=bool)
+    comps: List[np.ndarray] = []
+    for i in range(n):
+        if seen[i]:
+            continue
+        q = deque([i])
+        seen[i] = True
+        nodes = []
+        while q:
+            u = q.popleft()
+            nodes.append(u)
+            for v in adj[u]:
+                if not seen[v]:
+                    seen[v] = True
+                    q.append(v)
+        comps.append(np.asarray(nodes, dtype=np.int32))
+    return comps
+
+
+def _skeletonize_mask(mask_xyz: np.ndarray) -> np.ndarray:
+    m = mask_xyz > 0
+    if skeletonize_3d is not None:
+        try:
+            return skeletonize_3d(m)
+        except Exception:
+            pass
+    try:
+        return skeletonize(m, method="lee")
+    except TypeError:
+        return skeletonize(m)
+
+
+def _build_skeleton_graph(mask_xyz: np.ndarray) -> Tuple[np.ndarray, List[List[int]], np.ndarray, List[np.ndarray]]:
+    skel = _skeletonize_mask(mask_xyz)
+    pts = np.argwhere(skel > 0)
+    if pts.size == 0:
+        raise ValueError("Skeletonization produced an empty centerline.")
+
+    lut = {tuple(int(v) for v in p): i for i, p in enumerate(pts)}
+    adj: List[List[int]] = [[] for _ in range(len(pts))]
+    for i, p in enumerate(pts):
+        x, y, z = int(p[0]), int(p[1]), int(p[2])
+        for dx, dy, dz in _N26_OFFSETS:
+            j = lut.get((x + dx, y + dy, z + dz))
+            if j is None or j <= i:
+                continue
+            adj[i].append(j)
+            adj[j].append(i)
+    deg = np.asarray([len(a) for a in adj], dtype=np.int32)
+    comps = _graph_components(adj)
+    return pts.astype(np.int32), adj, deg, comps
+
+
+def _bfs_farthest(adj: List[List[int]], start: int, allowed: np.ndarray) -> Tuple[int, np.ndarray, np.ndarray]:
+    n = len(adj)
+    parent = np.full((n,), -1, dtype=np.int32)
+    dist = np.full((n,), -1, dtype=np.int32)
+    q = deque([int(start)])
+    dist[int(start)] = 0
+    far = int(start)
+    while q:
+        u = q.popleft()
+        if dist[u] > dist[far]:
+            far = u
+        for v in adj[u]:
+            if (not allowed[v]) or dist[v] >= 0:
+                continue
+            dist[v] = dist[u] + 1
+            parent[v] = u
+            q.append(v)
+    return far, parent, dist
+
+
+def _reconstruct_path(parent: np.ndarray, end: int) -> np.ndarray:
+    out = [int(end)]
+    cur = int(end)
+    while parent[cur] >= 0:
+        cur = int(parent[cur])
+        out.append(cur)
+    out.reverse()
+    return np.asarray(out, dtype=np.int32)
+
+
+def _shortest_path_bfs(adj: List[List[int]], start: int, end: int, allowed: np.ndarray) -> np.ndarray:
+    n = len(adj)
+    parent = np.full((n,), -1, dtype=np.int32)
+    seen = np.zeros((n,), dtype=bool)
+    q = deque([int(start)])
+    seen[int(start)] = True
+    found = False
+    while q:
+        u = q.popleft()
+        if u == int(end):
+            found = True
+            break
+        for v in adj[u]:
+            if (not allowed[v]) or seen[v]:
+                continue
+            seen[v] = True
+            parent[v] = u
+            q.append(v)
+    if not found:
+        raise ValueError("Could not find a valid centerline path between requested endpoints.")
+    return _reconstruct_path(parent, int(end))
+
+
+def _smooth_polyline_vox(points_xyz: np.ndarray, window: int) -> np.ndarray:
+    p = np.asarray(points_xyz, dtype=np.float64)
+    if p.shape[0] < 3:
+        return p
+    w = max(1, int(window))
+    if w <= 1:
+        return p
+    if w % 2 == 0:
+        w += 1
+    if p.shape[0] < w:
+        return p
+    k = np.ones((w,), dtype=np.float64) / float(w)
+    pad = w // 2
+    out = np.zeros_like(p)
+    for a in range(3):
+        arr = np.pad(p[:, a], (pad, pad), mode="edge")
+        out[:, a] = np.convolve(arr, k, mode="valid")
+    return out
+
+
+def _sample_centerline_planes(
+    centerline_vox: np.ndarray,
+    spacing_mm: Tuple[float, float, float],
+    n_planes: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    spacing = np.asarray(spacing_mm, dtype=np.float64)
+    pts_mm = np.asarray(centerline_vox, dtype=np.float64) * spacing[None, :]
+    if pts_mm.shape[0] < 2:
+        raise ValueError("Centerline path is too short to define perpendicular planes.")
+
+    seg = np.linalg.norm(np.diff(pts_mm, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    total = float(s[-1])
+    n = max(2, int(n_planes))
+    targets = np.linspace(0.0, total, n, dtype=np.float64)
+
+    sampled = np.zeros((n, 3), dtype=np.float64)
+    for a in range(3):
+        sampled[:, a] = np.interp(targets, s, pts_mm[:, a])
+
+    tang = np.gradient(sampled, axis=0)
+    nrm = np.linalg.norm(tang, axis=1, keepdims=True)
+    nrm[nrm < 1e-8] = 1.0
+    tang = tang / nrm
+    return sampled.astype(np.float32), tang.astype(np.float32)
+
+
+def _build_centerline_bundle(
+    mask_txyz: np.ndarray,
+    spacing_mm: Tuple[float, float, float],
+    mask_mode: str,
+    mask_frame_index: int,
+    keep_components: int,
+    closing_iters: int,
+    smooth_window: int,
+    n_planes: int,
+    start_xyz: Optional[Sequence[int]],
+    end_xyz: Optional[Sequence[int]],
+) -> Dict[str, Any]:
+    mask_3d = _pick_centerline_mask(mask_txyz, mode=str(mask_mode), frame_index=int(mask_frame_index))
+    clean_mask = _clean_centerline_mask(mask_3d, keep_components=int(keep_components), closing_iters=int(closing_iters))
+
+    pts, adj, deg, comps = _build_skeleton_graph(clean_mask)
+    comp_id = np.full((len(pts),), -1, dtype=np.int32)
+    for ci, c in enumerate(comps):
+        comp_id[c] = int(ci)
+
+    if start_xyz is not None and end_xyz is not None:
+        tree = cKDTree(pts.astype(np.float64))
+        s_idx = int(tree.query(np.asarray(start_xyz, dtype=np.float64), k=1)[1])
+        e_idx = int(tree.query(np.asarray(end_xyz, dtype=np.float64), k=1)[1])
+        if comp_id[s_idx] != comp_id[e_idx]:
+            raise ValueError("Provided centerline start/end are not in the same connected component.")
+        allowed = np.zeros((len(pts),), dtype=bool)
+        allowed[np.asarray(comps[int(comp_id[s_idx])], dtype=np.int32)] = True
+        path_idx = _shortest_path_bfs(adj, start=s_idx, end=e_idx, allowed=allowed)
+        path_mode = "user_endpoints"
+    else:
+        comp = max(comps, key=lambda x: int(x.shape[0]))
+        allowed = np.zeros((len(pts),), dtype=bool)
+        allowed[comp] = True
+        endpoints = np.asarray([i for i in comp if deg[i] == 1], dtype=np.int32)
+        start = int(endpoints[0]) if endpoints.size > 0 else int(comp[0])
+        a, _, _ = _bfs_farthest(adj, start=start, allowed=allowed)
+        b, parent, _ = _bfs_farthest(adj, start=a, allowed=allowed)
+        path_idx = _reconstruct_path(parent, end=b)
+        path_mode = "largest_component_longest_path"
+
+    if path_idx.shape[0] < 2:
+        raise ValueError("Centerline path extraction failed: path has fewer than 2 points.")
+
+    path_vox = pts[path_idx].astype(np.float32)
+    path_smooth_vox = _smooth_polyline_vox(path_vox, window=int(smooth_window)).astype(np.float32)
+    plane_points_mm, plane_normals = _sample_centerline_planes(
+        centerline_vox=path_smooth_vox,
+        spacing_mm=spacing_mm,
+        n_planes=int(n_planes),
+    )
+    plane_points_vox = (plane_points_mm / np.asarray(spacing_mm, dtype=np.float32)[None, :]).astype(np.float32)
+    return {
+        "mask_3d": clean_mask.astype(np.uint8),
+        "path_mode": str(path_mode),
+        "path_vox": path_vox,
+        "path_smooth_vox": path_smooth_vox,
+        "plane_points_mm": plane_points_mm,
+        "plane_points_vox": plane_points_vox,
+        "plane_normals": plane_normals,
+    }
+
+
+def _flow_rate_curves_centerline(
+    vel: np.ndarray,
+    mask: np.ndarray,
+    spacing_mm: Tuple[float, float, float],
+    plane_points_mm: np.ndarray,
+    plane_normals: np.ndarray,
+    slab_thickness_mm: float,
+    min_plane_voxels: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if vel.ndim != 5 or mask.ndim != 4:
+        raise ValueError(f"Expected vel [T,3,X,Y,Z] and mask [T,X,Y,Z], got {vel.shape} and {mask.shape}")
+    t_count = vel.shape[0]
+    n_planes = int(plane_points_mm.shape[0])
+    q = np.full((t_count, n_planes), np.nan, dtype=np.float32)
+    vox_counts = np.zeros((t_count, n_planes), dtype=np.int32)
+
+    spacing = np.asarray(spacing_mm, dtype=np.float64)
+    voxel_vol_mm3 = float(np.prod(spacing))
+    thickness = float(slab_thickness_mm)
+    if thickness <= 0:
+        thickness = float(np.mean(spacing))
+    half_t = 0.5 * thickness
+
+    for t in range(t_count):
+        m = mask[t] > 0.5
+        idx = np.argwhere(m)
+        if idx.size == 0:
+            continue
+        coords_mm = (idx.astype(np.float64) + 0.5) * spacing[None, :]
+        vel_vec = np.transpose(vel[t], (1, 2, 3, 0))[m].astype(np.float64)
+
+        for p in range(n_planes):
+            nvec = plane_normals[p].astype(np.float64)
+            nrm = float(np.linalg.norm(nvec))
+            if nrm < 1e-8:
+                continue
+            nvec = nvec / nrm
+            d = np.dot(coords_mm - plane_points_mm[p].astype(np.float64)[None, :], nvec)
+            sel = np.abs(d) <= half_t
+            count = int(np.count_nonzero(sel))
+            vox_counts[t, p] = count
+            if count < int(min_plane_voxels):
+                continue
+            vn = np.dot(vel_vec[sel], nvec)
+            q[t, p] = float(np.sum(vn) * voxel_vol_mm3 / thickness)
+    return q, vox_counts
+
+
+def _temporal_flow_from_sections(
+    q_curves: np.ndarray,
+    section_support: np.ndarray,
+    min_support: int,
+    aggregate: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if q_curves.ndim != 2:
+        raise ValueError(f"Expected q_curves [T,S], got {q_curves.shape}")
+    if section_support.shape != q_curves.shape:
+        raise ValueError(f"section_support shape {section_support.shape} must match q_curves {q_curves.shape}")
+
+    valid = np.where(np.sum(section_support, axis=0) >= int(min_support))[0]
+    if valid.size == 0:
+        finite_counts = np.sum(np.isfinite(q_curves), axis=0)
+        valid = np.where(finite_counts > 0)[0]
+    if valid.size == 0:
+        return np.full((q_curves.shape[0],), np.nan, dtype=np.float32), valid.astype(np.int32)
+
+    q_sel = q_curves[:, valid]
+    agg = str(aggregate).strip().lower()
+    if agg == "mean":
+        q_time = np.nanmean(q_sel, axis=1).astype(np.float32)
+    else:
+        q_time = np.nanmedian(q_sel, axis=1).astype(np.float32)
+    return q_time, valid.astype(np.int32)
+
+
+def _aggregate_flow_sections(
+    q_curves: np.ndarray,
+    section_index: np.ndarray,
+    aggregate: str,
+) -> np.ndarray:
+    if q_curves.ndim != 2:
+        raise ValueError(f"Expected q_curves [T,S], got {q_curves.shape}")
+    idx = np.asarray(section_index, dtype=np.int32)
+    if idx.size == 0:
+        return np.full((q_curves.shape[0],), np.nan, dtype=np.float32)
+    q_sel = q_curves[:, idx]
+    agg = str(aggregate).strip().lower()
+    if agg == "mean":
+        return np.nanmean(q_sel, axis=1).astype(np.float32)
+    return np.nanmedian(q_sel, axis=1).astype(np.float32)
 
 
 def _flow_rows_per_frame_slice(
@@ -1113,6 +1465,484 @@ def _save_channel_figure(
     plt.close(fig)
 
 
+def _save_centerline_overlay_figure(
+    out_path: Path,
+    mask_3d: np.ndarray,
+    centerline_vox: np.ndarray,
+    plane_points_vox: np.ndarray,
+    valid_plane_index: np.ndarray,
+) -> None:
+    m = (np.asarray(mask_3d) > 0).astype(np.float32)
+    cl = np.asarray(centerline_vox, dtype=np.float64)
+    pp = np.asarray(plane_points_vox, dtype=np.float64)
+    valid = set(int(v) for v in np.asarray(valid_plane_index, dtype=np.int32).tolist())
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+    # X projection -> YZ plane (imshow x=Z, y=Y)
+    p_yz = np.max(m, axis=0)
+    axes[0].imshow(p_yz, origin="lower", cmap="gray")
+    if cl.size > 0:
+        axes[0].plot(cl[:, 2], cl[:, 1], color="#f59e0b", linewidth=2.0, label="centerline")
+    if pp.size > 0:
+        p_valid = np.asarray([i for i in range(pp.shape[0]) if i in valid], dtype=np.int32)
+        p_invalid = np.asarray([i for i in range(pp.shape[0]) if i not in valid], dtype=np.int32)
+        if p_invalid.size > 0:
+            axes[0].scatter(pp[p_invalid, 2], pp[p_invalid, 1], s=18, c="#ef4444", label="plane (invalid)")
+        if p_valid.size > 0:
+            axes[0].scatter(pp[p_valid, 2], pp[p_valid, 1], s=20, c="#22c55e", label="plane (valid)")
+    axes[0].set_title("Projection X (YZ)")
+    axes[0].set_xlabel("Z [vox]")
+    axes[0].set_ylabel("Y [vox]")
+
+    # Y projection -> XZ plane (imshow x=Z, y=X)
+    p_xz = np.max(m, axis=1)
+    axes[1].imshow(p_xz, origin="lower", cmap="gray")
+    if cl.size > 0:
+        axes[1].plot(cl[:, 2], cl[:, 0], color="#f59e0b", linewidth=2.0)
+    if pp.size > 0:
+        p_valid = np.asarray([i for i in range(pp.shape[0]) if i in valid], dtype=np.int32)
+        p_invalid = np.asarray([i for i in range(pp.shape[0]) if i not in valid], dtype=np.int32)
+        if p_invalid.size > 0:
+            axes[1].scatter(pp[p_invalid, 2], pp[p_invalid, 0], s=18, c="#ef4444")
+        if p_valid.size > 0:
+            axes[1].scatter(pp[p_valid, 2], pp[p_valid, 0], s=20, c="#22c55e")
+    axes[1].set_title("Projection Y (XZ)")
+    axes[1].set_xlabel("Z [vox]")
+    axes[1].set_ylabel("X [vox]")
+
+    # Z projection -> XY plane (imshow x=Y, y=X)
+    p_xy = np.max(m, axis=2)
+    axes[2].imshow(p_xy, origin="lower", cmap="gray")
+    if cl.size > 0:
+        axes[2].plot(cl[:, 1], cl[:, 0], color="#f59e0b", linewidth=2.0)
+    if pp.size > 0:
+        p_valid = np.asarray([i for i in range(pp.shape[0]) if i in valid], dtype=np.int32)
+        p_invalid = np.asarray([i for i in range(pp.shape[0]) if i not in valid], dtype=np.int32)
+        if p_invalid.size > 0:
+            axes[2].scatter(pp[p_invalid, 1], pp[p_invalid, 0], s=18, c="#ef4444")
+        if p_valid.size > 0:
+            axes[2].scatter(pp[p_valid, 1], pp[p_valid, 0], s=20, c="#22c55e")
+    axes[2].set_title("Projection Z (XY)")
+    axes[2].set_xlabel("Y [vox]")
+    axes[2].set_ylabel("X [vox]")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False)
+    fig.suptitle(
+        f"Centerline selection and sampled planes (valid={len(valid)}/{int(pp.shape[0])})",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=(0, 0.06, 1, 0.95))
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def _save_centerline_3d_figure(
+    out_path: Path,
+    mask_3d: np.ndarray,
+    spacing_mm: Tuple[float, float, float],
+    centerline_vox: np.ndarray,
+    plane_points_vox: np.ndarray,
+    valid_plane_index: np.ndarray,
+    max_mask_points: int = 40000,
+) -> None:
+    m = np.asarray(mask_3d) > 0
+    if int(np.count_nonzero(m)) == 0:
+        return
+
+    spacing = np.asarray(spacing_mm, dtype=np.float64)
+    cl_mm = np.asarray(centerline_vox, dtype=np.float64) * spacing[None, :]
+    pp_mm = np.asarray(plane_points_vox, dtype=np.float64) * spacing[None, :]
+    valid = set(int(v) for v in np.asarray(valid_plane_index, dtype=np.int32).tolist())
+
+    verts = None
+    faces = None
+    try:
+        v, f, _, _ = marching_cubes(m.astype(np.float32), level=0.5, spacing=spacing_mm)
+        verts = np.asarray(v, dtype=np.float64)
+        faces = np.asarray(f, dtype=np.int32)
+        if faces.shape[0] > 90000:
+            step = int(np.ceil(faces.shape[0] / 90000.0))
+            faces = faces[::step]
+    except Exception:
+        verts = None
+        faces = None
+
+    pts_mm = None
+    if verts is None or faces is None or faces.size == 0:
+        boundary = m & (~binary_erosion(m, iterations=1))
+        pts = np.argwhere(boundary)
+        if pts.size == 0:
+            pts = np.argwhere(m)
+        if pts.size == 0:
+            return
+        if pts.shape[0] > int(max_mask_points):
+            rng = np.random.default_rng(17)
+            pick = rng.choice(pts.shape[0], size=int(max_mask_points), replace=False)
+            pts = pts[pick]
+        pts_mm = pts.astype(np.float64) * spacing[None, :]
+
+    fig = plt.figure(figsize=(8, 7))
+    ax = fig.add_subplot(111, projection="3d")
+    if verts is not None and faces is not None and faces.size > 0:
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+        mesh = Poly3DCollection(verts[faces], alpha=0.10, facecolor="#93c5fd", edgecolor="none")
+        ax.add_collection3d(mesh)
+        boundary_label = "mask surface"
+    else:
+        ax.scatter(pts_mm[:, 0], pts_mm[:, 1], pts_mm[:, 2], s=1.0, c="#9ca3af", alpha=0.18, label="mask boundary")
+        boundary_label = "mask boundary"
+
+    if cl_mm.size > 0:
+        ax.plot(cl_mm[:, 0], cl_mm[:, 1], cl_mm[:, 2], color="#f59e0b", linewidth=3.0, label="centerline")
+    if pp_mm.size > 0:
+        p_valid = np.asarray([i for i in range(pp_mm.shape[0]) if i in valid], dtype=np.int32)
+        p_invalid = np.asarray([i for i in range(pp_mm.shape[0]) if i not in valid], dtype=np.int32)
+        if p_invalid.size > 0:
+            ax.scatter(pp_mm[p_invalid, 0], pp_mm[p_invalid, 1], pp_mm[p_invalid, 2], s=18, c="#ef4444", label="plane (invalid)")
+        if p_valid.size > 0:
+            ax.scatter(pp_mm[p_valid, 0], pp_mm[p_valid, 1], pp_mm[p_valid, 2], s=22, c="#22c55e", label="plane (valid)")
+
+    if verts is not None and verts.size > 0:
+        mins = np.min(verts, axis=0)
+        maxs = np.max(verts, axis=0)
+    else:
+        mins = np.min(pts_mm, axis=0)
+        maxs = np.max(pts_mm, axis=0)
+    ranges = np.maximum(maxs - mins, 1e-3)
+    ax.set_xlim(mins[0], maxs[0])
+    ax.set_ylim(mins[1], maxs[1])
+    ax.set_zlim(mins[2], maxs[2])
+    try:
+        ax.set_box_aspect((float(ranges[0]), float(ranges[1]), float(ranges[2])))
+    except Exception:
+        pass
+
+    ax.set_xlabel("X [mm]")
+    ax.set_ylabel("Y [mm]")
+    ax.set_zlabel("Z [mm]")
+    ax.set_title(f"3D Centerline Visualization ({boundary_label})")
+    ax.view_init(elev=22, azim=42)
+    ax.legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def _orthonormal_basis_from_normal(nvec: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    n = np.asarray(nvec, dtype=np.float64)
+    n_norm = float(np.linalg.norm(n))
+    if n_norm < 1e-8:
+        return np.array([1.0, 0.0, 0.0], dtype=np.float64), np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    n = n / n_norm
+    a = np.array([1.0, 0.0, 0.0], dtype=np.float64) if abs(float(n[0])) < 0.9 else np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    u = np.cross(n, a)
+    u_norm = float(np.linalg.norm(u))
+    if u_norm < 1e-8:
+        u = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        u_norm = float(np.linalg.norm(u))
+    u = u / max(u_norm, 1e-8)
+    v = np.cross(n, u)
+    v = v / max(float(np.linalg.norm(v)), 1e-8)
+    return u, v
+
+
+def _centerline_section_geometry_rows(
+    mask_3d: np.ndarray,
+    spacing_mm: Tuple[float, float, float],
+    plane_points_mm: np.ndarray,
+    plane_normals: np.ndarray,
+    slab_thickness_mm: float,
+) -> List[Dict[str, Any]]:
+    m = np.asarray(mask_3d) > 0.5
+    idx = np.argwhere(m)
+    if idx.size == 0:
+        return []
+
+    spacing = np.asarray(spacing_mm, dtype=np.float64)
+    voxel_vol_mm3 = float(np.prod(spacing))
+    thickness = float(slab_thickness_mm)
+    if thickness <= 0:
+        thickness = float(np.mean(spacing))
+    half_t = 0.5 * thickness
+    coords_mm = (idx.astype(np.float64) + 0.5) * spacing[None, :]
+
+    dt_mm = distance_transform_edt(m, sampling=spacing_mm).astype(np.float32)
+    rows: List[Dict[str, Any]] = []
+    for p in range(int(plane_points_mm.shape[0])):
+        r0 = np.asarray(plane_points_mm[p], dtype=np.float64)
+        n = np.asarray(plane_normals[p], dtype=np.float64)
+        n_norm = float(np.linalg.norm(n))
+        if n_norm < 1e-8:
+            continue
+        n = n / n_norm
+        d = np.dot(coords_mm - r0[None, :], n)
+        sel = np.abs(d) <= half_t
+        count = int(np.count_nonzero(sel))
+        area_mm2 = float(count * voxel_vol_mm3 / thickness) if count > 0 else float("nan")
+
+        row: Dict[str, Any] = {
+            "plane_index": int(p),
+            "support_voxels": count,
+            "area_mm2": area_mm2,
+            "eq_radius_mm": float(np.sqrt(max(area_mm2, 0.0) / np.pi)) if np.isfinite(area_mm2) else float("nan"),
+            "centroid_offset_mm": float("nan"),
+            "centroid_offset_norm": float("nan"),
+            "major_sd_mm": float("nan"),
+            "minor_sd_mm": float("nan"),
+            "elongation_ratio": float("nan"),
+            "compactness_ratio": float("nan"),
+            "center_to_wall_mm": float("nan"),
+            "center_to_wall_over_eq_radius": float("nan"),
+        }
+
+        pv = np.rint((r0 / spacing) - 0.5).astype(np.int32)
+        sx, sy, sz = [int(v) for v in m.shape]
+        if (0 <= int(pv[0]) < sx) and (0 <= int(pv[1]) < sy) and (0 <= int(pv[2]) < sz) and bool(m[int(pv[0]), int(pv[1]), int(pv[2])]):
+            center_to_wall_mm = float(dt_mm[int(pv[0]), int(pv[1]), int(pv[2])])
+            row["center_to_wall_mm"] = center_to_wall_mm
+
+        if count >= 3:
+            pts = coords_mm[sel]
+            cen = np.mean(pts, axis=0)
+            offset_mm = float(np.linalg.norm(cen - r0))
+            row["centroid_offset_mm"] = offset_mm
+            if np.isfinite(row["eq_radius_mm"]) and float(row["eq_radius_mm"]) > 1e-8:
+                row["centroid_offset_norm"] = float(offset_mm / float(row["eq_radius_mm"]))
+            if np.isfinite(row["center_to_wall_mm"]) and np.isfinite(row["eq_radius_mm"]) and float(row["eq_radius_mm"]) > 1e-8:
+                row["center_to_wall_over_eq_radius"] = float(float(row["center_to_wall_mm"]) / float(row["eq_radius_mm"]))
+
+            u, v = _orthonormal_basis_from_normal(n)
+            rel = pts - r0[None, :]
+            x2 = np.stack([np.dot(rel, u), np.dot(rel, v)], axis=1)
+            cov = np.cov(x2, rowvar=False)
+            eig = np.linalg.eigvalsh(cov)
+            eig = np.sort(eig)
+            ev1 = max(float(eig[-1]), 0.0)
+            ev2 = max(float(eig[0]), 0.0)
+            major_sd = float(np.sqrt(ev1))
+            minor_sd = float(np.sqrt(ev2))
+            row["major_sd_mm"] = major_sd
+            row["minor_sd_mm"] = minor_sd
+            if minor_sd > 1e-8:
+                row["elongation_ratio"] = float(major_sd / minor_sd)
+            if major_sd > 1e-8:
+                row["compactness_ratio"] = float(minor_sd / major_sd)
+
+        rows.append(row)
+    return rows
+
+
+def _centerline_tangent_qc(plane_normals: np.ndarray) -> Dict[str, Any]:
+    n = np.asarray(plane_normals, dtype=np.float64)
+    if n.ndim != 2 or n.shape[0] < 2:
+        return {
+            "n_segments": 0,
+            "mean_angle_deg": float("nan"),
+            "p95_angle_deg": float("nan"),
+            "max_angle_deg": float("nan"),
+        }
+    dots = np.sum(n[:-1] * n[1:], axis=1)
+    dots = np.clip(dots, -1.0, 1.0)
+    ang = np.degrees(np.arccos(dots))
+    return {
+        "n_segments": int(ang.size),
+        "mean_angle_deg": float(np.mean(ang)) if ang.size > 0 else float("nan"),
+        "p95_angle_deg": float(np.quantile(ang, 0.95)) if ang.size > 0 else float("nan"),
+        "max_angle_deg": float(np.max(ang)) if ang.size > 0 else float("nan"),
+    }
+
+
+def _centerline_sign_qc(
+    q_ref_time: np.ndarray,
+    q_base_time: np.ndarray,
+    q_sr_time: np.ndarray,
+    baseline_label: str,
+    sr_label: str,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    eps = 1e-9
+    for label, q in ((baseline_label, q_base_time), (sr_label, q_sr_time)):
+        ref = np.asarray(q_ref_time, dtype=np.float64)
+        tst = np.asarray(q, dtype=np.float64)
+        valid = np.isfinite(ref) & np.isfinite(tst)
+        if int(np.count_nonzero(valid)) == 0:
+            rows.append(
+                {
+                    "method": str(label),
+                    "n_frames": 0,
+                    "pearson_r_vs_ref": float("nan"),
+                    "pearson_p_vs_ref": float("nan"),
+                    "sign_agreement_pct": float("nan"),
+                    "flip_suspected": 0,
+                }
+            )
+            continue
+        ref_v = ref[valid]
+        tst_v = tst[valid]
+        signs_ok = (np.sign(ref_v + eps) == np.sign(tst_v + eps))
+        cstats = _correlation_stats(ref_v, tst_v)
+        corr = cstats.get("pearson_r", float("nan"))
+        rows.append(
+            {
+                "method": str(label),
+                "n_frames": int(ref_v.size),
+                "pearson_r_vs_ref": float(corr),
+                "pearson_p_vs_ref": float(cstats.get("pearson_p", float("nan"))),
+                "sign_agreement_pct": float(100.0 * np.mean(signs_ok)),
+                "flip_suspected": int(bool(np.isfinite(corr) and corr < -0.2)),
+            }
+        )
+    return rows
+
+
+def _centerline_error_pvalues(
+    q_ref_curves: np.ndarray,
+    q_base_curves: np.ndarray,
+    q_sr_curves: np.ndarray,
+    valid_sections: np.ndarray,
+    peak_idx: int,
+) -> Dict[str, float]:
+    idx = np.asarray(valid_sections, dtype=np.int32)
+    if idx.size == 0:
+        idx = np.arange(q_ref_curves.shape[1], dtype=np.int32)
+
+    # Peak-frame paired errors across sections
+    ref_peak = np.asarray(q_ref_curves[peak_idx, idx], dtype=np.float64)
+    base_peak = np.asarray(q_base_curves[peak_idx, idx], dtype=np.float64)
+    sr_peak = np.asarray(q_sr_curves[peak_idx, idx], dtype=np.float64)
+    e_base_peak = np.abs(base_peak - ref_peak)
+    e_sr_peak = np.abs(sr_peak - ref_peak)
+    p_peak = _wilcoxon_p(e_base_peak.tolist(), e_sr_peak.tolist())
+
+    # Global paired errors across all frames/sections
+    ref_all = np.asarray(q_ref_curves[:, idx], dtype=np.float64).reshape(-1)
+    base_all = np.asarray(q_base_curves[:, idx], dtype=np.float64).reshape(-1)
+    sr_all = np.asarray(q_sr_curves[:, idx], dtype=np.float64).reshape(-1)
+    e_base_all = np.abs(base_all - ref_all)
+    e_sr_all = np.abs(sr_all - ref_all)
+    p_all = _wilcoxon_p(e_base_all.tolist(), e_sr_all.tolist())
+
+    return {
+        "peak_plane_abs_err_wilcoxon_p_baseline_vs_sr": float(p_peak),
+        "all_planes_abs_err_wilcoxon_p_baseline_vs_sr": float(p_all),
+        "n_peak_sections": int(np.isfinite(e_base_peak).sum() if e_base_peak.size > 0 else 0),
+        "n_all_plane_samples": int(np.isfinite(e_base_all).sum() if e_base_all.size > 0 else 0),
+    }
+
+
+def _save_centerline_sections_figure(
+    out_path: Path,
+    mask_3d: np.ndarray,
+    spacing_mm: Tuple[float, float, float],
+    plane_points_mm: np.ndarray,
+    plane_normals: np.ndarray,
+    slab_thickness_mm: float,
+    section_rows: List[Dict[str, Any]],
+    valid_plane_index: np.ndarray,
+) -> None:
+    m = np.asarray(mask_3d) > 0.5
+    idx = np.argwhere(m)
+    if idx.size == 0:
+        return
+    spacing = np.asarray(spacing_mm, dtype=np.float64)
+    coords_mm = (idx.astype(np.float64) + 0.5) * spacing[None, :]
+    thickness = float(slab_thickness_mm) if float(slab_thickness_mm) > 0 else float(np.mean(spacing))
+    half_t = 0.5 * thickness
+
+    all_idx = np.arange(int(plane_points_mm.shape[0]), dtype=np.int32)
+    valid = np.asarray(valid_plane_index, dtype=np.int32)
+    base = valid if valid.size > 0 else all_idx
+    if base.size == 0:
+        return
+    if base.size >= 3:
+        sel_idx = np.asarray([base[0], base[base.size // 2], base[-1]], dtype=np.int32)
+    elif base.size == 2:
+        sel_idx = np.asarray([base[0], base[1]], dtype=np.int32)
+    else:
+        sel_idx = np.asarray([base[0]], dtype=np.int32)
+
+    row_by_plane = {int(r["plane_index"]): r for r in section_rows}
+    fig, axes = plt.subplots(1, int(sel_idx.size), figsize=(5.2 * int(sel_idx.size), 5), squeeze=False)
+    for j, p in enumerate(sel_idx.tolist()):
+        ax = axes[0, j]
+        r0 = np.asarray(plane_points_mm[p], dtype=np.float64)
+        n = np.asarray(plane_normals[p], dtype=np.float64)
+        n_norm = float(np.linalg.norm(n))
+        if n_norm < 1e-8:
+            ax.set_title(f"Plane {int(p)} (invalid normal)")
+            ax.axis("off")
+            continue
+        n = n / n_norm
+        d = np.dot(coords_mm - r0[None, :], n)
+        sel = np.abs(d) <= half_t
+        pts = coords_mm[sel]
+        if pts.shape[0] == 0:
+            ax.set_title(f"Plane {int(p)} (no voxels)")
+            ax.axis("off")
+            continue
+        u, v = _orthonormal_basis_from_normal(n)
+        rel = pts - r0[None, :]
+        x2 = np.dot(rel, u)
+        y2 = np.dot(rel, v)
+        ax.scatter(x2, y2, s=8, c="#9ca3af", alpha=0.7)
+        ax.scatter([0.0], [0.0], s=38, c="#f59e0b", marker="x", label="centerline point")
+        cen = np.mean(pts, axis=0)
+        cen_rel = cen - r0
+        ax.scatter([float(np.dot(cen_rel, u))], [float(np.dot(cen_rel, v))], s=28, c="#10b981", marker="+", label="section centroid")
+        rr = row_by_plane.get(int(p), {})
+        el = rr.get("elongation_ratio", float("nan"))
+        off = rr.get("centroid_offset_norm", float("nan"))
+        ax.set_title(f"Plane {int(p)}  n={int(pts.shape[0])}\nelong={el:.2f}  off/r={off:.2f}")
+        ax.set_xlabel("u [mm]")
+        ax.set_ylabel("v [mm]")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, alpha=0.25, linestyle=":")
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="lower center", ncol=2, frameon=False)
+    fig.suptitle("Centerline plane sections (proximal / middle / distal)", fontsize=12)
+    fig.tight_layout(rect=(0, 0.06, 1, 0.95))
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def _save_centerline_peak_qs_figure(
+    out_path: Path,
+    q_ref_curves: np.ndarray,
+    q_base_curves: np.ndarray,
+    q_sr_curves: np.ndarray,
+    valid_sections: np.ndarray,
+    peak_idx: int,
+    ref_label: str,
+    baseline_label: str,
+    sr_label: str,
+) -> None:
+    q_ref = np.asarray(q_ref_curves[peak_idx], dtype=np.float64)
+    q_base = np.asarray(q_base_curves[peak_idx], dtype=np.float64)
+    q_sr = np.asarray(q_sr_curves[peak_idx], dtype=np.float64)
+    idx = np.asarray(valid_sections, dtype=np.int32)
+    if idx.size == 0:
+        idx = np.arange(q_ref.shape[0], dtype=np.int32)
+    x = idx.astype(np.int32)
+
+    fig = plt.figure(figsize=(10, 4.8))
+    plt.plot(x, q_ref[idx], marker="o", linewidth=2.0, label=ref_label)
+    plt.plot(x, q_base[idx], marker="o", linewidth=1.8, label=baseline_label)
+    plt.plot(x, q_sr[idx], marker="o", linewidth=1.8, label=sr_label)
+    plt.xlabel("Centerline plane index")
+    plt.ylabel("Flow rate [ml/s]")
+    plt.title(f"Flow consistency along centerline at peak frame t={int(peak_idx)}")
+    plt.grid(True, alpha=0.25, linestyle=":")
+    plt.legend()
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -1131,6 +1961,13 @@ def main() -> None:
         choices=["auto", "0", "1", "2"],
         help="Axis used for cross-sectional flow integration. Use 'auto' to select the best axis from reference flow consistency.",
     )
+    parser.add_argument(
+        "--flow-method",
+        type=str,
+        default="axis",
+        choices=["axis", "centerline"],
+        help="Flow integration mode: axis-based slices (legacy) or centerline-based orthogonal planes.",
+    )
     parser.add_argument("--selected-frame", type=int, default=0, help="Frame index (within payload) used for visual panel")
     parser.add_argument("--max-display-slices", type=int, default=8, help="Max slices per visual panel")
     parser.add_argument("--panel-cols", type=int, default=4, help="Number of columns per visual panel block")
@@ -1147,6 +1984,43 @@ def main() -> None:
         type=int,
         default=25,
         help="Min aggregated in-mask voxels per slice across all processed frames for slice-wise stats",
+    )
+    parser.add_argument(
+        "--centerline-mask-mode",
+        type=str,
+        default="union",
+        choices=["union", "intersection", "frame"],
+        help="How to derive the 3D mask used for centerline extraction from temporal masks.",
+    )
+    parser.add_argument("--centerline-mask-frame-index", type=int, default=0, help="Frame index used when --centerline-mask-mode frame")
+    parser.add_argument("--centerline-keep-components", type=int, default=1, help="Connected components kept after centerline mask cleanup")
+    parser.add_argument("--centerline-closing-iters", type=int, default=1, help="Morphological closing iterations before skeletonization")
+    parser.add_argument("--centerline-smooth-window", type=int, default=5, help="Moving-average window (voxels) used to smooth centerline path")
+    parser.add_argument("--centerline-n-planes", type=int, default=7, help="Number of orthogonal planes sampled along centerline")
+    parser.add_argument(
+        "--centerline-slab-thickness-mm",
+        type=float,
+        default=0.0,
+        help="Slab thickness used to integrate flow around each centerline plane (<=0 uses mean voxel spacing).",
+    )
+    parser.add_argument("--centerline-min-plane-voxels", type=int, default=10, help="Minimum in-mask voxels in a centerline slab to accept plane/frame flow")
+    parser.add_argument("--centerline-min-valid-support", type=int, default=10, help="Minimum total support across time to keep a centerline plane")
+    parser.add_argument("--centerline-aggregate", type=str, default="median", choices=["mean", "median"], help="Temporal aggregation across valid centerline planes")
+    parser.add_argument(
+        "--centerline-start-xyz",
+        type=int,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Optional centerline start voxel (HR xyz). Use together with --centerline-end-xyz.",
+    )
+    parser.add_argument(
+        "--centerline-end-xyz",
+        type=int,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Optional centerline end voxel (HR xyz). Use together with --centerline-start-xyz.",
     )
 
     parser.add_argument("--q-ref", type=float, default=float("nan"), help="Reference flow rate in ml/s (paper uses calibrated reference).")
@@ -1180,6 +2054,8 @@ def main() -> None:
     parser.add_argument("--report-title", default="4D Flow SR Uncertainty Quantification Report", help="Report title")
 
     args = parser.parse_args()
+    if (args.centerline_start_xyz is None) != (args.centerline_end_xyz is None):
+        raise ValueError("Use --centerline-start-xyz and --centerline-end-xyz together, or omit both.")
 
     out_dir = Path(args.out_dir).resolve()
     fig_dir = out_dir / "figures"
@@ -1356,31 +2232,126 @@ def main() -> None:
     _write_csv(metrics_dir / "table2_like_compact.csv", table2_compact, t2c_cols)
 
     # 2) Flow-rate metrics (temporal profile)
-    q_ref_curves = _flow_rate_curves(gt_phys[:, :3], mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
-    q_base_curves = _flow_rate_curves(lr_vel_phys_metrics, mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
-    q_sr_curves = _flow_rate_curves(pred_phys[:, :3], mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
-    slice_counts = _slice_voxel_counts_by_axis(mask_metrics, flow_axis=selected_flow_axis)
+    flow_method = str(args.flow_method).strip().lower()
+    flow_section_kind = "slice"
+    flow_aggregate = "mean"
+    flow_section_support = np.zeros((t_count, 0), dtype=np.int32)
+    valid_flow_sections = np.zeros((0,), dtype=np.int32)
+    centerline_bundle: Optional[Dict[str, Any]] = None
+    centerline_summary: Dict[str, Any] = {}
+    centerline_planes_rows: List[Dict[str, Any]] = []
+    centerline_overlay_name = ""
+    centerline_section_qc_rows: List[Dict[str, Any]] = []
+    centerline_sign_rows: List[Dict[str, Any]] = []
+    centerline_error_p: Dict[str, Any] = {}
+    centerline_sections_name = ""
+    centerline_peak_qs_name = ""
+    centerline_3d_name = ""
+    slab_thickness_mm = float("nan")
 
-    q_ref_time, valid_flow_slices = _temporal_flow_from_slices(
-        q_curves=q_ref_curves,
-        slice_counts=slice_counts,
-        min_voxels=int(args.mask_min_slice_voxels),
-    )
-    q_base_time, _ = _temporal_flow_from_slices(
-        q_curves=q_base_curves,
-        slice_counts=slice_counts,
-        min_voxels=int(args.mask_min_slice_voxels),
-    )
-    q_sr_time, _ = _temporal_flow_from_slices(
-        q_curves=q_sr_curves,
-        slice_counts=slice_counts,
-        min_voxels=int(args.mask_min_slice_voxels),
-    )
+    if flow_method == "centerline":
+        centerline_bundle = _build_centerline_bundle(
+            mask_txyz=mask_metrics,
+            spacing_mm=hr_spacing,
+            mask_mode=str(args.centerline_mask_mode),
+            mask_frame_index=int(args.centerline_mask_frame_index),
+            keep_components=int(args.centerline_keep_components),
+            closing_iters=int(args.centerline_closing_iters),
+            smooth_window=int(args.centerline_smooth_window),
+            n_planes=int(args.centerline_n_planes),
+            start_xyz=args.centerline_start_xyz,
+            end_xyz=args.centerline_end_xyz,
+        )
+        slab_thickness_mm = float(args.centerline_slab_thickness_mm)
+        if slab_thickness_mm <= 0:
+            slab_thickness_mm = float(np.mean(np.asarray(hr_spacing, dtype=np.float64)))
+
+        q_ref_curves, support_ref = _flow_rate_curves_centerline(
+            vel=gt_phys[:, :3],
+            mask=mask_metrics,
+            spacing_mm=hr_spacing,
+            plane_points_mm=centerline_bundle["plane_points_mm"],
+            plane_normals=centerline_bundle["plane_normals"],
+            slab_thickness_mm=slab_thickness_mm,
+            min_plane_voxels=int(args.centerline_min_plane_voxels),
+        )
+        q_base_curves, support_base = _flow_rate_curves_centerline(
+            vel=lr_vel_phys_metrics,
+            mask=mask_metrics,
+            spacing_mm=hr_spacing,
+            plane_points_mm=centerline_bundle["plane_points_mm"],
+            plane_normals=centerline_bundle["plane_normals"],
+            slab_thickness_mm=slab_thickness_mm,
+            min_plane_voxels=int(args.centerline_min_plane_voxels),
+        )
+        q_sr_curves, support_sr = _flow_rate_curves_centerline(
+            vel=pred_phys[:, :3],
+            mask=mask_metrics,
+            spacing_mm=hr_spacing,
+            plane_points_mm=centerline_bundle["plane_points_mm"],
+            plane_normals=centerline_bundle["plane_normals"],
+            slab_thickness_mm=slab_thickness_mm,
+            min_plane_voxels=int(args.centerline_min_plane_voxels),
+        )
+        flow_section_support = np.minimum(np.minimum(support_ref, support_base), support_sr).astype(np.int32)
+        flow_aggregate = str(args.centerline_aggregate)
+        q_ref_time, valid_flow_sections = _temporal_flow_from_sections(
+            q_curves=q_ref_curves,
+            section_support=flow_section_support,
+            min_support=int(args.centerline_min_valid_support),
+            aggregate=flow_aggregate,
+        )
+        q_base_time = _aggregate_flow_sections(q_base_curves, valid_flow_sections, aggregate=flow_aggregate)
+        q_sr_time = _aggregate_flow_sections(q_sr_curves, valid_flow_sections, aggregate=flow_aggregate)
+        flow_section_kind = "plane"
+
+        centerline_summary = {
+            "path_mode": str(centerline_bundle["path_mode"]),
+            "n_path_points": int(centerline_bundle["path_vox"].shape[0]),
+            "n_path_points_smoothed": int(centerline_bundle["path_smooth_vox"].shape[0]),
+            "n_planes": int(centerline_bundle["plane_points_mm"].shape[0]),
+            "n_valid_planes": int(valid_flow_sections.size),
+            "mask_mode": str(args.centerline_mask_mode),
+            "mask_frame_index": int(args.centerline_mask_frame_index),
+            "closing_iters": int(args.centerline_closing_iters),
+            "keep_components": int(args.centerline_keep_components),
+            "slab_thickness_mm": float(slab_thickness_mm),
+            "aggregate": str(flow_aggregate),
+        }
+    else:
+        q_ref_curves = _flow_rate_curves(gt_phys[:, :3], mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
+        q_base_curves = _flow_rate_curves(lr_vel_phys_metrics, mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
+        q_sr_curves = _flow_rate_curves(pred_phys[:, :3], mask_metrics, flow_axis=selected_flow_axis, spacing_mm=hr_spacing)
+        flow_section_support = _slice_voxel_counts_by_axis(mask_metrics, flow_axis=selected_flow_axis)
+        q_ref_time, valid_flow_sections = _temporal_flow_from_slices(
+            q_curves=q_ref_curves,
+            slice_counts=flow_section_support,
+            min_voxels=int(args.mask_min_slice_voxels),
+        )
+        q_base_time = _aggregate_flow_sections(q_base_curves, valid_flow_sections, aggregate=flow_aggregate)
+        q_sr_time = _aggregate_flow_sections(q_sr_curves, valid_flow_sections, aggregate=flow_aggregate)
+
+    if not np.isfinite(q_ref_time).any():
+        raise ValueError("Flow integration produced no finite reference temporal samples. Adjust ROI/flow settings.")
+    for q_arr in (q_ref_time, q_base_time, q_sr_time):
+        finite = np.isfinite(q_arr)
+        if finite.any():
+            q_arr[~finite] = float(np.nanmedian(q_arr[finite]))
 
     if np.isfinite(float(args.q_ref)):
         q_ref_scalar = float(args.q_ref)
     else:
         q_ref_scalar = float(np.median(q_ref_time[np.isfinite(q_ref_time)]))
+
+    if q_ref_time.size > 0:
+        q_ref_abs = np.abs(np.asarray(q_ref_time, dtype=np.float64))
+        if np.isfinite(q_ref_abs).any():
+            peak_idx = int(np.nanargmax(q_ref_abs))
+        else:
+            peak_idx = 0
+    else:
+        peak_idx = 0
+    peak_frame_src = int(frame_source_indices[peak_idx]) if frame_source_indices.size > peak_idx else peak_idx
 
     def flow_summary(name: str, q_time: np.ndarray, idx: np.ndarray) -> Dict[str, Any]:
         q_sel = q_time[idx]
@@ -1430,6 +2401,7 @@ def main() -> None:
             {
                 "frame_payload_index": int(t),
                 "frame_source_index": int(frame_source_indices[t]),
+                "flow_method": str(flow_method),
                 "q_ref_ml_s": float(q_ref_time[t]),
                 "q_baseline_ml_s": float(q_base_time[t]),
                 "q_sr_ml_s": float(q_sr_time[t]),
@@ -1437,12 +2409,13 @@ def main() -> None:
                 "abs_err_sr_vs_ref_ml_s": float(abs(q_sr_time[t] - q_ref_time[t])),
                 "abs_err_baseline_vs_qref_ml_s": float(abs(q_base_time[t] - q_ref_scalar)),
                 "abs_err_sr_vs_qref_ml_s": float(abs(q_sr_time[t] - q_ref_scalar)),
-                "n_slices_aggregated": int(valid_flow_slices.size),
+                "n_sections_aggregated": int(valid_flow_sections.size),
             }
         )
     flow_time_cols = [
         "frame_payload_index",
         "frame_source_index",
+        "flow_method",
         "q_ref_ml_s",
         "q_baseline_ml_s",
         "q_sr_ml_s",
@@ -1450,9 +2423,232 @@ def main() -> None:
         "abs_err_sr_vs_ref_ml_s",
         "abs_err_baseline_vs_qref_ml_s",
         "abs_err_sr_vs_qref_ml_s",
-        "n_slices_aggregated",
+        "n_sections_aggregated",
     ]
     _write_csv(metrics_dir / "flow_rate_curves_per_frame.csv", flow_time_rows, flow_time_cols)
+
+    if centerline_bundle is not None:
+        raw_pts = np.asarray(centerline_bundle["path_vox"], dtype=np.float32)
+        smooth_pts = np.asarray(centerline_bundle["path_smooth_vox"], dtype=np.float32)
+        pcount = min(raw_pts.shape[0], smooth_pts.shape[0])
+        centerline_point_rows: List[Dict[str, Any]] = []
+        for i in range(pcount):
+            centerline_point_rows.append(
+                {
+                    "point_index": int(i),
+                    "raw_x_vox": float(raw_pts[i, 0]),
+                    "raw_y_vox": float(raw_pts[i, 1]),
+                    "raw_z_vox": float(raw_pts[i, 2]),
+                    "smooth_x_vox": float(smooth_pts[i, 0]),
+                    "smooth_y_vox": float(smooth_pts[i, 1]),
+                    "smooth_z_vox": float(smooth_pts[i, 2]),
+                    "smooth_x_mm": float(smooth_pts[i, 0] * float(hr_spacing[0])),
+                    "smooth_y_mm": float(smooth_pts[i, 1] * float(hr_spacing[1])),
+                    "smooth_z_mm": float(smooth_pts[i, 2] * float(hr_spacing[2])),
+                }
+            )
+        _write_csv(
+            metrics_dir / "centerline_points.csv",
+            centerline_point_rows,
+            [
+                "point_index",
+                "raw_x_vox",
+                "raw_y_vox",
+                "raw_z_vox",
+                "smooth_x_vox",
+                "smooth_y_vox",
+                "smooth_z_vox",
+                "smooth_x_mm",
+                "smooth_y_mm",
+                "smooth_z_mm",
+            ],
+        )
+
+        plane_points_mm = np.asarray(centerline_bundle["plane_points_mm"], dtype=np.float32)
+        plane_normals = np.asarray(centerline_bundle["plane_normals"], dtype=np.float32)
+        valid_plane_set = set(int(v) for v in valid_flow_sections.tolist())
+        for t in range(t_count):
+            for p in range(int(plane_points_mm.shape[0])):
+                centerline_planes_rows.append(
+                    {
+                        "frame_payload_index": int(t),
+                        "frame_source_index": int(frame_source_indices[t]),
+                        "plane_index": int(p),
+                        "is_valid_plane": int(p in valid_plane_set),
+                        "support_voxels": int(flow_section_support[t, p]),
+                        "plane_x_mm": float(plane_points_mm[p, 0]),
+                        "plane_y_mm": float(plane_points_mm[p, 1]),
+                        "plane_z_mm": float(plane_points_mm[p, 2]),
+                        "normal_x": float(plane_normals[p, 0]),
+                        "normal_y": float(plane_normals[p, 1]),
+                        "normal_z": float(plane_normals[p, 2]),
+                        "q_ref_ml_s": float(q_ref_curves[t, p]),
+                        "q_baseline_ml_s": float(q_base_curves[t, p]),
+                        "q_sr_ml_s": float(q_sr_curves[t, p]),
+                    }
+                )
+        _write_csv(
+            metrics_dir / "flow_centerline_planes_per_frame.csv",
+            centerline_planes_rows,
+            [
+                "frame_payload_index",
+                "frame_source_index",
+                "plane_index",
+                "is_valid_plane",
+                "support_voxels",
+                "plane_x_mm",
+                "plane_y_mm",
+                "plane_z_mm",
+                "normal_x",
+                "normal_y",
+                "normal_z",
+                "q_ref_ml_s",
+                "q_baseline_ml_s",
+                "q_sr_ml_s",
+            ],
+        )
+        fig_centerline = fig_dir / "centerline_overlay.png"
+        _save_centerline_overlay_figure(
+            out_path=fig_centerline,
+            mask_3d=centerline_bundle["mask_3d"],
+            centerline_vox=centerline_bundle["path_smooth_vox"],
+            plane_points_vox=centerline_bundle["plane_points_vox"],
+            valid_plane_index=valid_flow_sections,
+        )
+        if fig_centerline.exists():
+            centerline_overlay_name = fig_centerline.name
+        fig_centerline_3d = fig_dir / "centerline_3d.png"
+        _save_centerline_3d_figure(
+            out_path=fig_centerline_3d,
+            mask_3d=centerline_bundle["mask_3d"],
+            spacing_mm=hr_spacing,
+            centerline_vox=centerline_bundle["path_smooth_vox"],
+            plane_points_vox=centerline_bundle["plane_points_vox"],
+            valid_plane_index=valid_flow_sections,
+        )
+        if fig_centerline_3d.exists():
+            centerline_3d_name = fig_centerline_3d.name
+
+        centerline_section_qc_rows = _centerline_section_geometry_rows(
+            mask_3d=centerline_bundle["mask_3d"],
+            spacing_mm=hr_spacing,
+            plane_points_mm=centerline_bundle["plane_points_mm"],
+            plane_normals=centerline_bundle["plane_normals"],
+            slab_thickness_mm=float(slab_thickness_mm),
+        )
+        valid_plane_set = set(int(v) for v in np.asarray(valid_flow_sections, dtype=np.int32).tolist())
+        for r in centerline_section_qc_rows:
+            r["is_valid_plane"] = int(int(r.get("plane_index", -1)) in valid_plane_set)
+        if centerline_section_qc_rows:
+            _write_csv(
+                metrics_dir / "centerline_section_qc.csv",
+                centerline_section_qc_rows,
+                [
+                    "plane_index",
+                    "is_valid_plane",
+                    "support_voxels",
+                    "area_mm2",
+                    "eq_radius_mm",
+                    "centroid_offset_mm",
+                    "centroid_offset_norm",
+                    "major_sd_mm",
+                    "minor_sd_mm",
+                    "elongation_ratio",
+                    "compactness_ratio",
+                    "center_to_wall_mm",
+                    "center_to_wall_over_eq_radius",
+                ],
+            )
+
+        centerline_sign_rows = _centerline_sign_qc(
+            q_ref_time=q_ref_time,
+            q_base_time=q_base_time,
+            q_sr_time=q_sr_time,
+            baseline_label=args.baseline_label,
+            sr_label=args.sr_label,
+        )
+        if centerline_sign_rows:
+            _write_csv(
+                metrics_dir / "centerline_sign_qc.csv",
+                centerline_sign_rows,
+                ["method", "n_frames", "pearson_r_vs_ref", "pearson_p_vs_ref", "sign_agreement_pct", "flip_suspected"],
+            )
+        centerline_error_p = _centerline_error_pvalues(
+            q_ref_curves=q_ref_curves,
+            q_base_curves=q_base_curves,
+            q_sr_curves=q_sr_curves,
+            valid_sections=valid_flow_sections,
+            peak_idx=int(peak_idx),
+        )
+
+        fig_sections = fig_dir / "centerline_plane_sections.png"
+        _save_centerline_sections_figure(
+            out_path=fig_sections,
+            mask_3d=centerline_bundle["mask_3d"],
+            spacing_mm=hr_spacing,
+            plane_points_mm=centerline_bundle["plane_points_mm"],
+            plane_normals=centerline_bundle["plane_normals"],
+            slab_thickness_mm=float(slab_thickness_mm),
+            section_rows=centerline_section_qc_rows,
+            valid_plane_index=valid_flow_sections,
+        )
+        if fig_sections.exists():
+            centerline_sections_name = fig_sections.name
+
+        fig_qs = fig_dir / "centerline_flow_along_vessel_peak.png"
+        _save_centerline_peak_qs_figure(
+            out_path=fig_qs,
+            q_ref_curves=q_ref_curves,
+            q_base_curves=q_base_curves,
+            q_sr_curves=q_sr_curves,
+            valid_sections=valid_flow_sections,
+            peak_idx=int(peak_idx),
+            ref_label=ref_label,
+            baseline_label=args.baseline_label,
+            sr_label=args.sr_label,
+        )
+        if fig_qs.exists():
+            centerline_peak_qs_name = fig_qs.name
+
+        tangent_qc = _centerline_tangent_qc(centerline_bundle["plane_normals"])
+        valid_geom = [r for r in centerline_section_qc_rows if int(r.get("is_valid_plane", 0)) == 1]
+        def _arr(rows: List[Dict[str, Any]], key: str) -> np.ndarray:
+            return np.asarray([float(r.get(key, float("nan"))) for r in rows], dtype=np.float64)
+
+        off_norm = _arr(valid_geom, "centroid_offset_norm")
+        elong = _arr(valid_geom, "elongation_ratio")
+        comp = _arr(valid_geom, "compactness_ratio")
+        area = _arr(valid_geom, "area_mm2")
+        wall_ratio = _arr(valid_geom, "center_to_wall_over_eq_radius")
+        wall_mm_all = _arr(centerline_section_qc_rows, "center_to_wall_mm")
+        q_ref_peak = np.asarray(q_ref_curves[peak_idx, valid_flow_sections], dtype=np.float64) if valid_flow_sections.size > 0 else np.asarray([], dtype=np.float64)
+
+        def _nmed(x: np.ndarray) -> float:
+            return float(np.nanmedian(x)) if np.isfinite(x).any() else float("nan")
+
+        centerline_summary.update(
+            {
+                "tangent_mean_angle_deg": float(tangent_qc.get("mean_angle_deg", float("nan"))),
+                "tangent_p95_angle_deg": float(tangent_qc.get("p95_angle_deg", float("nan"))),
+                "tangent_max_angle_deg": float(tangent_qc.get("max_angle_deg", float("nan"))),
+                "qc_center_offset_norm_median": _nmed(off_norm),
+                "qc_elongation_ratio_p95": float(np.nanquantile(elong, 0.95)) if np.isfinite(elong).any() else float("nan"),
+                "qc_compactness_ratio_median": _nmed(comp),
+                "qc_center_to_wall_over_eq_radius_median": _nmed(wall_ratio),
+                "qc_plane_points_inside_mask_pct": float(100.0 * np.mean(np.isfinite(wall_mm_all))) if wall_mm_all.size > 0 else float("nan"),
+                "qc_area_cv_valid_planes": float(np.nanstd(area, ddof=1) / (abs(np.nanmean(area)) + 1e-12)) if np.isfinite(area).sum() > 1 else float("nan"),
+                "qc_peak_q_cv_ref": float(np.nanstd(q_ref_peak, ddof=1) / (abs(np.nanmean(q_ref_peak)) + 1e-12)) if np.isfinite(q_ref_peak).sum() > 1 else float("nan"),
+                "qc_peak_q_range_pct_ref": float((np.nanquantile(q_ref_peak, 0.95) - np.nanquantile(q_ref_peak, 0.05)) / (abs(np.nanmedian(q_ref_peak)) + 1e-12) * 100.0)
+                if np.isfinite(q_ref_peak).sum() > 2
+                else float("nan"),
+                "qc_peak_plane_error_n": int(centerline_error_p.get("n_peak_sections", 0)),
+                "qc_all_plane_error_n": int(centerline_error_p.get("n_all_plane_samples", 0)),
+                "qc_peak_plane_abs_err_wilcoxon_p_baseline_vs_sr": float(centerline_error_p.get("peak_plane_abs_err_wilcoxon_p_baseline_vs_sr", float("nan"))),
+                "qc_all_planes_abs_err_wilcoxon_p_baseline_vs_sr": float(centerline_error_p.get("all_planes_abs_err_wilcoxon_p_baseline_vs_sr", float("nan"))),
+            }
+        )
+        if centerline_sign_rows:
+            centerline_summary["sign_qc"] = centerline_sign_rows
 
     flow_per_frame_rows: List[Dict[str, Any]] = []
     for t in range(t_count):
@@ -1463,6 +2659,7 @@ def main() -> None:
                     "frame_payload_index": int(t),
                     "frame_source_index": int(frame_source_indices[t]),
                     "method": method_name,
+                    "flow_method": str(flow_method),
                     "Q_ml_s": float(q_val),
                     "abs_err_vs_qref_ml_s": float(abs(q_val - q_ref_scalar)),
                     "abs_err_vs_ref_profile_ml_s": float(abs(q_val - ref_t)),
@@ -1472,6 +2669,7 @@ def main() -> None:
         "frame_payload_index",
         "frame_source_index",
         "method",
+        "flow_method",
         "Q_ml_s",
         "abs_err_vs_qref_ml_s",
         "abs_err_vs_ref_profile_ml_s",
@@ -1488,9 +2686,18 @@ def main() -> None:
     plt.axhline(q_ref_scalar, linestyle="--", color="black", label=f"Qref={q_ref_scalar:.3f} ml/s")
     plt.xlabel("Temporal frame index")
     plt.ylabel("Flow rate [ml/s]")
+    if flow_method == "centerline":
+        flow_title = (
+            f"Temporal flow profile (centerline, {int(valid_flow_sections.size)} valid planes, agg={flow_aggregate})"
+            f"{' [ROI bbox]' if roi_bbox is not None else ''}"
+        )
+    else:
+        flow_title = (
+            f"Temporal flow profile (axis {selected_flow_axis}, aggregated over {int(valid_flow_sections.size)} slices)"
+            f"{' [ROI bbox]' if roi_bbox is not None else ''}"
+        )
     plt.title(
-        f"Temporal flow profile (axis {selected_flow_axis}, aggregated over {int(valid_flow_slices.size)} slices)"
-        f"{' [ROI bbox]' if roi_bbox is not None else ''}"
+        flow_title
     )
     plt.legend()
     plt.tight_layout()
@@ -1832,8 +3039,6 @@ def main() -> None:
         corr_rows.append({"domain": "flow_temporal", "method": args.sr_label, **cf_sr})
 
     # Paper-like cerebrovascular metrics at peak flow (component-wise + core/wall)
-    peak_idx = int(np.argmax(np.abs(q_ref_time))) if q_ref_time.size > 0 else 0
-    peak_frame_src = int(frame_source_indices[peak_idx]) if frame_source_indices.size > peak_idx else peak_idx
     peak_mask = (mask_ref[peak_idx] > 0.5)
     core_mask = binary_erosion(peak_mask, iterations=1)
     if int(core_mask.sum()) == 0:
@@ -2089,6 +3294,8 @@ def main() -> None:
             "frame_source_indices": [int(x) for x in frame_source_indices.tolist()],
             "lr_shape_xyz": [int(x) for x in lr_norm.shape[2:]],
             "shape_XYZ": [int(x) for x in pred_norm.shape[2:]],
+            "flow_method": str(flow_method),
+            "flow_section_kind": str(flow_section_kind),
             "flow_axis": int(selected_flow_axis),
             "flow_axis_mode": str(args.flow_axis),
             "suggested_flow_axis": int(suggested_flow_axis),
@@ -2099,10 +3306,12 @@ def main() -> None:
             "wss_wilcoxon_p_abs_err": p_wss,
             "flow_reference_q_ml_s": q_ref_scalar,
             "flow_temporal_points": int(q_ref_time.shape[0]),
-            "flow_temporal_slice_count": int(valid_flow_slices.size),
+            "flow_temporal_section_count": int(valid_flow_sections.size),
             "flow_peak_frame_payload_index": int(peak_idx),
             "flow_peak_frame_source_index": int(peak_frame_src),
             "flow_axis_scores": flow_axis_scores,
+            "flow_aggregate": str(flow_aggregate),
+            "centerline": centerline_summary,
             "wss_enabled": bool(args.include_wss),
             "relative_pressure_status": "pending_vwerp_implementation",
             "correlation_rows": corr_rows,
@@ -2119,6 +3328,10 @@ def main() -> None:
             "max_display_slices": int(args.max_display_slices),
             "panel_cols": int(args.panel_cols),
             "hist_bins": int(args.hist_bins),
+            "centerline_overlay_figure": str(centerline_overlay_name),
+            "centerline_3d_figure": str(centerline_3d_name),
+            "centerline_sections_figure": str(centerline_sections_name),
+            "centerline_peak_qs_figure": str(centerline_peak_qs_name),
         },
     }
 
@@ -2221,6 +3434,31 @@ def main() -> None:
     corr_flow_tag = f'<img src="figures/{corr_flow_name}" alt="Correlation temporal flow"/>' if corr_flow_name else ""
     comp_corr_tag = f'<img src="figures/{comp_corr_name}" alt="Correlation velocity components peak"/>' if comp_corr_name else ""
     comp_ba_tag = f'<img src="figures/{comp_ba_name}" alt="Bland-Altman velocity components peak"/>' if comp_ba_name else ""
+    centerline_overlay_tag = f'<img src="figures/{centerline_overlay_name}" alt="Centerline overlay"/>' if centerline_overlay_name else ""
+    centerline_3d_tag = f'<img src="figures/{centerline_3d_name}" alt="Centerline 3D"/>' if centerline_3d_name else ""
+    centerline_sections_tag = f'<img src="figures/{centerline_sections_name}" alt="Centerline plane sections"/>' if centerline_sections_name else ""
+    centerline_peak_qs_tag = f'<img src="figures/{centerline_peak_qs_name}" alt="Centerline peak flow along vessel"/>' if centerline_peak_qs_name else ""
+    centerline_qc_cols = [
+        "plane_index",
+        "is_valid_plane",
+        "support_voxels",
+        "area_mm2",
+        "centroid_offset_norm",
+        "elongation_ratio",
+        "compactness_ratio",
+        "center_to_wall_over_eq_radius",
+    ]
+    centerline_qc_html = (
+        _html_table(fmt_rows(centerline_section_qc_rows, centerline_qc_cols, nd=6), centerline_qc_cols)
+        if centerline_section_qc_rows
+        else "<p class=\"muted\">No centerline section QC rows.</p>"
+    )
+    centerline_sign_cols = ["method", "n_frames", "pearson_r_vs_ref", "pearson_p_vs_ref", "sign_agreement_pct", "flip_suspected"]
+    centerline_sign_html = (
+        _html_table(fmt_rows(centerline_sign_rows, centerline_sign_cols, nd=6), centerline_sign_cols)
+        if centerline_sign_rows
+        else "<p class=\"muted\">No centerline sign QC rows.</p>"
+    )
     if bool(args.include_wss):
         wss_section = (
             "<h2>Paper-style Table 3 (WSS)</h2>"
@@ -2254,6 +3492,77 @@ def main() -> None:
         if bool(args.include_wss)
         else ""
     )
+    if flow_method == "centerline":
+        p_peak_planes = centerline_error_p.get("peak_plane_abs_err_wilcoxon_p_baseline_vs_sr", float("nan"))
+        p_all_planes = centerline_error_p.get("all_planes_abs_err_wilcoxon_p_baseline_vs_sr", float("nan"))
+        p_peak_txt = "nan" if not np.isfinite(float(p_peak_planes)) else f"{float(p_peak_planes):.4g}"
+        p_all_txt = "nan" if not np.isfinite(float(p_all_planes)) else f"{float(p_all_planes):.4g}"
+        centerline_exec_bullet = (
+            f"<li>Centerline plane-error p-values (baseline vs SR): peak planes <b>{p_peak_txt}</b>, "
+            f"all frame-plane samples <b>{p_all_txt}</b></li>"
+        )
+        flow_axis_bullet = (
+            f"Flow axis used for slice-wise Table-2 metrics: <b>{selected_flow_axis}</b> "
+            f"(mode: {args.flow_axis}, suggested: {suggested_flow_axis})"
+        )
+        flow_method_bullet = (
+            f"Flow method: <b>centerline</b> ({int(valid_flow_sections.size)} valid planes, agg={flow_aggregate}, "
+            f"path mode={centerline_summary.get('path_mode', 'n/a')})"
+        )
+        flow_temporal_bullet = (
+            f"Temporal flow points: <b>{int(q_ref_time.shape[0])}</b>, aggregated planes: "
+            f"<b>{int(valid_flow_sections.size)}</b>"
+        )
+        flow_diag_text = (
+            "Temporal flow is computed per frame by integrating v·n in slabs around planes orthogonal to "
+            "the extracted centerline, then aggregating valid planes."
+        )
+        flow_axis_section = ""
+        centerline_section = (
+            "<h3>Centerline Selection (Visual QC)</h3>"
+            "<p class=\"muted\">Blue transparent shape: lumen mask. Orange line: centerline path. Green points: valid flow planes. "
+            "Red points: sampled planes rejected by support threshold.</p>"
+            f"{centerline_overlay_tag}"
+            f"{centerline_3d_tag}"
+            "<h3>Centerline Plane QC</h3>"
+            "<p class=\"muted\">Check centeredness (offset_norm), compactness (elongation/compactness), and section-to-wall distance ratio.</p>"
+            f"{centerline_sections_tag}"
+            f"{centerline_qc_html}"
+            "<h3>Centerline Flow Consistency (Peak Frame)</h3>"
+            "<p class=\"muted\">Q(s) should vary smoothly along nearby planes in branch-free tubular segments. "
+            f"Wilcoxon p (|err| baseline vs SR, peak frame planes): <b>{p_peak_txt}</b>; "
+            f"all frame-plane samples: <b>{p_all_txt}</b>.</p>"
+            f"{centerline_peak_qs_tag}"
+            "<h3>Centerline Sign QC</h3>"
+            "<p class=\"muted\">Negative temporal correlation with reference may indicate inverted proximal-distal orientation.</p>"
+            f"{centerline_sign_html}"
+        )
+        saved_centerline_items = (
+            "<li><code>metrics/centerline_points.csv</code></li>"
+            "<li><code>metrics/flow_centerline_planes_per_frame.csv</code></li>"
+            "<li><code>metrics/centerline_section_qc.csv</code></li>"
+            "<li><code>metrics/centerline_sign_qc.csv</code></li>"
+            "<li><code>figures/centerline_overlay.png</code></li>"
+            "<li><code>figures/centerline_3d.png</code></li>"
+            "<li><code>figures/centerline_plane_sections.png</code></li>"
+            "<li><code>figures/centerline_flow_along_vessel_peak.png</code></li>"
+        )
+    else:
+        centerline_exec_bullet = ""
+        flow_axis_bullet = f"Flow axis used: <b>{selected_flow_axis}</b> (mode: {args.flow_axis}, suggested: {suggested_flow_axis})"
+        flow_method_bullet = "Flow method: <b>axis slices</b>"
+        flow_temporal_bullet = (
+            f"Temporal flow points: <b>{int(q_ref_time.shape[0])}</b>, aggregated slices: "
+            f"<b>{int(valid_flow_sections.size)}</b>"
+        )
+        flow_diag_text = "Temporal flow is computed per frame after aggregating cross-sectional flow across valid slices along the selected axis."
+        flow_axis_section = (
+            "<h3>Flow Axis Selection</h3>"
+            "<p class=\"muted\">Lower score is better (lower temporal relative SD, smoother profile, higher valid-flow coverage).</p>"
+            f"{flow_axis_html}"
+        )
+        centerline_section = ""
+        saved_centerline_items = ""
 
     html = f"""
 <!DOCTYPE html>
@@ -2289,8 +3598,10 @@ def main() -> None:
     <li>Temporal flow absolute error comparison (Wilcoxon p): <b>{'nan' if not np.isfinite(p_flow) else f'{p_flow:.4g}'}</b></li>
     <li>WSS absolute error comparison (Wilcoxon p): <b>{wss_summary_text}</b></li>
     <li>Flow reference value used (ml/s): <b>{q_ref_scalar:.6f}</b></li>
-    <li>Flow axis used: <b>{selected_flow_axis}</b> (mode: {args.flow_axis}, suggested: {suggested_flow_axis})</li>
-    <li>Temporal flow points: <b>{int(q_ref_time.shape[0])}</b>, aggregated slices: <b>{int(valid_flow_slices.size)}</b></li>
+    {centerline_exec_bullet}
+    <li>{flow_method_bullet}</li>
+    <li>{flow_axis_bullet}</li>
+    <li>{flow_temporal_bullet}</li>
     <li>LR magnitude channel used for visualization: <b>{args.lr_mag_channel}</b></li>
     <li>ROI mode: <b>{'enabled' if roi_info.get('enabled', False) else 'disabled'}</b>{'' if not roi_info.get('enabled', False) else f" (bbox xyz: {roi_info.get('bbox_xyz')})"}</li>
     <li>Baseline LR alignment for metrics: <b>{'upsampled to HR grid' if tuple(lr_norm.shape[2:]) != tuple(gt_norm.shape[2:]) else 'native HR size'}</b></li>
@@ -2306,10 +3617,9 @@ def main() -> None:
 
   <h2>Flow-rate Diagnostics</h2>
   <img src=\"figures/{fig_flow.name}\" alt=\"Flow profile\"/>
-  <p class=\"muted\">Temporal flow is computed per frame after aggregating cross-sectional flow across valid slices along the selected axis.</p>
-  <h3>Flow Axis Selection</h3>
-  <p class=\"muted\">Lower score is better (lower temporal relative SD, smoother profile, higher valid-flow coverage).</p>
-  {flow_axis_html}
+  <p class=\"muted\">{flow_diag_text}</p>
+  {flow_axis_section}
+  {centerline_section}
 
   <h2>Paper-style Table 2 (Representative Slices)</h2>
   <p class=\"muted\">Variables: mean/SD/skewness/kurtosis of intraluminal velocity and vorticity (aggregated over all processed frames). Location labels are voxel slice IDs along the selected flow axis.</p>
@@ -2349,6 +3659,7 @@ def main() -> None:
     <li><code>metrics/flow_metrics.csv</code></li>
     <li><code>metrics/flow_metrics_per_frame.csv</code></li>
     <li><code>metrics/flow_rate_curves_per_frame.csv</code></li>
+    {saved_centerline_items}
     {saved_wss_items}
     <li><code>metrics/geometry_temporal_surface_metrics.csv</code></li>
     <li><code>metrics/voxel_distribution_stats.csv</code></li>

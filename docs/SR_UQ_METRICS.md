@@ -43,6 +43,13 @@ A Wilcoxon signed-rank p-value compares paired RE values between baseline and SR
 
 ## 3) Flow-rate metrics
 
+Flow can be integrated in two modes:
+
+- `axis` (legacy): per slice and frame
+- `centerline`: per orthogonal plane sampled along a centerline
+
+### Axis mode
+
 Flow is integrated per slice and frame:
 
 - `Q(t, s) = sum(v_axis(t, s, in-mask voxels)) * voxel_area`
@@ -59,6 +66,31 @@ From `Q`, the report provides:
 - Percent versions normalized by `|q_ref|`
 
 A Wilcoxon p-value compares absolute flow errors of baseline vs SR.
+
+### Centerline mode
+
+Centerline mode builds a 3D vessel centerline from the mask (cleanup + skeleton + graph path),
+then samples perpendicular planes and computes:
+
+- `Q(t, p) = sum(v(t) · n_p in slab_p) * voxel_volume / slab_thickness`
+
+where `n_p` is the local centerline tangent (plane normal), and `slab_p` is a thin slab around plane `p`.
+
+Temporal flow per frame is then aggregated across valid planes (median or mean).
+
+Centerline QC artifacts exported by the report:
+
+- `figures/centerline_overlay.png` (mask + centerline + valid/invalid planes)
+- `figures/centerline_3d.png` (visualización 3D de máscara + centerline + planos)
+- `figures/centerline_plane_sections.png` (proximal/mid/distal section shape QC)
+- `figures/centerline_flow_along_vessel_peak.png` (`Q(s)` sanity check at peak frame)
+- `metrics/centerline_section_qc.csv` (offset, compactness, elongation, wall-distance ratios per plane)
+- `metrics/centerline_sign_qc.csv` (temporal sign agreement, Pearson r y p-value vs reference)
+
+Additional centerline p-values (saved in `summary_metrics.json` under `statistics.centerline`):
+
+- `qc_peak_plane_abs_err_wilcoxon_p_baseline_vs_sr`
+- `qc_all_planes_abs_err_wilcoxon_p_baseline_vs_sr`
 
 ## 4) WSS metrics (Table-3-like)
 
@@ -216,6 +248,7 @@ python code/inference/generate_sr_uq_report.py \
   --metadata-json output/uq_case0/inference_metadata.json \
   --out-dir output/uq_case0 \
   --flow-axis auto \
+  --flow-method axis \
   --selected-frame 0 \
   --max-display-slices 8 \
   --panel-cols 4 \
@@ -225,6 +258,23 @@ python code/inference/generate_sr_uq_report.py \
   --mu-pa-s 0.0035 \
   --max-wall-points 30000 \
   --report-title "4D Flow SR Uncertainty Quantification Report"
+```
+
+Centerline-based flow report:
+
+```bash
+python code/inference/generate_sr_uq_report.py \
+  --payload-npz output/uq_case0/analysis_payload.npz \
+  --metadata-json output/uq_case0/inference_metadata.json \
+  --out-dir output/uq_case0 \
+  --flow-method centerline \
+  --centerline-mask-mode union \
+  --centerline-closing-iters 1 \
+  --centerline-n-planes 7 \
+  --centerline-slab-thickness-mm 1.5 \
+  --centerline-min-plane-voxels 10 \
+  --centerline-min-valid-support 10 \
+  --centerline-aggregate median
 ```
 
 ROI-restricted report (using bbox in HR voxel coordinates):
@@ -259,6 +309,7 @@ python code/inference/select_metric_roi_bbox.py \
 Controls:
 
 - drag box handles to adjust ROI
+- live bbox info is shown on-screen (voxel bounds, voxel size, physical size in mm)
 - `Enter` or `Space` to accept
 - `Esc` to cancel
 

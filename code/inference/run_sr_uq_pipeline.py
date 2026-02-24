@@ -46,12 +46,25 @@ def main() -> None:
     parser.add_argument("--mask-threshold", type=float, default=0.5)
 
     parser.add_argument("--flow-axis", type=str, default="auto", choices=["auto", "0", "1", "2"])
+    parser.add_argument("--flow-method", type=str, default="axis", choices=["axis", "centerline"])
     parser.add_argument("--selected-frame", type=int, default=0)
     parser.add_argument("--max-display-slices", type=int, default=8)
     parser.add_argument("--panel-cols", type=int, default=4)
     parser.add_argument("--hist-bins", type=int, default=120)
     parser.add_argument("--lr-mag-channel", type=int, default=0, choices=[0, 1, 2])
     parser.add_argument("--mask-min-slice-voxels", type=int, default=25)
+    parser.add_argument("--centerline-mask-mode", type=str, default="union", choices=["union", "intersection", "frame"])
+    parser.add_argument("--centerline-mask-frame-index", type=int, default=0)
+    parser.add_argument("--centerline-keep-components", type=int, default=1)
+    parser.add_argument("--centerline-closing-iters", type=int, default=1)
+    parser.add_argument("--centerline-smooth-window", type=int, default=5)
+    parser.add_argument("--centerline-n-planes", type=int, default=7)
+    parser.add_argument("--centerline-slab-thickness-mm", type=float, default=0.0)
+    parser.add_argument("--centerline-min-plane-voxels", type=int, default=10)
+    parser.add_argument("--centerline-min-valid-support", type=int, default=10)
+    parser.add_argument("--centerline-aggregate", type=str, default="median", choices=["mean", "median"])
+    parser.add_argument("--centerline-start-xyz", type=int, nargs=3, default=None, metavar=("X", "Y", "Z"))
+    parser.add_argument("--centerline-end-xyz", type=int, nargs=3, default=None, metavar=("X", "Y", "Z"))
     parser.add_argument("--q-ref", type=float, default=float("nan"))
     parser.add_argument("--cca-range", type=str, default="")
     parser.add_argument("--mu-pa-s", type=float, default=0.0035)
@@ -62,6 +75,8 @@ def main() -> None:
     parser.add_argument("--report-title", default="4D Flow SR Uncertainty Quantification Report")
 
     args = parser.parse_args()
+    if (args.centerline_start_xyz is None) != (args.centerline_end_xyz is None):
+        raise ValueError("Use --centerline-start-xyz and --centerline-end-xyz together, or omit both.")
 
     out_dir = Path(args.out_dir).resolve()
     infer_py = str((Path(__file__).resolve().parent / "run_sr_inference_case.py"))
@@ -133,6 +148,8 @@ def main() -> None:
         str(out_dir),
         "--flow-axis",
         str(args.flow_axis),
+        "--flow-method",
+        str(args.flow_method),
         "--selected-frame",
         str(args.selected_frame),
         "--max-display-slices",
@@ -145,6 +162,26 @@ def main() -> None:
         str(args.lr_mag_channel),
         "--mask-min-slice-voxels",
         str(args.mask_min_slice_voxels),
+        "--centerline-mask-mode",
+        str(args.centerline_mask_mode),
+        "--centerline-mask-frame-index",
+        str(args.centerline_mask_frame_index),
+        "--centerline-keep-components",
+        str(args.centerline_keep_components),
+        "--centerline-closing-iters",
+        str(args.centerline_closing_iters),
+        "--centerline-smooth-window",
+        str(args.centerline_smooth_window),
+        "--centerline-n-planes",
+        str(args.centerline_n_planes),
+        "--centerline-slab-thickness-mm",
+        str(args.centerline_slab_thickness_mm),
+        "--centerline-min-plane-voxels",
+        str(args.centerline_min_plane_voxels),
+        "--centerline-min-valid-support",
+        str(args.centerline_min_valid_support),
+        "--centerline-aggregate",
+        str(args.centerline_aggregate),
         "--mu-pa-s",
         str(args.mu_pa_s),
         "--max-wall-points",
@@ -162,6 +199,12 @@ def main() -> None:
         report_cmd.extend([str(v) for v in args.roi_bbox])
     if args.roi_json:
         report_cmd.extend(["--roi-json", str(args.roi_json)])
+    if args.centerline_start_xyz and len(args.centerline_start_xyz) == 3:
+        report_cmd.append("--centerline-start-xyz")
+        report_cmd.extend([str(v) for v in args.centerline_start_xyz])
+    if args.centerline_end_xyz and len(args.centerline_end_xyz) == 3:
+        report_cmd.append("--centerline-end-xyz")
+        report_cmd.extend([str(v) for v in args.centerline_end_xyz])
 
     _run(report_cmd)
 

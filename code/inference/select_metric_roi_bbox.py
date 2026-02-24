@@ -191,6 +191,30 @@ def _build_mask_surface(mask_xyz: np.ndarray, spacing_xyz: Sequence[float]) -> "
     return surf
 
 
+def _format_bbox_overlay_text(
+    bounds_world: Sequence[float],
+    spacing_xyz: Sequence[float],
+    shape_xyz: Sequence[int],
+) -> str:
+    bx = _world_bounds_to_bbox_xyz(bounds_world, spacing_xyz=spacing_xyz, shape_xyz=shape_xyz)
+    x0, x1, y0, y1, z0, z1 = [int(v) for v in bx]
+    dx = int(x1 - x0)
+    dy = int(y1 - y0)
+    dz = int(z1 - z0)
+    sx, sy, sz = [float(v) for v in spacing_xyz]
+    mmx = dx * sx
+    mmy = dy * sy
+    mmz = dz * sz
+    vol_vox = int(dx * dy * dz)
+    return (
+        "BBox info\n"
+        f"x:[{x0},{x1}) y:[{y0},{y1}) z:[{z0},{z1})\n"
+        f"size_vox: ({dx}, {dy}, {dz})\n"
+        f"size_mm: ({mmx:.2f}, {mmy:.2f}, {mmz:.2f})\n"
+        f"volume_vox: {vol_vox}"
+    )
+
+
 def _select_bbox_3d(
     mask_xyz: np.ndarray,
     spacing_xyz: Sequence[float],
@@ -236,13 +260,57 @@ def _select_bbox_3d(
         "- Press Esc to cancel"
     )
     plotter.add_text(instructions, position="upper_left", font_size=11, color="white")
+    overlay_name = "__bbox_overlay__"
+    overlay_actor = plotter.add_text(
+        _format_bbox_overlay_text(
+            bounds_world=initial_bounds_world,
+            spacing_xyz=spacing_xyz,
+            shape_xyz=mask_xyz.shape,
+        ),
+        position="upper_right",
+        font_size=11,
+        color="yellow",
+        shadow=True,
+        name=overlay_name,
+        render=False,
+    )
 
     def _box_callback(widget_output, box_widget=None):
+        nonlocal overlay_actor
         try:
             if box_widget is not None:
                 state["bounds_world"] = _bounds_from_box_widget(box_widget)
             else:
                 state["bounds_world"] = _extract_bounds_from_widget_output(widget_output)
+            text = _format_bbox_overlay_text(
+                bounds_world=state["bounds_world"],
+                spacing_xyz=spacing_xyz,
+                shape_xyz=mask_xyz.shape,
+            )
+            if hasattr(overlay_actor, "set_text"):
+                # CornerAnnotation path (positioned text like "upper_right").
+                overlay_actor.set_text("upper_right", text)
+            elif hasattr(overlay_actor, "SetText"):
+                # VTK CornerAnnotation fallback (3 == upper_right).
+                overlay_actor.SetText(3, text)
+            elif hasattr(overlay_actor, "SetInput"):
+                # Text actor path.
+                overlay_actor.SetInput(text)
+            else:
+                # Re-add with stable name so previous overlay gets replaced, not stacked.
+                overlay_actor = plotter.add_text(
+                    text,
+                    position="upper_right",
+                    font_size=11,
+                    color="yellow",
+                    shadow=True,
+                    name=overlay_name,
+                    render=False,
+                )
+            try:
+                plotter.render()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -356,20 +424,11 @@ def _select_bbox_napari(
         face_color="yellow",
         edge_color="black",
     )
-    viewer.text_overlay.visible = True
-    viewer.text_overlay.text = (
-        "Napari ROI selection\n"
-        "- Move/Add exactly 2 points (opposite bbox corners)\n"
-        "- Enter: accept\n"
-        "- Esc: cancel/close"
-    )
 
-    @viewer.bind_key("Enter")
-    def _accept(_viewer) -> None:
-        pts = np.asarray(points.data, dtype=np.float64)
+    def _napari_bbox_from_points(points_xyz: np.ndarray) -> Tuple[int, int, int, int, int, int]:
+        pts = np.asarray(points_xyz, dtype=np.float64)
         if pts.shape[0] < 2:
-            print("[warn] Add at least 2 points to define bbox corners.")
-            return
+            return _clip_bbox_xyz(init, mask_xyz.shape)
         p0 = pts.min(axis=0)
         p1 = pts.max(axis=0)
         x0 = int(np.floor(p0[0]))
@@ -378,7 +437,38 @@ def _select_bbox_napari(
         x1 = int(np.ceil(p1[0])) + 1
         y1 = int(np.ceil(p1[1])) + 1
         z1 = int(np.ceil(p1[2])) + 1
-        state["bbox_xyz"] = _clip_bbox_xyz((x0, x1, y0, y1, z0, z1), mask_xyz.shape)
+        return _clip_bbox_xyz((x0, x1, y0, y1, z0, z1), mask_xyz.shape)
+
+    def _napari_overlay_text(points_xyz: np.ndarray) -> str:
+        x0, x1, y0, y1, z0, z1 = _napari_bbox_from_points(points_xyz)
+        dx, dy, dz = (x1 - x0), (y1 - y0), (z1 - z0)
+        sx, sy, sz = [float(v) for v in spacing_xyz]
+        return (
+            "Napari ROI selection\n"
+            "- Move/Add exactly 2 points (opposite bbox corners)\n"
+            "- Enter: accept\n"
+            "- Esc: cancel/close\n\n"
+            f"bbox_vox: x[{x0},{x1}) y[{y0},{y1}) z[{z0},{z1})\n"
+            f"size_vox: ({dx}, {dy}, {dz})\n"
+            f"size_mm: ({dx * sx:.2f}, {dy * sy:.2f}, {dz * sz:.2f})"
+        )
+
+    viewer.text_overlay.visible = True
+    viewer.text_overlay.text = _napari_overlay_text(points.data)
+
+    @points.events.data.connect
+    def _on_points_change(_event=None) -> None:
+        try:
+            viewer.text_overlay.text = _napari_overlay_text(points.data)
+        except Exception:
+            pass
+
+    @viewer.bind_key("Enter")
+    def _accept(_viewer) -> None:
+        if np.asarray(points.data).shape[0] < 2:
+            print("[warn] Add at least 2 points to define bbox corners.")
+            return
+        state["bbox_xyz"] = _napari_bbox_from_points(points.data)
         state["accepted"] = True
         _viewer.close()
 

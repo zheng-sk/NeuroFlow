@@ -7,9 +7,27 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 from scipy import stats
+try:
+    import seaborn as sns
+except Exception:  # pragma: no cover - optional style dependency
+    sns = None
 
 import generate_sr_uq_report as uq
 
+REPORT_FIG_DPI = int(getattr(uq, "REPORT_FIG_DPI", 320))
+REPORT_FONT_FAMILY = str(getattr(uq, "REPORT_FONT_FAMILY", "Times New Roman"))
+REPORT_FONT_SERIF = list(getattr(uq, "REPORT_FONT_SERIF", ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"]))
+REPORT_COLOR_REF = str(getattr(uq, "REPORT_COLOR_REF", "#009E73"))
+REPORT_COLOR_METHOD = str(getattr(uq, "REPORT_COLOR_SR", "#0072B2"))
+REPORT_COLOR_NEUTRAL = str(getattr(uq, "REPORT_COLOR_NEUTRAL", "#111827"))
+
+if sns is not None:
+    sns.set_theme(
+        style="ticks",
+        context="paper",
+        font=REPORT_FONT_FAMILY,
+        palette="colorblind",
+    )
 
 plt.rcParams.update(
     {
@@ -17,7 +35,23 @@ plt.rcParams.update(
         "axes.facecolor": "white",
         "axes.titleweight": "semibold",
         "axes.grid": False,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.linewidth": 0.8,
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "legend.frameon": False,
+        "font.family": REPORT_FONT_FAMILY,
+        "font.serif": REPORT_FONT_SERIF,
+        "mathtext.fontset": "stix",
         "font.size": 10,
+        "axes.titlesize": 11,
+        "axes.labelsize": 10,
+        "grid.color": "#d1d5db",
+        "grid.linewidth": 0.7,
+        "grid.alpha": 0.35,
+        "lines.linewidth": 1.8,
+        "savefig.dpi": REPORT_FIG_DPI,
     }
 )
 
@@ -100,12 +134,12 @@ def _table2_rows_single(
         vo = np.concatenate(vo_parts, axis=0)
 
         metric_defs = [
-            ("Mean velocity [m/s]", lambda a: float(np.mean(a)), sv),
-            ("SD velocity [m/s]", lambda a: float(np.std(a, ddof=1)) if a.size > 1 else float("nan"), sv),
+            ("Mean velocity [m/s]", uq._scipy_mean, sv),
+            ("SD velocity [m/s]", uq._scipy_std, sv),
             ("Skewness velocity", lambda a: float(stats.skew(a, bias=False)) if a.size >= 3 else float("nan"), sv),
             ("Kurtosis velocity", lambda a: float(stats.kurtosis(a, fisher=True, bias=False)) if a.size >= 4 else float("nan"), sv),
-            ("Mean vorticity [1/s]", lambda a: float(np.mean(a)), vo),
-            ("SD vorticity [1/s]", lambda a: float(np.std(a, ddof=1)) if a.size > 1 else float("nan"), vo),
+            ("Mean vorticity [1/s]", uq._scipy_mean, vo),
+            ("SD vorticity [1/s]", uq._scipy_std, vo),
             ("Skewness vorticity", lambda a: float(stats.skew(a, bias=False)) if a.size >= 3 else float("nan"), vo),
             ("Kurtosis vorticity", lambda a: float(stats.kurtosis(a, fisher=True, bias=False)) if a.size >= 4 else float("nan"), vo),
         ]
@@ -156,45 +190,67 @@ def _save_voxel_hist_single(
     mask: np.ndarray,
     bins: int,
     method_label: str,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     mask_bool = mask > 0.5
     if int(mask_bool.sum()) == 0:
         mask_bool = np.ones_like(mask, dtype=bool)
 
     channel_names = ["u", "v", "w", "mag"]
-    color = "#b91c1c"
+    color = REPORT_COLOR_METHOD
 
     fig, axes = plt.subplots(2, 2, figsize=(13, 8))
     axes_f = axes.ravel()
     rows: List[Dict[str, Any]] = []
+    channel_hist_figs: Dict[str, str] = {}
+
+    def _plot_hist_panel(ax, ch: str, vals: np.ndarray, idx_seed: int) -> None:
+        sym = ch != "mag"
+        vmin, vmax = uq._robust_range([vals], symmetric=sym, lower_q=0.5, upper_q=99.5)
+        bin_edges = np.linspace(vmin, vmax, max(20, int(bins)) + 1)
+        vv = np.asarray(vals, dtype=np.float64)
+        vv = vv[np.isfinite(vv)]
+        vv = vv[(vv >= vmin) & (vv <= vmax)]
+        vv = uq._subsample_for_plot(vv, seed=19 + idx_seed)
+        if vv.size > 0:
+            if sns is not None:
+                sns.histplot(
+                    vv,
+                    bins=bin_edges,
+                    stat="density",
+                    element="step",
+                    fill=False,
+                    linewidth=1.9,
+                    color=color,
+                    ax=ax,
+                    label=method_label,
+                )
+            else:
+                ax.hist(vv, bins=bin_edges, density=True, histtype="step", linewidth=1.9, alpha=0.95, color=color, label=method_label)
+        ax.set_title(f"{ch.upper()} in-mask voxel distribution")
+        ax.set_xlabel("Value")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.28, linestyle="-")
+        ax.legend(fontsize=8)
 
     for c, ch in enumerate(channel_names):
         ax = axes_f[c]
         vals = pred_4ch[:, c][mask_bool]
         rows.append(uq._distribution_row(ch, method_label, vals))
+        _plot_hist_panel(ax, ch, vals, c)
 
-        sym = ch != "mag"
-        vmin, vmax = uq._robust_range([vals], symmetric=sym, lower_q=0.5, upper_q=99.5)
-        bin_edges = np.linspace(vmin, vmax, max(20, int(bins)) + 1)
-
-        vv = np.asarray(vals, dtype=np.float64)
-        vv = vv[np.isfinite(vv)]
-        vv = vv[(vv >= vmin) & (vv <= vmax)]
-        vv = uq._subsample_for_plot(vv, seed=19 + c)
-        if vv.size > 0:
-            ax.hist(vv, bins=bin_edges, density=True, histtype="step", linewidth=1.7, alpha=0.95, color=color, label=method_label)
-
-        ax.set_title(f"{ch.upper()} in-mask voxel distribution")
-        ax.set_xlabel("Value")
-        ax.set_ylabel("Density")
-        ax.grid(True, alpha=0.25, linestyle=":")
-        ax.legend(fontsize=8)
+        fig_ch, ax_ch = plt.subplots(1, 1, figsize=(7.2, 4.8))
+        _plot_hist_panel(ax_ch, ch, vals, c)
+        fig_ch.tight_layout()
+        ch_name = f"pred_only_voxel_histogram_{ch}_in_mask.png"
+        fig_ch.savefig(out_path.parent / ch_name, dpi=REPORT_FIG_DPI)
+        plt.close(fig_ch)
+        channel_hist_figs[ch] = ch_name
 
     fig.suptitle("Voxel-value distribution inside vessel mask (prediction-only)", fontsize=14, y=0.995)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=220)
+    fig.savefig(out_path, dpi=REPORT_FIG_DPI)
     plt.close(fig)
-    return rows
+    return rows, channel_hist_figs
 
 
 def _flow_rows_per_frame_slice_single(
@@ -233,8 +289,8 @@ def _flow_summary_rows_per_frame_single(
                 "frame_payload_index": int(t),
                 "frame_source_index": int(frame_source_indices[t]),
                 "method": method_label,
-                "mean_Q_ml_s": float(np.mean(q_t)),
-                "MAD_Q_vs_qref_ml_s": float(np.mean(np.abs(q_t - float(q_ref_scalar)))),
+                "mean_Q_ml_s": uq._scipy_mean(q_t),
+                "MAD_Q_vs_qref_ml_s": uq._scipy_mean(np.abs(q_t - float(q_ref_scalar))),
             }
         )
     return rows
@@ -288,6 +344,14 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
+    fig_groups: Dict[str, Path] = {
+        "distribution": fig_dir / "distribution",
+        "flow": fig_dir / "flow",
+        "wss": fig_dir / "wss",
+    }
+    for p in fig_groups.values():
+        p.mkdir(parents=True, exist_ok=True)
+    rel_fig = lambda p: p.resolve().relative_to(fig_dir.resolve()).as_posix()
 
     u_txyz, aff_u, spacing_mm = _load_nifti_time_first(args.u_path, int(args.time_axis))
     v_txyz, aff_v, _ = _load_nifti_time_first(args.v_path, int(args.time_axis))
@@ -347,14 +411,15 @@ def main() -> None:
     selected_flow_axis = int(suggested_flow_axis) if args.flow_axis == "auto" else int(args.flow_axis)
 
     # 1) Voxel distributions
-    fig_voxel_hist = fig_dir / "pred_only_voxel_histogram_in_mask.png"
-    voxel_dist_rows = _save_voxel_hist_single(
+    fig_voxel_hist = fig_groups["distribution"] / "pred_only_voxel_histogram_in_mask.png"
+    voxel_dist_rows, voxel_hist_channel_figs = _save_voxel_hist_single(
         out_path=fig_voxel_hist,
         pred_4ch=pred_4ch_t,
         mask=mask_metrics,
         bins=int(args.hist_bins),
         method_label=args.method_label,
     )
+    voxel_hist_channel_figs = {k: rel_fig(fig_voxel_hist.parent / Path(v)) for k, v in voxel_hist_channel_figs.items()}
     voxel_dist_cols = ["channel", "method", "count", "mean", "std", "median", "p05", "p95", "min", "max"]
     uq._write_csv(metrics_dir / "pred_only_voxel_distribution_stats.csv", voxel_dist_rows, voxel_dist_cols)
 
@@ -409,16 +474,16 @@ def main() -> None:
     if np.isfinite(float(args.q_ref)):
         q_ref_scalar = float(args.q_ref)
     else:
-        q_ref_scalar = float(np.median(q_mean[np.isfinite(q_mean)]))
+        q_ref_scalar = uq._scipy_median(q_mean[np.isfinite(q_mean)])
 
     flow_rows = [
         {
             "method": args.method_label,
-            "mean_Q_ml_s": float(np.mean(q_mean)),
-            "MAD_Q_ml_s": float(np.mean(np.abs(q_mean - q_ref_scalar))),
-            "MAD_Q_pct_ref": 100.0 * float(np.mean(np.abs(q_mean - q_ref_scalar))) / (abs(q_ref_scalar) + 1e-12),
-            "mean_SD_Q_ml_s": float(np.mean(q_sd)),
-            "mean_SD_Q_pct_ref": 100.0 * float(np.mean(q_sd)) / (abs(q_ref_scalar) + 1e-12),
+            "mean_Q_ml_s": uq._scipy_mean(q_mean),
+            "MAD_Q_ml_s": uq._scipy_mean(np.abs(q_mean - q_ref_scalar)),
+            "MAD_Q_pct_ref": 100.0 * uq._scipy_mean(np.abs(q_mean - q_ref_scalar)) / (abs(q_ref_scalar) + 1e-12),
+            "mean_SD_Q_ml_s": uq._scipy_mean(q_sd),
+            "mean_SD_Q_pct_ref": 100.0 * uq._scipy_mean(q_sd) / (abs(q_ref_scalar) + 1e-12),
         }
     ]
     flow_cols = ["method", "mean_Q_ml_s", "MAD_Q_ml_s", "MAD_Q_pct_ref", "mean_SD_Q_ml_s", "mean_SD_Q_pct_ref"]
@@ -447,18 +512,18 @@ def main() -> None:
         ["frame_payload_index", "frame_source_index", "method", "mean_Q_ml_s", "MAD_Q_vs_qref_ml_s"],
     )
 
-    fig_flow = fig_dir / "pred_only_flow_rate_profile.png"
+    fig_flow = fig_groups["flow"] / "pred_only_flow_rate_profile.png"
     x = np.arange(q_mean.shape[0])
     fig = plt.figure(figsize=(10, 5))
-    plt.plot(x, q_mean, label=args.method_label, linewidth=2)
-    plt.fill_between(x, q_mean - q_sd, q_mean + q_sd, alpha=0.2)
-    plt.axhline(q_ref_scalar, linestyle="--", color="black", label=f"Qref={q_ref_scalar:.3f} ml/s")
+    plt.plot(x, q_mean, label=args.method_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_METHOD)
+    plt.fill_between(x, q_mean - q_sd, q_mean + q_sd, alpha=0.18, color=REPORT_COLOR_METHOD)
+    plt.axhline(q_ref_scalar, linestyle="--", color=REPORT_COLOR_NEUTRAL, linewidth=1.2, label=f"Qref={q_ref_scalar:.3f} ml/s")
     plt.xlabel(f"Slice index along axis {selected_flow_axis}")
     plt.ylabel("Flow rate [ml/s]")
     plt.title("Prediction-only flow-rate profile (mean ± SD across frames)")
     plt.legend()
     plt.tight_layout()
-    fig.savefig(fig_flow, dpi=180)
+    fig.savefig(fig_flow, dpi=REPORT_FIG_DPI)
     plt.close(fig)
 
     # 4) WSS metrics (single method)
@@ -507,7 +572,7 @@ def main() -> None:
         ["frame_payload_index", "frame_source_index", "metric", "pred", "n_pred"],
     )
 
-    fig_wss = fig_dir / "pred_only_wss_distribution.png"
+    fig_wss = fig_groups["wss"] / "pred_only_wss_distribution.png"
     fig = plt.figure(figsize=(9, 5))
     if tau_pred.size > 0:
         plt.hist(tau_pred, bins=80, alpha=0.45, density=True, label=args.method_label)
@@ -516,7 +581,7 @@ def main() -> None:
     plt.title("Prediction-only wall shear stress distribution")
     plt.legend()
     plt.tight_layout()
-    fig.savefig(fig_wss, dpi=180)
+    fig.savefig(fig_wss, dpi=REPORT_FIG_DPI)
     plt.close(fig)
 
     # 5) Geometry temporal uncertainty from prediction mask
@@ -633,6 +698,12 @@ def main() -> None:
             "geometry_summary": geom_summary,
             "roi": roi_info,
         },
+        "visualization": {
+            "voxel_histogram_overview_figure": str(rel_fig(fig_voxel_hist)),
+            "voxel_histogram_channel_figures": {k: str(v) for k, v in voxel_hist_channel_figs.items()},
+            "flow_figure": str(rel_fig(fig_flow)),
+            "wss_figure": str(rel_fig(fig_wss)),
+        },
     }
     (metrics_dir / "pred_only_summary_metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
@@ -657,6 +728,11 @@ def main() -> None:
 
     flow_html = uq._html_table(fmt_rows(flow_rows, flow_cols), flow_cols)
     voxel_dist_html = uq._html_table(fmt_rows(voxel_dist_rows, voxel_dist_cols), voxel_dist_cols)
+    voxel_hist_channel_tags = "\n".join(
+        f"<h4>Intensity Histogram {k.upper()}</h4><img src='figures/{v}' alt='Prediction-only intensity histogram {k.upper()}'/>"
+        for k, v in voxel_hist_channel_figs.items()
+    )
+    saved_voxel_hist_items = "".join([f"<li><code>figures/{v}</code></li>" for _, v in voxel_hist_channel_figs.items()])
 
     geom_html = uq._html_table(
         [
@@ -676,7 +752,7 @@ def main() -> None:
   <meta charset=\"utf-8\" />
   <title>{args.report_title}</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 24px; color: #1f2937; }}
+    body {{ font-family: 'Times New Roman', Times, serif; margin: 24px; color: #1f2937; }}
     h1, h2, h3 {{ color: #111827; }}
     .muted {{ color: #6b7280; }}
     table {{ border-collapse: collapse; width: 100%; margin: 10px 0 20px 0; font-size: 13px; }}
@@ -700,11 +776,12 @@ def main() -> None:
   </ul>
 
   <h2>Voxel Distribution Inside Mask</h2>
-  <img src=\"figures/{fig_voxel_hist.name}\" alt=\"Prediction-only in-mask voxel histograms\"/>
+  <img src=\"figures/{rel_fig(fig_voxel_hist)}\" alt=\"Prediction-only in-mask voxel histograms\"/>
+  {voxel_hist_channel_tags}
   {voxel_dist_html}
 
   <h2>Flow-rate Diagnostics</h2>
-  <img src=\"figures/{fig_flow.name}\" alt=\"Prediction-only flow profile\"/>
+  <img src=\"figures/{rel_fig(fig_flow)}\" alt=\"Prediction-only flow profile\"/>
   {flow_html}
 
   <h2>Table 2-like (Prediction-only)</h2>
@@ -713,7 +790,7 @@ def main() -> None:
 
   <h2>Table 3-like WSS (Prediction-only)</h2>
   {t3_html}
-  <img src=\"figures/{fig_wss.name}\" alt=\"Prediction-only WSS distribution\"/>
+  <img src=\"figures/{rel_fig(fig_wss)}\" alt=\"Prediction-only WSS distribution\"/>
 
   <h2>Geometry Temporal Summary</h2>
   <p class=\"muted\">{geom_note}</p>
@@ -731,6 +808,7 @@ def main() -> None:
     <li><code>metrics/pred_only_table3_wss_per_frame.csv</code></li>
     <li><code>metrics/pred_only_geometry_temporal_surface_metrics.csv</code></li>
     <li><code>metrics/pred_only_voxel_distribution_stats.csv</code></li>
+    {saved_voxel_hist_items}
     <li><code>metrics/pred_only_summary_metrics.json</code></li>
   </ul>
 </body>

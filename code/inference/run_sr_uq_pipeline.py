@@ -72,6 +72,13 @@ def main() -> None:
     parser.add_argument("--include-wss", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--roi-bbox", type=int, nargs=6, default=None, metavar=("X0", "X1", "Y0", "Y1", "Z0", "Z1"))
     parser.add_argument("--roi-json", default="")
+    parser.add_argument(
+        "--task-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "denoising", "superresolution"],
+        help="Output naming convention for report artifacts. auto maps res_increase=1 to denoising and >1 to superresolution.",
+    )
     parser.add_argument("--report-title", default="4D Flow SR Uncertainty Quantification Report")
 
     args = parser.parse_args()
@@ -187,6 +194,8 @@ def main() -> None:
         "--max-wall-points",
         str(args.max_wall_points),
         "--include-wss" if bool(args.include_wss) else "--no-include-wss",
+        "--task-mode",
+        str(args.task_mode),
         "--report-title",
         args.report_title,
     ]

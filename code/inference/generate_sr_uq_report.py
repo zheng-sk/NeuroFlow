@@ -7,8 +7,29 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import numpy as np
 import torch
+try:
+    import seaborn as sns
+except Exception:  # pragma: no cover - optional style dependency
+    sns = None
+
+REPORT_FIG_DPI = 320
+REPORT_FONT_FAMILY = "Times New Roman"
+REPORT_FONT_SERIF = ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"]
+REPORT_COLOR_REF = "#009E73"
+REPORT_COLOR_BASELINE = "#D55E00"
+REPORT_COLOR_SR = "#0072B2"
+REPORT_COLOR_NEUTRAL = "#111827"
+
+if sns is not None:
+    sns.set_theme(
+        style="ticks",
+        context="paper",
+        font=REPORT_FONT_FAMILY,
+        palette="colorblind",
+    )
 
 plt.rcParams.update(
     {
@@ -16,7 +37,23 @@ plt.rcParams.update(
         "axes.facecolor": "white",
         "axes.titleweight": "semibold",
         "axes.grid": False,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.linewidth": 0.8,
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "legend.frameon": False,
+        "font.family": REPORT_FONT_FAMILY,
+        "font.serif": REPORT_FONT_SERIF,
+        "mathtext.fontset": "stix",
         "font.size": 10,
+        "axes.titlesize": 11,
+        "axes.labelsize": 10,
+        "grid.color": "#d1d5db",
+        "grid.linewidth": 0.7,
+        "grid.alpha": 0.35,
+        "lines.linewidth": 1.8,
+        "savefig.dpi": REPORT_FIG_DPI,
     }
 )
 
@@ -76,6 +113,43 @@ def _wilcoxon_p(x: Sequence[float], y: Sequence[float]) -> float:
         return float(stats.wilcoxon(x_arr, y_arr, alternative="two-sided", zero_method="wilcox").pvalue)
     except Exception:
         return float("nan")
+
+
+def _finite_values(x: Sequence[float] | np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float64).ravel()
+    return arr[np.isfinite(arr)]
+
+
+def _scipy_mean(x: Sequence[float] | np.ndarray) -> float:
+    arr = _finite_values(x)
+    if arr.size == 0:
+        return float("nan")
+    return float(stats.tmean(arr))
+
+
+def _scipy_std(x: Sequence[float] | np.ndarray) -> float:
+    arr = _finite_values(x)
+    if arr.size < 2:
+        return float("nan")
+    return float(stats.tstd(arr))
+
+
+def _scipy_percentile(x: Sequence[float] | np.ndarray, p: float) -> float:
+    arr = _finite_values(x)
+    if arr.size == 0:
+        return float("nan")
+    return float(stats.scoreatpercentile(arr, p))
+
+
+def _scipy_median(x: Sequence[float] | np.ndarray) -> float:
+    return _scipy_percentile(x, 50.0)
+
+
+def _scipy_rmse(err: Sequence[float] | np.ndarray) -> float:
+    arr = _finite_values(err)
+    if arr.size == 0:
+        return float("nan")
+    return float(np.sqrt(stats.tmean(arr**2)))
 
 
 def _extract_slice(arr: np.ndarray, axis: int, idx: int) -> np.ndarray:
@@ -165,12 +239,12 @@ def _table2_rows(
         vo_sr = np.concatenate(vo_sr_parts, axis=0)
 
         metric_defs = [
-            ("Mean velocity [m/s]", lambda a: float(np.mean(a)), sv_ref, sv_base, sv_sr),
-            ("SD velocity [m/s]", lambda a: float(np.std(a, ddof=1)) if a.size > 1 else float("nan"), sv_ref, sv_base, sv_sr),
+            ("Mean velocity [m/s]", _scipy_mean, sv_ref, sv_base, sv_sr),
+            ("SD velocity [m/s]", _scipy_std, sv_ref, sv_base, sv_sr),
             ("Skewness velocity", _safe_skew, sv_ref, sv_base, sv_sr),
             ("Kurtosis velocity", _safe_kurtosis, sv_ref, sv_base, sv_sr),
-            ("Mean vorticity [1/s]", lambda a: float(np.mean(a)), vo_ref, vo_base, vo_sr),
-            ("SD vorticity [1/s]", lambda a: float(np.std(a, ddof=1)) if a.size > 1 else float("nan"), vo_ref, vo_base, vo_sr),
+            ("Mean vorticity [1/s]", _scipy_mean, vo_ref, vo_base, vo_sr),
+            ("SD vorticity [1/s]", _scipy_std, vo_ref, vo_base, vo_sr),
             ("Skewness vorticity", _safe_skew, vo_ref, vo_base, vo_sr),
             ("Kurtosis vorticity", _safe_kurtosis, vo_ref, vo_base, vo_sr),
         ]
@@ -237,6 +311,49 @@ def _table2_rows_per_frame(
             out_rows.append(rr)
 
     return out_rows
+
+
+def _table2_temporal_mean_rows(
+    table2_per_frame_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[int, str], Dict[str, List[float]]] = {}
+    for row in table2_per_frame_rows:
+        slice_idx = int(row.get("slice_index", -1))
+        var_name = str(row.get("variable", ""))
+        key = (slice_idx, var_name)
+        if key not in grouped:
+            grouped[key] = {
+                "ref": [],
+                "baseline": [],
+                "sr": [],
+                "re_baseline": [],
+                "re_sr": [],
+            }
+        g = grouped[key]
+        for field in ("ref", "baseline", "sr", "re_baseline", "re_sr"):
+            g[field].append(float(row.get(field, float("nan"))))
+
+    out: List[Dict[str, Any]] = []
+    for (slice_idx, var_name), vals in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
+        ref_v = _finite_values(vals["ref"])
+        base_v = _finite_values(vals["baseline"])
+        sr_v = _finite_values(vals["sr"])
+        re_base_v = _finite_values(vals["re_baseline"])
+        re_sr_v = _finite_values(vals["re_sr"])
+        n_frames = int(max(ref_v.size, base_v.size, sr_v.size, re_base_v.size, re_sr_v.size))
+        out.append(
+            {
+                "slice_index": int(slice_idx),
+                "variable": str(var_name),
+                "n_frames": int(n_frames),
+                "ref_mean_over_frames": _scipy_mean(ref_v),
+                "baseline_mean_over_frames": _scipy_mean(base_v),
+                "sr_mean_over_frames": _scipy_mean(sr_v),
+                "re_baseline_mean_over_frames": _scipy_mean(re_base_v),
+                "re_sr_mean_over_frames": _scipy_mean(re_sr_v),
+            }
+        )
+    return out
 
 
 def _flow_rate_curves(
@@ -665,14 +782,16 @@ def _flow_summary_rows_per_frame(
         sr_t = q_sr_curves[t]
 
         def _append(method: str, q_method_t: np.ndarray) -> None:
+            abs_vs_qref = np.abs(q_method_t - float(q_ref_scalar))
+            abs_vs_ref = np.abs(q_method_t - ref_t)
             rows.append(
                 {
                     "frame_payload_index": int(t),
                     "frame_source_index": int(frame_source_indices[t]),
                     "method": method,
-                    "mean_Q_ml_s": float(np.mean(q_method_t)),
-                    "MAD_Q_vs_qref_ml_s": float(np.mean(np.abs(q_method_t - float(q_ref_scalar)))),
-                    "MAD_Q_vs_ref_profile_ml_s": float(np.mean(np.abs(q_method_t - ref_t))),
+                    "mean_Q_ml_s": _scipy_mean(q_method_t),
+                    "MAD_Q_vs_qref_ml_s": _scipy_mean(abs_vs_qref),
+                    "MAD_Q_vs_ref_profile_ml_s": _scipy_mean(abs_vs_ref),
                 }
             )
 
@@ -711,7 +830,7 @@ def _temporal_flow_from_slices(
     valid_slices = np.where(slice_counts.sum(axis=0) >= int(min_voxels))[0]
     if valid_slices.size == 0:
         valid_slices = np.arange(q_curves.shape[1], dtype=np.int32)
-    q_time = np.mean(q_curves[:, valid_slices], axis=1).astype(np.float32)
+    q_time = np.asarray(stats.tmean(q_curves[:, valid_slices], axis=1), dtype=np.float32)
     return q_time, valid_slices.astype(np.int32)
 
 
@@ -745,10 +864,12 @@ def _correlation_stats(x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
         spearman_rho, spearman_p = float("nan"), float("nan")
 
     try:
-        a, b = np.polyfit(x, y, 1)
+        lr = stats.linregress(x, y)
+        a, b = float(lr.slope), float(lr.intercept)
         y_hat = a * x + b
         ss_res = float(np.sum((y - y_hat) ** 2))
-        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+        y_mean = _scipy_mean(y)
+        ss_tot = float(np.sum((y - y_mean) ** 2))
         r2 = 1.0 - (ss_res / (ss_tot + 1e-12))
     except Exception:
         a, b = float("nan"), float("nan")
@@ -763,8 +884,8 @@ def _correlation_stats(x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
         "spearman_rho": float(spearman_rho),
         "spearman_p": float(spearman_p),
         "r2_linear": float(r2),
-        "rmse": float(np.sqrt(np.mean((y - x) ** 2))),
-        "bias": float(np.mean(y - x)),
+        "rmse": _scipy_rmse(y - x),
+        "bias": _scipy_mean(y - x),
     }
 
 
@@ -796,13 +917,14 @@ def _plot_correlation_panel(
     xs = x[idx]
     ys = y[idx]
 
-    ax.scatter(xs, ys, s=6, alpha=0.22, color=color, edgecolors="none")
+    ax.scatter(xs, ys, s=20, marker="o", alpha=0.35, color=color, edgecolors="white", linewidths=0.25)
     lo, hi = _robust_range([x, y], symmetric=False, lower_q=0.2, upper_q=99.8)
-    ax.plot([lo, hi], [lo, hi], linestyle="--", color="#111827", linewidth=1.0, label="Identity")
+    ax.plot([lo, hi], [lo, hi], linestyle="--", color=REPORT_COLOR_NEUTRAL, linewidth=1.0, label="Identity")
     if x.size >= 2:
         try:
-            a, b = np.polyfit(x, y, 1)
-            ax.plot([lo, hi], [a * lo + b, a * hi + b], color="#7c3aed", linewidth=1.4, label="Linear fit")
+            lr = stats.linregress(x, y)
+            a, b = float(lr.slope), float(lr.intercept)
+            ax.plot([lo, hi], [a * lo + b, a * hi + b], color="#374151", linewidth=1.4, label="Linear fit")
         except Exception:
             pass
 
@@ -854,10 +976,10 @@ def _plot_bland_altman_panel(
     if mean_v.size > 60000:
         rng = np.random.default_rng(seed)
         idx = rng.choice(mean_v.size, size=60000, replace=False)
-    ax.scatter(mean_v[idx], diff_v[idx], s=6, alpha=0.2, edgecolors="none")
+    ax.scatter(mean_v[idx], diff_v[idx], s=20, marker="o", alpha=0.38, color="#1f2937", edgecolors="white", linewidths=0.25)
 
-    bias = float(np.mean(diff_v))
-    sd = float(np.std(diff_v, ddof=1)) if diff_v.size > 1 else float("nan")
+    bias = _scipy_mean(diff_v)
+    sd = _scipy_std(diff_v)
     loa_low = bias - 1.96 * sd if np.isfinite(sd) else float("nan")
     loa_high = bias + 1.96 * sd if np.isfinite(sd) else float("nan")
     ax.axhline(bias, color="#b91c1c", linestyle="-", linewidth=1.4, label=f"Bias={bias:.4f}")
@@ -897,17 +1019,17 @@ def _suggest_flow_axis(
         peak = float(np.max(abs_mean)) if abs_mean.size > 0 else 0.0
         threshold = max(1e-8, 0.10 * peak)
         valid = abs_mean >= threshold
-        coverage = float(np.mean(valid)) if valid.size > 0 else 0.0
+        coverage = _scipy_mean(valid.astype(np.float64)) if valid.size > 0 else 0.0
 
         if np.any(valid):
-            rel_sd = float(np.mean(q_sd[valid] / (abs_mean[valid] + 1e-8)))
+            rel_sd = _scipy_mean(q_sd[valid] / (abs_mean[valid] + 1e-8))
         else:
             rel_sd = 1e6
 
         if q_mean.size >= 3:
             d1 = np.diff(q_mean)
             d2 = np.diff(q_mean, n=2)
-            smoothness = float(np.mean(np.abs(d2)) / (np.mean(np.abs(d1)) + 1e-8))
+            smoothness = float(_scipy_mean(np.abs(d2)) / (_scipy_mean(np.abs(d1)) + 1e-8))
         else:
             smoothness = 1e6
 
@@ -1090,12 +1212,12 @@ def _wss_summary(arr: np.ndarray) -> Dict[str, float]:
         return {k: float("nan") for k in ["Maximum", "Mean", "SD", "Quantile_97_5", "Median", "Quantile_2_5", "IQR_75_25"]}
     return {
         "Maximum": float(np.max(arr)),
-        "Mean": float(np.mean(arr)),
-        "SD": float(np.std(arr, ddof=1)) if arr.size > 1 else float("nan"),
-        "Quantile_97_5": float(np.quantile(arr, 0.975)),
-        "Median": float(np.median(arr)),
-        "Quantile_2_5": float(np.quantile(arr, 0.025)),
-        "IQR_75_25": float(np.quantile(arr, 0.75) - np.quantile(arr, 0.25)),
+        "Mean": _scipy_mean(arr),
+        "SD": _scipy_std(arr),
+        "Quantile_97_5": _scipy_percentile(arr, 97.5),
+        "Median": _scipy_median(arr),
+        "Quantile_2_5": _scipy_percentile(arr, 2.5),
+        "IQR_75_25": float(stats.iqr(arr, rng=(25, 75), nan_policy="omit")),
     }
 
 
@@ -1124,9 +1246,9 @@ def _surface_distance_metrics(mask_a: np.ndarray, mask_b: np.ndarray, spacing_mm
     d_ba = ta.query(vb, k=1)[0]
 
     return {
-        "mean_surface_distance_a_to_b_mm": float(np.mean(d_ab)),
-        "std_surface_distance_a_to_b_mm": float(np.std(d_ab, ddof=1)) if d_ab.size > 1 else float("nan"),
-        "symmetric_mean_surface_distance_mm": float(0.5 * (np.mean(d_ab) + np.mean(d_ba))),
+        "mean_surface_distance_a_to_b_mm": _scipy_mean(d_ab),
+        "std_surface_distance_a_to_b_mm": _scipy_std(d_ab),
+        "symmetric_mean_surface_distance_mm": float(0.5 * (_scipy_mean(d_ab) + _scipy_mean(d_ba))),
         "hausdorff_distance_mm": float(max(np.max(d_ab), np.max(d_ba))),
     }
 
@@ -1236,6 +1358,13 @@ def _html_table(rows: List[Dict[str, Any]], columns: Sequence[str]) -> str:
     return f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def _rel_fig_path(path: Path, fig_root: Path) -> str:
+    try:
+        return path.resolve().relative_to(fig_root.resolve()).as_posix()
+    except Exception:
+        return path.name
+
+
 def _autodetect_reference_label(metadata: Dict[str, Any]) -> str:
     try:
         hr_u = str(metadata.get("case_paths", {}).get("hr_u", "")).lower()
@@ -1246,6 +1375,62 @@ def _autodetect_reference_label(metadata: Dict[str, Any]) -> str:
     if "7t" in hr_u:
         return "7T"
     return "Reference"
+
+
+def _extract_res_increase(metadata: Dict[str, Any], payload: Dict[str, np.ndarray]) -> Optional[int]:
+    try:
+        if "res_increase" in metadata:
+            res_meta = int(metadata["res_increase"])
+            if res_meta >= 1:
+                return res_meta
+    except Exception:
+        pass
+
+    try:
+        lr_shape = np.asarray(payload.get("lr_norm", np.empty((0, 0, 0, 0, 0)))).shape
+        gt_shape = np.asarray(payload.get("gt_norm", np.empty((0, 0, 0, 0, 0)))).shape
+        if len(lr_shape) >= 5 and len(gt_shape) >= 5:
+            lr_xyz = np.asarray(lr_shape[-3:], dtype=np.float64)
+            gt_xyz = np.asarray(gt_shape[-3:], dtype=np.float64)
+            if np.all(lr_xyz > 0):
+                ratios = gt_xyz / lr_xyz
+                if np.all(np.isfinite(ratios)):
+                    ratio_med = float(np.median(ratios))
+                    ratio_round = int(np.round(ratio_med))
+                    if ratio_round >= 1 and np.max(np.abs(ratios - ratio_round)) <= 0.15:
+                        return ratio_round
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_task_mode(
+    task_mode_arg: str,
+    metadata: Dict[str, Any],
+    payload: Dict[str, np.ndarray],
+) -> Tuple[str, str, Optional[int]]:
+    arg = str(task_mode_arg or "auto").strip().lower()
+    if arg not in {"auto", "denoising", "superresolution"}:
+        arg = "auto"
+
+    detected_res = _extract_res_increase(metadata=metadata, payload=payload)
+    if arg == "denoising":
+        mode_tag = "denoising"
+    elif arg == "superresolution":
+        mode_tag = "superresolution"
+    else:
+        mode_tag = "denoising" if detected_res == 1 else "superresolution"
+
+    if mode_tag == "denoising":
+        base_label = "Denoising"
+    else:
+        base_label = "Superresolution"
+
+    if detected_res is not None:
+        mode_label = f"{base_label} (res_increase={detected_res})"
+    else:
+        mode_label = f"{base_label} (res_increase=unknown)"
+    return mode_tag, mode_label, detected_res
 
 
 def _robust_range(
@@ -1285,6 +1470,41 @@ def _robust_range(
     return vmin, vmax
 
 
+def _sync_axis_limits(
+    axes: Sequence[Any],
+    axis: str = "y",
+    symmetric: bool = False,
+    pad_ratio: float = 0.05,
+) -> None:
+    if axis not in ("x", "y"):
+        raise ValueError(f"Unsupported axis: {axis}")
+
+    bounds: List[Tuple[float, float]] = []
+    for ax in axes:
+        lo, hi = ax.get_ylim() if axis == "y" else ax.get_xlim()
+        if np.isfinite(lo) and np.isfinite(hi):
+            bounds.append((float(lo), float(hi)))
+    if not bounds:
+        return
+
+    lo = min(b[0] for b in bounds)
+    hi = max(b[1] for b in bounds)
+    if symmetric:
+        lim = max(abs(lo), abs(hi))
+        lo, hi = -lim, lim
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo, hi = -1.0, 1.0
+
+    pad = max(1e-6, (hi - lo) * float(pad_ratio))
+    lo -= pad
+    hi += pad
+    for ax in axes:
+        if axis == "y":
+            ax.set_ylim(lo, hi)
+        else:
+            ax.set_xlim(lo, hi)
+
+
 def _subsample_for_plot(x: np.ndarray, max_samples: int = 350000, seed: int = 11) -> np.ndarray:
     if x.size <= int(max_samples):
         return x
@@ -1314,11 +1534,11 @@ def _distribution_row(channel: str, method: str, values: np.ndarray) -> Dict[str
         "channel": channel,
         "method": method,
         "count": int(v.size),
-        "mean": float(np.mean(v)),
-        "std": float(np.std(v, ddof=1)) if v.size > 1 else float("nan"),
-        "median": float(np.median(v)),
-        "p05": float(np.quantile(v, 0.05)),
-        "p95": float(np.quantile(v, 0.95)),
+        "mean": _scipy_mean(v),
+        "std": _scipy_std(v),
+        "median": _scipy_median(v),
+        "p05": _scipy_percentile(v, 5.0),
+        "p95": _scipy_percentile(v, 95.0),
         "min": float(np.min(v)),
         "max": float(np.max(v)),
     }
@@ -1334,17 +1554,55 @@ def _save_voxel_histograms(
     baseline_label: str,
     sr_label: str,
     ref_label: str,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     mask_bool = mask > 0.5
     if int(mask_bool.sum()) == 0:
         mask_bool = np.ones_like(mask, dtype=bool)
 
     channel_names = ["u", "v", "w", "mag"]
-    colors = {"ref": "#111827", "base": "#1d4ed8", "sr": "#b91c1c"}
+    colors = {"ref": REPORT_COLOR_REF, "base": REPORT_COLOR_BASELINE, "sr": REPORT_COLOR_SR}
 
     fig, axes = plt.subplots(2, 2, figsize=(13, 8))
     axes_f = axes.ravel()
     rows: List[Dict[str, Any]] = []
+    channel_hist_figs: Dict[str, str] = {}
+
+    def _plot_hist_panel(ax, ch: str, ref_vals: np.ndarray, base_vals: np.ndarray, sr_vals: np.ndarray, idx_seed: int) -> None:
+        sym = ch != "mag"
+        vmin, vmax = _robust_range([ref_vals, base_vals, sr_vals], symmetric=sym, lower_q=0.5, upper_q=99.5)
+        bin_edges = np.linspace(vmin, vmax, max(20, int(bins)) + 1)
+        for vals, label, color, sseed in [
+            (ref_vals, ref_label, colors["ref"], 21 + idx_seed),
+            (base_vals, baseline_label, colors["base"], 31 + idx_seed),
+            (sr_vals, sr_label, colors["sr"], 41 + idx_seed),
+        ]:
+            vv = np.asarray(vals, dtype=np.float64)
+            vv = vv[np.isfinite(vv)]
+            if vv.size == 0:
+                continue
+            vv = vv[(vv >= vmin) & (vv <= vmax)]
+            vv = _subsample_for_plot(vv, seed=sseed)
+            if vv.size == 0:
+                continue
+            if sns is not None:
+                sns.histplot(
+                    vv,
+                    bins=bin_edges,
+                    stat="density",
+                    element="step",
+                    fill=False,
+                    linewidth=1.9,
+                    color=color,
+                    ax=ax,
+                    label=label,
+                )
+            else:
+                ax.hist(vv, bins=bin_edges, density=True, histtype="step", linewidth=1.9, alpha=0.95, color=color, label=label)
+        ax.set_title(f"{ch.upper()} in-mask voxel distribution")
+        ax.set_xlabel("Normalized value")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.28, linestyle="-")
+        ax.legend(fontsize=8)
 
     for c, ch in enumerate(channel_names):
         ax = axes_f[c]
@@ -1355,37 +1613,21 @@ def _save_voxel_histograms(
         rows.append(_distribution_row(ch, ref_label, ref_vals))
         rows.append(_distribution_row(ch, baseline_label, base_vals))
         rows.append(_distribution_row(ch, sr_label, sr_vals))
+        _plot_hist_panel(ax, ch, ref_vals, base_vals, sr_vals, c)
 
-        sym = ch != "mag"
-        vmin, vmax = _robust_range([ref_vals, base_vals, sr_vals], symmetric=sym, lower_q=0.5, upper_q=99.5)
-        bin_edges = np.linspace(vmin, vmax, max(20, int(bins)) + 1)
-
-        for vals, label, color, sseed in [
-            (ref_vals, ref_label, colors["ref"], 21 + c),
-            (base_vals, baseline_label, colors["base"], 31 + c),
-            (sr_vals, sr_label, colors["sr"], 41 + c),
-        ]:
-            vv = np.asarray(vals, dtype=np.float64)
-            vv = vv[np.isfinite(vv)]
-            if vv.size == 0:
-                continue
-            vv = vv[(vv >= vmin) & (vv <= vmax)]
-            vv = _subsample_for_plot(vv, seed=sseed)
-            if vv.size == 0:
-                continue
-            ax.hist(vv, bins=bin_edges, density=True, histtype="step", linewidth=1.7, alpha=0.95, color=color, label=label)
-
-        ax.set_title(f"{ch.upper()} in-mask voxel distribution")
-        ax.set_xlabel("Normalized value")
-        ax.set_ylabel("Density")
-        ax.grid(True, alpha=0.25, linestyle=":")
-        ax.legend(fontsize=8)
+        fig_ch, ax_ch = plt.subplots(1, 1, figsize=(7.2, 4.8))
+        _plot_hist_panel(ax_ch, ch, ref_vals, base_vals, sr_vals, c)
+        fig_ch.tight_layout()
+        ch_name = f"voxel_histogram_{ch}_in_mask.png"
+        fig_ch.savefig(out_path.parent / ch_name, dpi=REPORT_FIG_DPI)
+        plt.close(fig_ch)
+        channel_hist_figs[ch] = ch_name
 
     fig.suptitle("Voxel-value distribution inside vessel mask", fontsize=14, y=0.995)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=220)
+    fig.savefig(out_path, dpi=REPORT_FIG_DPI)
     plt.close(fig)
-    return rows
+    return rows, channel_hist_figs
 
 
 def _save_channel_figure(
@@ -1461,8 +1703,782 @@ def _save_channel_figure(
     region_name = "ROI bbox" if bbox_xyz is not None else "Full volume"
     fig.suptitle(f"{region_name} comparison: {ch_name}  |  value range [{vmin:.3f}, {vmax:.3f}]  |  error p99.5={emax:.3f}", fontsize=13, y=0.995)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=220)
+    fig.savefig(out_path, dpi=REPORT_FIG_DPI)
     plt.close(fig)
+
+
+def _region_label(region_name: str) -> str:
+    name = str(region_name).strip().lower()
+    if name == "core":
+        return "Core"
+    if name == "wall":
+        return "Wall"
+    if name == "intraluminal":
+        return "Intraluminal"
+    return name.replace("_", " ").title()
+
+
+def _metric_label(domain: str, component: str = "") -> str:
+    d = str(domain or "").strip()
+    c = str(component or "").strip()
+    if d == "speed_intraluminal":
+        base = "Speed (Intraluminal)"
+    elif d == "flow_temporal":
+        base = "Flow (Temporal)"
+    elif d == "velocity_component_peak":
+        base = "Velocity Peak"
+    elif d == "velocity_component_all_frames":
+        base = "Velocity Components (All Frames)"
+    else:
+        base = d.replace("_", " ").title()
+    if c and c.lower() not in {"nan", "none"}:
+        return f"{base} ({c})"
+    return base
+
+
+def _save_publication_figures(
+    fig_dir: Path,
+    baseline_label: str,
+    sr_label: str,
+    ref_label: str,
+    peak_speed_rows: List[Dict[str, Any]],
+    mean_speed_rows: List[Dict[str, Any]],
+    table2_all_rows: List[Dict[str, Any]],
+    table2_temporal_mean_rows: List[Dict[str, Any]],
+    corr_rows: List[Dict[str, Any]],
+    voxel_dist_rows: List[Dict[str, Any]],
+    pvalue_rows: List[Dict[str, Any]],
+    q_ref_time: np.ndarray,
+    q_base_time: np.ndarray,
+    q_sr_time: np.ndarray,
+    frame_source_indices: np.ndarray,
+) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    method_colors = {baseline_label: REPORT_COLOR_BASELINE, sr_label: REPORT_COLOR_SR}
+    voxel_colors = {ref_label: REPORT_COLOR_REF, baseline_label: REPORT_COLOR_BASELINE, sr_label: REPORT_COLOR_SR}
+
+    # 1) Combined panel: mean vs peak velocity errors (MAE, RMSE).
+    speed_regions_pref = ["core", "wall", "intraluminal"]
+    region_seen: List[str] = []
+    for r in mean_speed_rows + peak_speed_rows:
+        rr = str(r.get("region", "")).strip().lower()
+        if rr and rr not in region_seen:
+            region_seen.append(rr)
+    region_order = [r for r in speed_regions_pref if r in region_seen] + [r for r in region_seen if r not in speed_regions_pref]
+    metric_types: List[Tuple[str, List[Dict[str, Any]]]] = [
+        ("Temporal Mean (All Frames)", mean_speed_rows),
+        ("Systolic Peak (Peak Frame)", peak_speed_rows),
+    ]
+    err_metrics: List[Tuple[str, str]] = [("mae", "MAE"), ("rmse", "RMSE")]
+    if region_order:
+        fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.5), sharey="row")
+        for col, (metric_type, source_rows) in enumerate(metric_types):
+            for row_i, (metric_key, metric_name) in enumerate(err_metrics):
+                ax = axes[row_i, col]
+                x = np.arange(len(region_order), dtype=np.float64)
+                width = 0.36
+                any_valid = False
+                for j, method_name in enumerate([baseline_label, sr_label]):
+                    vals: List[float] = []
+                    for region in region_order:
+                        vv = [
+                            float(rr.get(metric_key, float("nan")))
+                            for rr in source_rows
+                            if str(rr.get("method", "")) == method_name and str(rr.get("region", "")).strip().lower() == region
+                        ]
+                        vals.append(_scipy_mean(vv))
+                    bars = ax.bar(
+                        x + (j - 0.5) * width,
+                        [0.0 if not np.isfinite(v) else v for v in vals],
+                        width=width,
+                        color=method_colors[method_name],
+                        edgecolor="#111827",
+                        linewidth=0.8,
+                        label=method_name,
+                        alpha=0.90,
+                    )
+                    for k, v in enumerate(vals):
+                        if not np.isfinite(v):
+                            bars[k].set_alpha(0.12)
+                    any_valid = any_valid or any(np.isfinite(v) for v in vals)
+                if any_valid:
+                    ax.set_xticks(x)
+                    ax.set_xticklabels([_region_label(r) for r in region_order], rotation=0)
+                    ax.set_title(f"{metric_name} | {metric_type}")
+                    ax.set_ylabel("Error [m/s]")
+                    ax.grid(axis="y", linestyle="--", alpha=0.35)
+                    if sns is not None:
+                        sns.despine(ax=ax)
+                else:
+                    ax.axis("off")
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False)
+        fig.suptitle("Velocity Error: Peak vs Temporal Mean", fontsize=14, y=0.995)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        name = "prof_mean_vs_peak_velocity_errors.png"
+        fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        out["mean_vs_peak_velocity_errors"] = name
+        # Standalone versions (no subplot): one figure per metric-type pair.
+        for metric_type, source_rows in metric_types:
+            for metric_key, metric_name in err_metrics:
+                fig_s, ax_s = plt.subplots(1, 1, figsize=(7.6, 5.1))
+                x = np.arange(len(region_order), dtype=np.float64)
+                width = 0.36
+                for j, method_name in enumerate([baseline_label, sr_label]):
+                    vals: List[float] = []
+                    for region in region_order:
+                        vv = [
+                            float(rr.get(metric_key, float("nan")))
+                            for rr in source_rows
+                            if str(rr.get("method", "")) == method_name and str(rr.get("region", "")).strip().lower() == region
+                        ]
+                        vals.append(_scipy_mean(vv))
+                    bars = ax_s.bar(
+                        x + (j - 0.5) * width,
+                        [0.0 if not np.isfinite(v) else v for v in vals],
+                        width=width,
+                        color=method_colors[method_name],
+                        edgecolor=REPORT_COLOR_NEUTRAL,
+                        linewidth=0.8,
+                        label=method_name,
+                        alpha=0.90,
+                    )
+                    for k, v in enumerate(vals):
+                        if not np.isfinite(v):
+                            bars[k].set_alpha(0.12)
+                ax_s.set_xticks(x)
+                ax_s.set_xticklabels([_region_label(r) for r in region_order], rotation=0)
+                ax_s.set_title(f"{metric_name} | {metric_type}")
+                ax_s.set_ylabel("Error [m/s]")
+                ax_s.grid(axis="y", linestyle="--", alpha=0.35)
+                if sns is not None:
+                    sns.despine(ax=ax_s)
+                ax_s.legend(title="Method", frameon=False, loc="best")
+                fig_s.tight_layout()
+                slug_type = metric_type.lower().replace(" ", "_").replace("(", "").replace(")", "")
+                slug_metric = metric_name.lower().replace(" ", "_")
+                name_s = f"prof_velocity_error_{slug_metric}_{slug_type}.png"
+                fig_s.savefig(fig_dir / name_s, dpi=REPORT_FIG_DPI)
+                plt.close(fig_s)
+                out[f"velocity_error_{slug_metric}_{slug_type}"] = name_s
+
+    # 2) Boxplot: slice-wise relative errors for selected variables.
+    vars_of_interest = ["Mean velocity [m/s]", "SD velocity [m/s]", "Mean vorticity [1/s]"]
+    t2_by_var: Dict[str, Dict[str, np.ndarray]] = {}
+    for v in vars_of_interest:
+        base_vals = [float(r.get("re_baseline", float("nan"))) for r in table2_all_rows if str(r.get("variable", "")) == v]
+        sr_vals = [float(r.get("re_sr", float("nan"))) for r in table2_all_rows if str(r.get("variable", "")) == v]
+        b = _finite_values(base_vals)
+        s = _finite_values(sr_vals)
+        if b.size > 0 or s.size > 0:
+            t2_by_var[v] = {baseline_label: b, sr_label: s}
+    if t2_by_var:
+        fig, ax = plt.subplots(1, 1, figsize=(9, 5.8))
+        vars_order = [v for v in vars_of_interest if v in t2_by_var]
+        width = 0.32
+        x0 = np.arange(len(vars_order), dtype=np.float64)
+        for j, method_name in enumerate([baseline_label, sr_label]):
+            pos = x0 + (j - 0.5) * width
+            data = [t2_by_var[v][method_name] for v in vars_order]
+            for p, arr in zip(pos, data):
+                if arr.size == 0:
+                    continue
+                bp = ax.boxplot(
+                    arr,
+                    positions=[p],
+                    widths=width * 0.92,
+                    patch_artist=True,
+                    showfliers=True,
+                    medianprops={"color": "#111827", "linewidth": 1.2},
+                    boxprops={"edgecolor": "#111827", "linewidth": 1.0},
+                    whiskerprops={"color": "#111827", "linewidth": 1.0},
+                    capprops={"color": "#111827", "linewidth": 1.0},
+                    flierprops={"marker": "o", "markersize": 3.5, "markerfacecolor": method_colors[method_name], "markeredgecolor": "#111827", "alpha": 0.7},
+                )
+                for box in bp["boxes"]:
+                    box.set_facecolor(method_colors[method_name])
+                    box.set_alpha(0.55)
+        ax.set_xticks(x0)
+        ax.set_xticklabels([v.replace(" [m/s]", "").replace(" [1/s]", "") for v in vars_order])
+        ax.set_xlabel("Hemodynamic Parameter")
+        ax.set_ylabel("Relative Error (vs reference)")
+        ax.set_title("Distribution of Relative Errors Across All Slices")
+        ax.grid(axis="y", linestyle="--", alpha=0.35)
+        if sns is not None:
+            sns.despine(ax=ax)
+        legend_handles = [
+            Patch(facecolor=method_colors[baseline_label], edgecolor="#111827", alpha=0.55, label=baseline_label),
+            Patch(facecolor=method_colors[sr_label], edgecolor="#111827", alpha=0.55, label=sr_label),
+        ]
+        ax.legend(handles=legend_handles, title="Method", frameon=False, loc="upper right")
+        fig.tight_layout()
+        name = "prof_slice_relative_errors.png"
+        fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        out["slice_relative_errors"] = name
+
+    # 2b) Violin plots: relative error distribution split by velocity vs vorticity variables.
+    t2_all_by_var: Dict[str, Dict[str, np.ndarray]] = {}
+    for row in table2_all_rows:
+        var_name = str(row.get("variable", "")).strip()
+        if not var_name:
+            continue
+        if var_name not in t2_all_by_var:
+            t2_all_by_var[var_name] = {baseline_label: np.asarray([], dtype=np.float64), sr_label: np.asarray([], dtype=np.float64)}
+        b = _finite_values([float(row.get("re_baseline", float("nan")))])
+        s = _finite_values([float(row.get("re_sr", float("nan")))])
+        if b.size > 0:
+            t2_all_by_var[var_name][baseline_label] = np.concatenate([t2_all_by_var[var_name][baseline_label], b], axis=0)
+        if s.size > 0:
+            t2_all_by_var[var_name][sr_label] = np.concatenate([t2_all_by_var[var_name][sr_label], s], axis=0)
+
+    if t2_all_by_var and sns is not None:
+        var_order_all = sorted(
+            list(t2_all_by_var.keys()),
+            key=lambda v: _scipy_mean(t2_all_by_var[v][baseline_label]) if np.isfinite(_scipy_mean(t2_all_by_var[v][baseline_label])) else -1e9,
+            reverse=True,
+        )
+        var_groups: List[Tuple[str, str, List[str]]] = [
+            ("velocity", "Velocity", [v for v in var_order_all if "velocity" in v.lower()]),
+            ("vorticity", "Vorticity", [v for v in var_order_all if "vorticity" in v.lower()]),
+        ]
+        for group_tag, group_title, var_order in var_groups:
+            if not var_order:
+                continue
+            display_names = {v: v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order}
+            x_vals: List[str] = []
+            y_vals: List[float] = []
+            h_vals: List[str] = []
+            for var_name in var_order:
+                for method_name in (baseline_label, sr_label):
+                    vals = t2_all_by_var[var_name][method_name]
+                    if vals.size == 0:
+                        continue
+                    x_vals.extend([display_names[var_name]] * int(vals.size))
+                    y_vals.extend(vals.astype(np.float64).tolist())
+                    h_vals.extend([method_name] * int(vals.size))
+
+            if not y_vals:
+                continue
+            order_disp = [display_names[v] for v in var_order]
+            fig_w = max(7.2, 1.35 * float(len(order_disp)) + 1.8)
+            fig, ax = plt.subplots(1, 1, figsize=(fig_w, 5.8))
+            sns.violinplot(
+                x=x_vals,
+                y=y_vals,
+                hue=h_vals,
+                order=order_disp,
+                cut=0,
+                inner="quartile",
+                linewidth=1.0,
+                palette=method_colors,
+                ax=ax,
+                dodge=True,
+            )
+            y_arr = _finite_values(np.asarray(y_vals, dtype=np.float64))
+            y_hi_full = float(np.max(y_arr)) if y_arr.size > 0 else float("nan")
+            y_hi_p = _scipy_percentile(y_arr, 97.5) if y_arr.size > 0 else float("nan")
+            use_clip = bool(np.isfinite(y_hi_full) and np.isfinite(y_hi_p) and y_hi_full > (1.20 * y_hi_p))
+            y_hi = float(y_hi_p if use_clip else y_hi_full)
+            if np.isfinite(y_hi) and y_hi > 0:
+                ax.set_ylim(0.0, y_hi * 1.05)
+
+            ax.set_title(f"Table-2 Relative Error Distribution ({group_title}, across slices)")
+            ax.set_xlabel("Variable")
+            ax.set_ylabel("Relative Error vs Reference")
+            ax.grid(axis="y", linestyle="--", alpha=0.35)
+            sns.despine(ax=ax)
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(handles[:2], labels[:2], title="Method", frameon=False, loc="upper right")
+            ax.tick_params(axis="x", rotation=18)
+            if use_clip:
+                n_clip = int(np.count_nonzero(y_arr > y_hi))
+                ax.text(
+                    0.995,
+                    0.985,
+                    f"Y clipped at p97.5={y_hi:.2f} (n={n_clip} outliers)",
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=8,
+                    color="#6b7280",
+                )
+            fig.tight_layout()
+            name = f"prof_table2_relative_error_violin_{group_tag}.png"
+            fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+            plt.close(fig)
+            out[f"table2_relative_error_violin_{group_tag}"] = name
+
+    # 2c) Temporal-mean Table-2 plots (averaged over frames first, then compared across slices/variables).
+    t2_tm_by_var: Dict[str, Dict[str, np.ndarray]] = {}
+    for row in table2_temporal_mean_rows:
+        var_name = str(row.get("variable", "")).strip()
+        if not var_name:
+            continue
+        if var_name not in t2_tm_by_var:
+            t2_tm_by_var[var_name] = {baseline_label: np.asarray([], dtype=np.float64), sr_label: np.asarray([], dtype=np.float64)}
+        b = _finite_values([float(row.get("re_baseline_mean_over_frames", float("nan")))])
+        s = _finite_values([float(row.get("re_sr_mean_over_frames", float("nan")))])
+        if b.size > 0:
+            t2_tm_by_var[var_name][baseline_label] = np.concatenate([t2_tm_by_var[var_name][baseline_label], b], axis=0)
+        if s.size > 0:
+            t2_tm_by_var[var_name][sr_label] = np.concatenate([t2_tm_by_var[var_name][sr_label], s], axis=0)
+
+    if t2_tm_by_var:
+        tm_var_order = sorted(
+            list(t2_tm_by_var.keys()),
+            key=lambda v: _scipy_mean(t2_tm_by_var[v][baseline_label]) if np.isfinite(_scipy_mean(t2_tm_by_var[v][baseline_label])) else -1e9,
+            reverse=True,
+        )
+
+        # Summary bars: mean RE across slices from temporal-mean table.
+        fig_h = max(5.6, 0.58 * float(len(tm_var_order)) + 1.4)
+        fig, ax = plt.subplots(1, 1, figsize=(12.2, fig_h))
+        y = np.arange(len(tm_var_order), dtype=np.float64)
+        height = 0.36
+        vals_base = [_scipy_mean(t2_tm_by_var[v][baseline_label]) for v in tm_var_order]
+        vals_sr = [_scipy_mean(t2_tm_by_var[v][sr_label]) for v in tm_var_order]
+        bars_base = ax.barh(
+            y + 0.5 * height,
+            [0.0 if not np.isfinite(v) else v for v in vals_base],
+            height=height,
+            color=method_colors[baseline_label],
+            edgecolor=REPORT_COLOR_NEUTRAL,
+            linewidth=0.8,
+            alpha=0.90,
+            label=f"{baseline_label} mean RE (temporal-mean)",
+        )
+        bars_sr = ax.barh(
+            y - 0.5 * height,
+            [0.0 if not np.isfinite(v) else v for v in vals_sr],
+            height=height,
+            color=method_colors[sr_label],
+            edgecolor=REPORT_COLOR_NEUTRAL,
+            linewidth=0.8,
+            alpha=0.90,
+            label=f"{sr_label} mean RE (temporal-mean)",
+        )
+        for k, v in enumerate(vals_base):
+            if not np.isfinite(v):
+                bars_base[k].set_alpha(0.12)
+        for k, v in enumerate(vals_sr):
+            if not np.isfinite(v):
+                bars_sr[k].set_alpha(0.12)
+        ax.set_yticks(y)
+        ax.set_yticklabels(tm_var_order)
+        ax.set_xlabel("Mean relative error vs reference (temporal-mean across frames)")
+        ax.set_title("Table-2 Temporal-Mean Relative Error by Variable")
+        ax.grid(axis="x", linestyle="--", alpha=0.35)
+        if sns is not None:
+            sns.despine(ax=ax)
+        ax.legend(frameon=False, loc="lower right")
+        fig.tight_layout()
+        name = "prof_table2_temporal_mean_relative_error_bar.png"
+        fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        out["table2_temporal_mean_relative_error_bar"] = name
+
+        # Violin over slices of temporal-mean RE for each variable (split velocity vs vorticity).
+        if sns is not None:
+            tm_groups: List[Tuple[str, str, List[str]]] = [
+                ("velocity", "Velocity", [v for v in tm_var_order if "velocity" in v.lower()]),
+                ("vorticity", "Vorticity", [v for v in tm_var_order if "vorticity" in v.lower()]),
+            ]
+            for group_tag, group_title, var_order in tm_groups:
+                if not var_order:
+                    continue
+                display_names = {v: v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order}
+                x_vals_tm: List[str] = []
+                y_vals_tm: List[float] = []
+                h_vals_tm: List[str] = []
+                for var_name in var_order:
+                    for method_name in (baseline_label, sr_label):
+                        vals = t2_tm_by_var[var_name][method_name]
+                        if vals.size == 0:
+                            continue
+                        x_vals_tm.extend([display_names[var_name]] * int(vals.size))
+                        y_vals_tm.extend(vals.astype(np.float64).tolist())
+                        h_vals_tm.extend([method_name] * int(vals.size))
+
+                if not y_vals_tm:
+                    continue
+                order_disp_tm = [display_names[v] for v in var_order]
+                fig_w_vi = max(7.2, 1.35 * float(len(order_disp_tm)) + 1.8)
+                fig, ax = plt.subplots(1, 1, figsize=(fig_w_vi, 5.8))
+                sns.violinplot(
+                    x=x_vals_tm,
+                    y=y_vals_tm,
+                    hue=h_vals_tm,
+                    order=order_disp_tm,
+                    cut=0,
+                    inner="quartile",
+                    linewidth=1.0,
+                    palette=method_colors,
+                    ax=ax,
+                    dodge=True,
+                )
+                y_arr_tm = _finite_values(np.asarray(y_vals_tm, dtype=np.float64))
+                y_hi_full_tm = float(np.max(y_arr_tm)) if y_arr_tm.size > 0 else float("nan")
+                y_hi_p_tm = _scipy_percentile(y_arr_tm, 97.5) if y_arr_tm.size > 0 else float("nan")
+                use_clip_tm = bool(np.isfinite(y_hi_full_tm) and np.isfinite(y_hi_p_tm) and y_hi_full_tm > (1.20 * y_hi_p_tm))
+                y_hi_tm = float(y_hi_p_tm if use_clip_tm else y_hi_full_tm)
+                if np.isfinite(y_hi_tm) and y_hi_tm > 0:
+                    ax.set_ylim(0.0, y_hi_tm * 1.05)
+
+                ax.set_title(f"Table-2 Temporal-Mean Relative Error Distribution ({group_title})")
+                ax.set_xlabel("Variable")
+                ax.set_ylabel("Relative Error vs Reference (temporal-mean over frames)")
+                ax.grid(axis="y", linestyle="--", alpha=0.35)
+                sns.despine(ax=ax)
+                handles, labels = ax.get_legend_handles_labels()
+                if handles:
+                    ax.legend(handles[:2], labels[:2], title="Method", frameon=False, loc="upper right")
+                ax.tick_params(axis="x", rotation=18)
+                if use_clip_tm:
+                    n_clip_tm = int(np.count_nonzero(y_arr_tm > y_hi_tm))
+                    ax.text(
+                        0.995,
+                        0.985,
+                        f"Y clipped at p97.5={y_hi_tm:.2f} (n={n_clip_tm} outliers)",
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="top",
+                        fontsize=8,
+                        color="#6b7280",
+                    )
+                fig.tight_layout()
+                name = f"prof_table2_temporal_mean_relative_error_violin_{group_tag}.png"
+                fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+                plt.close(fig)
+                out[f"table2_temporal_mean_relative_error_violin_{group_tag}"] = name
+
+    # 3) Correlation and RMSE barplots.
+    corr_filtered: List[Dict[str, Any]] = []
+    for r in corr_rows:
+        method_name = str(r.get("method", ""))
+        if method_name not in method_colors:
+            continue
+        n_val = float(r.get("n", float("nan")))
+        if not np.isfinite(n_val) or n_val <= 100:
+            continue
+        corr_filtered.append(r)
+
+    if corr_filtered:
+        var_order: List[str] = []
+        agg: Dict[Tuple[str, str], Dict[str, List[float]]] = {}
+        for r in corr_filtered:
+            method_name = str(r.get("method", ""))
+            label = _metric_label(str(r.get("domain", "")), str(r.get("component", "")))
+            if label not in var_order:
+                var_order.append(label)
+            key = (label, method_name)
+            agg.setdefault(key, {"pearson_r": [], "rmse": []})
+            agg[key]["pearson_r"].append(float(r.get("pearson_r", float("nan"))))
+            agg[key]["rmse"].append(float(r.get("rmse", float("nan"))))
+
+        fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.4))
+        for ax, metric_key, ylab, title in [
+            (axes[0], "pearson_r", "Pearson r", "Pearson Correlation Coefficient"),
+            (axes[1], "rmse", "RMSE [m/s]", "Root Mean Square Error (RMSE)"),
+        ]:
+            x = np.arange(len(var_order), dtype=np.float64)
+            width = 0.36
+            for j, method_name in enumerate([baseline_label, sr_label]):
+                vals = [
+                    _scipy_mean(agg.get((vv, method_name), {}).get(metric_key, []))
+                    for vv in var_order
+                ]
+                bars = ax.bar(
+                    x + (j - 0.5) * width,
+                    [0.0 if not np.isfinite(v) else v for v in vals],
+                    width=width,
+                    color=method_colors[method_name],
+                    edgecolor="#111827",
+                    linewidth=0.8,
+                    label=method_name,
+                    alpha=0.90,
+                )
+                for k, v in enumerate(vals):
+                    if not np.isfinite(v):
+                        bars[k].set_alpha(0.12)
+            ax.set_xticks(x)
+            ax.set_xticklabels(var_order, rotation=35, ha="right")
+            ax.set_ylabel(ylab)
+            ax.set_title(title)
+            ax.grid(axis="y", linestyle="--", alpha=0.35)
+            if sns is not None:
+                sns.despine(ax=ax)
+        axes[1].legend(title="Method", frameon=False, loc="best")
+        fig.tight_layout()
+        name = "prof_correlation_rmse.png"
+        fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        out["correlation_rmse"] = name
+        # Standalone versions (no subplot)
+        for metric_key, ylab, title, out_key, out_name in [
+            ("pearson_r", "Pearson r", "Pearson Correlation Coefficient", "correlation_pearson_r", "prof_correlation_pearson_r.png"),
+            ("rmse", "RMSE [m/s]", "Root Mean Square Error (RMSE)", "correlation_rmse_only", "prof_correlation_rmse_only.png"),
+        ]:
+            fig_s, ax_s = plt.subplots(1, 1, figsize=(8.8, 5.1))
+            x = np.arange(len(var_order), dtype=np.float64)
+            width = 0.36
+            for j, method_name in enumerate([baseline_label, sr_label]):
+                vals = [_scipy_mean(agg.get((vv, method_name), {}).get(metric_key, [])) for vv in var_order]
+                bars = ax_s.bar(
+                    x + (j - 0.5) * width,
+                    [0.0 if not np.isfinite(v) else v for v in vals],
+                    width=width,
+                    color=method_colors[method_name],
+                    edgecolor=REPORT_COLOR_NEUTRAL,
+                    linewidth=0.8,
+                    label=method_name,
+                    alpha=0.90,
+                )
+                for k, v in enumerate(vals):
+                    if not np.isfinite(v):
+                        bars[k].set_alpha(0.12)
+            ax_s.set_xticks(x)
+            ax_s.set_xticklabels(var_order, rotation=35, ha="right")
+            ax_s.set_ylabel(ylab)
+            ax_s.set_title(title)
+            ax_s.grid(axis="y", linestyle="--", alpha=0.35)
+            if sns is not None:
+                sns.despine(ax=ax_s)
+            ax_s.legend(title="Method", frameon=False, loc="best")
+            fig_s.tight_layout()
+            fig_s.savefig(fig_dir / out_name, dpi=REPORT_FIG_DPI)
+            plt.close(fig_s)
+            out[out_key] = out_name
+
+    # 4) Voxel distribution standard deviation barplot.
+    channel_pref = ["u", "v", "w", "mag"]
+    channel_seen: List[str] = []
+    vox_agg: Dict[Tuple[str, str], List[float]] = {}
+    for r in voxel_dist_rows:
+        ch = str(r.get("channel", "")).strip().lower()
+        method_name = str(r.get("method", ""))
+        std_val = float(r.get("std", float("nan")))
+        if not ch:
+            continue
+        if method_name not in voxel_colors:
+            continue
+        if ch not in channel_seen:
+            channel_seen.append(ch)
+        vox_agg.setdefault((ch, method_name), []).append(std_val)
+    channel_order = [c for c in channel_pref if c in channel_seen] + [c for c in channel_seen if c not in channel_pref]
+    if channel_order:
+        fig, ax = plt.subplots(1, 1, figsize=(8.2, 5.5))
+        methods_in_vox = [m for m in [ref_label, baseline_label, sr_label] if any((c, m) in vox_agg for c in channel_order)]
+        x = np.arange(len(channel_order), dtype=np.float64)
+        width = 0.80 / max(1, len(methods_in_vox))
+        center_shift = (len(methods_in_vox) - 1) * 0.5
+        for j, method_name in enumerate(methods_in_vox):
+            vals = [_scipy_mean(vox_agg.get((ch, method_name), [])) for ch in channel_order]
+            bars = ax.bar(
+                x + (j - center_shift) * width,
+                [0.0 if not np.isfinite(v) else v for v in vals],
+                width=width * 0.96,
+                color=voxel_colors[method_name],
+                edgecolor="#111827",
+                linewidth=0.8,
+                label=method_name,
+                alpha=0.90,
+            )
+            for k, v in enumerate(vals):
+                if not np.isfinite(v):
+                    bars[k].set_alpha(0.12)
+        ax.set_xticks(x)
+        ax.set_xticklabels([c.upper() for c in channel_order])
+        ax.set_xlabel("Velocity Component Channel")
+        ax.set_ylabel("Standard Deviation [m/s]")
+        ax.set_title("Velocity Variance (Voxel Distribution Std Dev)")
+        ax.grid(axis="y", linestyle="--", alpha=0.35)
+        if sns is not None:
+            sns.despine(ax=ax)
+        ax.legend(title="Method", frameon=False, loc="best")
+        fig.tight_layout()
+        name = "prof_voxel_distribution_std.png"
+        fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        out["voxel_distribution_std"] = name
+
+    # 5) Relative error (%) by region for peak and temporal mean.
+    if region_order:
+        fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.9), sharey=True)
+        for ax, metric_type, source_rows in [
+            (axes[0], "Peak Frame", peak_speed_rows),
+            (axes[1], "Temporal Mean", mean_speed_rows),
+        ]:
+            x = np.arange(len(region_order), dtype=np.float64)
+            width = 0.36
+            for j, method_name in enumerate([baseline_label, sr_label]):
+                vals: List[float] = []
+                for region in region_order:
+                    vv = [
+                        float(rr.get("relative_error_pct", float("nan")))
+                        for rr in source_rows
+                        if str(rr.get("method", "")) == method_name and str(rr.get("region", "")).strip().lower() == region
+                    ]
+                    vals.append(_scipy_mean(vv))
+                bars = ax.bar(
+                    x + (j - 0.5) * width,
+                    [0.0 if not np.isfinite(v) else v for v in vals],
+                    width=width,
+                    color=method_colors[method_name],
+                    edgecolor=REPORT_COLOR_NEUTRAL,
+                    linewidth=0.8,
+                    alpha=0.90,
+                    label=method_name,
+                )
+                for k, v in enumerate(vals):
+                    if not np.isfinite(v):
+                        bars[k].set_alpha(0.12)
+            ax.set_xticks(x)
+            ax.set_xticklabels([_region_label(r) for r in region_order], rotation=0)
+            ax.set_title(f"Relative Error (%) | {metric_type}")
+            ax.set_ylabel("Relative Error [%]")
+            ax.grid(axis="y", linestyle="--", alpha=0.35)
+            if sns is not None:
+                sns.despine(ax=ax)
+        axes[1].legend(title="Method", frameon=False, loc="best")
+        fig.tight_layout()
+        name = "prof_velocity_relative_error_pct.png"
+        fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        out["velocity_relative_error_pct"] = name
+        # Standalone versions (no subplot)
+        for metric_type, source_rows, out_key, out_name in [
+            ("Peak Frame", peak_speed_rows, "velocity_relative_error_pct_peak", "prof_velocity_relative_error_pct_peak.png"),
+            ("Temporal Mean", mean_speed_rows, "velocity_relative_error_pct_temporal_mean", "prof_velocity_relative_error_pct_temporal_mean.png"),
+        ]:
+            fig_s, ax_s = plt.subplots(1, 1, figsize=(7.8, 4.9))
+            x = np.arange(len(region_order), dtype=np.float64)
+            width = 0.36
+            for j, method_name in enumerate([baseline_label, sr_label]):
+                vals: List[float] = []
+                for region in region_order:
+                    vv = [
+                        float(rr.get("relative_error_pct", float("nan")))
+                        for rr in source_rows
+                        if str(rr.get("method", "")) == method_name and str(rr.get("region", "")).strip().lower() == region
+                    ]
+                    vals.append(_scipy_mean(vv))
+                bars = ax_s.bar(
+                    x + (j - 0.5) * width,
+                    [0.0 if not np.isfinite(v) else v for v in vals],
+                    width=width,
+                    color=method_colors[method_name],
+                    edgecolor=REPORT_COLOR_NEUTRAL,
+                    linewidth=0.8,
+                    alpha=0.90,
+                    label=method_name,
+                )
+                for k, v in enumerate(vals):
+                    if not np.isfinite(v):
+                        bars[k].set_alpha(0.12)
+            ax_s.set_xticks(x)
+            ax_s.set_xticklabels([_region_label(r) for r in region_order], rotation=0)
+            ax_s.set_title(f"Relative Error (%) | {metric_type}")
+            ax_s.set_ylabel("Relative Error [%]")
+            ax_s.grid(axis="y", linestyle="--", alpha=0.35)
+            if sns is not None:
+                sns.despine(ax=ax_s)
+            ax_s.legend(title="Method", frameon=False, loc="best")
+            fig_s.tight_layout()
+            fig_s.savefig(fig_dir / out_name, dpi=REPORT_FIG_DPI)
+            plt.close(fig_s)
+            out[out_key] = out_name
+
+    # 6) Temporal flow absolute error profile by frame.
+    q_ref = np.asarray(q_ref_time, dtype=np.float64)
+    q_base = np.asarray(q_base_time, dtype=np.float64)
+    q_sr = np.asarray(q_sr_time, dtype=np.float64)
+    frame_idx = np.asarray(frame_source_indices, dtype=np.int32)
+    valid_flow = (
+        q_ref.size > 0
+        and q_ref.shape == q_base.shape
+        and q_ref.shape == q_sr.shape
+        and frame_idx.shape[0] == q_ref.shape[0]
+    )
+    if valid_flow:
+        err_base = np.abs(q_base - q_ref)
+        err_sr = np.abs(q_sr - q_ref)
+        fig, ax = plt.subplots(1, 1, figsize=(10.5, 4.7))
+        ax.plot(frame_idx, err_base, marker="o", markersize=3.8, linewidth=2.0, color=REPORT_COLOR_BASELINE, label=f"{baseline_label} |Q-Qref|")
+        ax.plot(frame_idx, err_sr, marker="o", markersize=3.8, linewidth=2.0, color=REPORT_COLOR_SR, label=f"{sr_label} |Q-Qref|")
+        ax.set_xlabel("Temporal frame index")
+        ax.set_ylabel("Absolute Error [ml/s]")
+        ax.set_title("Temporal Flow Absolute Error Profile")
+        ax.grid(axis="y", linestyle="--", alpha=0.35)
+        if sns is not None:
+            sns.despine(ax=ax)
+        ax.legend(frameon=False, loc="best")
+        fig.tight_layout()
+        name = "prof_flow_abs_error_over_time.png"
+        fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        out["flow_abs_error_over_time"] = name
+
+    # 7) Statistical significance summary: -log10(p) by analysis and region.
+    pval_agg: Dict[Tuple[str, str], List[float]] = {}
+    analysis_order: List[str] = []
+    pval_region_order: List[str] = []
+    for row in pvalue_rows:
+        analysis = str(row.get("analysis", "")).strip()
+        region = str(row.get("region", "")).strip().lower()
+        p_raw = float(row.get("wilcoxon_p_value", float("nan")))
+        if not analysis or not region or not np.isfinite(p_raw):
+            continue
+        if analysis not in analysis_order:
+            analysis_order.append(analysis)
+        if region not in pval_region_order:
+            pval_region_order.append(region)
+        pval_agg.setdefault((analysis, region), []).append(p_raw)
+    if pval_agg:
+        fig, ax = plt.subplots(1, 1, figsize=(9.2, 5.0))
+        x = np.arange(len(pval_region_order), dtype=np.float64)
+        width = 0.82 / max(1, len(analysis_order))
+        center_shift = (len(analysis_order) - 1) * 0.5
+        analysis_palette = sns.color_palette("deep", n_colors=max(2, len(analysis_order))) if sns is not None else ["#4b5563", "#111827"]
+        for j, analysis in enumerate(analysis_order):
+            vals = []
+            for region in pval_region_order:
+                pp = _scipy_mean(pval_agg.get((analysis, region), []))
+                vals.append(float(-np.log10(max(pp, 1e-300))) if np.isfinite(pp) and pp > 0 else float("nan"))
+            bars = ax.bar(
+                x + (j - center_shift) * width,
+                [0.0 if not np.isfinite(v) else v for v in vals],
+                width=width * 0.96,
+                color=analysis_palette[j % len(analysis_palette)],
+                edgecolor=REPORT_COLOR_NEUTRAL,
+                linewidth=0.8,
+                alpha=0.90,
+                label=analysis,
+            )
+            for k, v in enumerate(vals):
+                if not np.isfinite(v):
+                    bars[k].set_alpha(0.12)
+        p_thr = -np.log10(0.05)
+        ax.axhline(p_thr, color=REPORT_COLOR_NEUTRAL, linestyle="--", linewidth=1.1, label="p=0.05")
+        ax.set_xticks(x)
+        ax.set_xticklabels([_region_label(r) for r in pval_region_order])
+        ax.set_ylabel("-log10(p-value)")
+        ax.set_xlabel("Region")
+        ax.set_title("Wilcoxon Significance Summary (Baseline vs SR)")
+        ax.grid(axis="y", linestyle="--", alpha=0.35)
+        if sns is not None:
+            sns.despine(ax=ax)
+        ax.legend(frameon=False, loc="best")
+        fig.tight_layout()
+        name = "prof_significance_pvalues.png"
+        fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        out["significance_pvalues"] = name
+
+    return out
 
 
 def _save_centerline_overlay_figure(
@@ -1535,7 +2551,7 @@ def _save_centerline_overlay_figure(
         fontsize=12,
     )
     fig.tight_layout(rect=(0, 0.06, 1, 0.95))
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, dpi=REPORT_FIG_DPI)
     plt.close(fig)
 
 
@@ -1628,7 +2644,7 @@ def _save_centerline_3d_figure(
     ax.view_init(elev=22, azim=42)
     ax.legend(loc="upper right", fontsize=8)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, dpi=REPORT_FIG_DPI)
     plt.close(fig)
 
 
@@ -1750,8 +2766,8 @@ def _centerline_tangent_qc(plane_normals: np.ndarray) -> Dict[str, Any]:
     ang = np.degrees(np.arccos(dots))
     return {
         "n_segments": int(ang.size),
-        "mean_angle_deg": float(np.mean(ang)) if ang.size > 0 else float("nan"),
-        "p95_angle_deg": float(np.quantile(ang, 0.95)) if ang.size > 0 else float("nan"),
+        "mean_angle_deg": _scipy_mean(ang) if ang.size > 0 else float("nan"),
+        "p95_angle_deg": _scipy_percentile(ang, 95.0) if ang.size > 0 else float("nan"),
         "max_angle_deg": float(np.max(ang)) if ang.size > 0 else float("nan"),
     }
 
@@ -1792,7 +2808,7 @@ def _centerline_sign_qc(
                 "n_frames": int(ref_v.size),
                 "pearson_r_vs_ref": float(corr),
                 "pearson_p_vs_ref": float(cstats.get("pearson_p", float("nan"))),
-                "sign_agreement_pct": float(100.0 * np.mean(signs_ok)),
+                "sign_agreement_pct": float(100.0 * _scipy_mean(signs_ok.astype(np.float64))),
                 "flip_suspected": int(bool(np.isfinite(corr) and corr < -0.2)),
             }
         )
@@ -1888,7 +2904,7 @@ def _save_centerline_sections_figure(
         rel = pts - r0[None, :]
         x2 = np.dot(rel, u)
         y2 = np.dot(rel, v)
-        ax.scatter(x2, y2, s=8, c="#9ca3af", alpha=0.7)
+        ax.scatter(x2, y2, s=14, marker="o", c="#9ca3af", alpha=0.75, edgecolors="white", linewidths=0.2)
         ax.scatter([0.0], [0.0], s=38, c="#f59e0b", marker="x", label="centerline point")
         cen = np.mean(pts, axis=0)
         cen_rel = cen - r0
@@ -1906,7 +2922,7 @@ def _save_centerline_sections_figure(
         fig.legend(handles, labels, loc="lower center", ncol=2, frameon=False)
     fig.suptitle("Centerline plane sections (proximal / middle / distal)", fontsize=12)
     fig.tight_layout(rect=(0, 0.06, 1, 0.95))
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, dpi=REPORT_FIG_DPI)
     plt.close(fig)
 
 
@@ -1939,7 +2955,7 @@ def _save_centerline_peak_qs_figure(
     plt.grid(True, alpha=0.25, linestyle=":")
     plt.legend()
     plt.tight_layout()
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, dpi=REPORT_FIG_DPI)
     plt.close(fig)
 
 
@@ -2051,18 +3067,18 @@ def main() -> None:
     parser.add_argument("--baseline-label", default="3T", help="Label for baseline (native/LR) method")
     parser.add_argument("--sr-label", default="3T SR", help="Label for super-resolved method")
     parser.add_argument("--ref-label", default="auto", help="Label for reference method. Use 'auto' to infer from metadata.")
+    parser.add_argument(
+        "--task-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "denoising", "superresolution"],
+        help="Naming convention for outputs. auto infers from res_increase (1=denoising, >1=superresolution).",
+    )
     parser.add_argument("--report-title", default="4D Flow SR Uncertainty Quantification Report", help="Report title")
 
     args = parser.parse_args()
     if (args.centerline_start_xyz is None) != (args.centerline_end_xyz is None):
         raise ValueError("Use --centerline-start-xyz and --centerline-end-xyz together, or omit both.")
-
-    out_dir = Path(args.out_dir).resolve()
-    fig_dir = out_dir / "figures"
-    metrics_dir = out_dir / "metrics"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fig_dir.mkdir(parents=True, exist_ok=True)
-    metrics_dir.mkdir(parents=True, exist_ok=True)
 
     payload = _load_payload(args.payload_npz)
     metadata = {}
@@ -2070,6 +3086,34 @@ def main() -> None:
         mpath = Path(args.metadata_json)
         if mpath.exists():
             metadata = json.loads(mpath.read_text())
+
+    task_mode_tag, task_mode_label, detected_res_increase = _resolve_task_mode(
+        task_mode_arg=args.task_mode,
+        metadata=metadata,
+        payload=payload,
+    )
+    metrics_rel_prefix = f"metrics/{task_mode_tag}"
+
+    out_dir = Path(args.out_dir).resolve()
+    fig_dir = out_dir / "figures"
+    metrics_root = out_dir / "metrics"
+    fig_mode_dir = fig_dir / task_mode_tag
+    metrics_dir = metrics_root / task_mode_tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig_mode_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    fig_groups: Dict[str, Path] = {
+        "comparison": fig_mode_dir / "comparison",
+        "distribution": fig_mode_dir / "distribution",
+        "flow": fig_mode_dir / "flow",
+        "correlation": fig_mode_dir / "correlation",
+        "bland_altman": fig_mode_dir / "bland_altman",
+        "centerline": fig_mode_dir / "centerline",
+        "wss": fig_mode_dir / "wss",
+        "publication": fig_mode_dir / "publication",
+    }
+    for p in fig_groups.values():
+        p.mkdir(parents=True, exist_ok=True)
 
     ref_label = args.ref_label
     if str(ref_label).lower() == "auto":
@@ -2145,7 +3189,7 @@ def main() -> None:
     channel_names = ["u", "v", "w", "mag"]
     channel_figs: Dict[str, str] = {}
     for c, name in enumerate(channel_names):
-        out_img = fig_dir / f"channel_{name}_comparison.png"
+        out_img = fig_groups["comparison"] / f"channel_{name}_comparison.png"
         _save_channel_figure(
             out_path=out_img,
             ch_name=name,
@@ -2156,10 +3200,10 @@ def main() -> None:
             n_cols=int(args.panel_cols),
             bbox_xyz=roi_bbox,
         )
-        channel_figs[name] = str(out_img.name)
+        channel_figs[name] = _rel_fig_path(out_img, fig_dir)
 
-    fig_voxel_hist = fig_dir / "voxel_histogram_in_mask.png"
-    voxel_dist_rows = _save_voxel_histograms(
+    fig_voxel_hist = fig_groups["distribution"] / "voxel_histogram_in_mask.png"
+    voxel_dist_rows, voxel_hist_channel_figs = _save_voxel_histograms(
         out_path=fig_voxel_hist,
         baseline_4ch=lr_up,
         pred_4ch=pred_norm,
@@ -2170,6 +3214,9 @@ def main() -> None:
         sr_label=args.sr_label,
         ref_label=ref_label,
     )
+    voxel_hist_channel_figs = {
+        k: _rel_fig_path(fig_voxel_hist.parent / Path(v), fig_dir) for k, v in voxel_hist_channel_figs.items()
+    }
     voxel_dist_cols = ["channel", "method", "count", "mean", "std", "median", "p05", "p95", "min", "max"]
     _write_csv(metrics_dir / "voxel_distribution_stats.csv", voxel_dist_rows, voxel_dist_cols)
 
@@ -2207,6 +3254,7 @@ def main() -> None:
         min_voxels=int(args.mask_min_slice_voxels),
         frame_source_indices=frame_source_indices,
     )
+    table2_temporal_mean = _table2_temporal_mean_rows(table2_per_frame)
 
     p_re = _wilcoxon_p(re_base_all, re_sr_all)
 
@@ -2227,6 +3275,18 @@ def main() -> None:
 
     t2pf_cols = ["frame_payload_index", "frame_source_index", "slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
     _write_csv(metrics_dir / "table2_like_per_frame_all_slices.csv", table2_per_frame, t2pf_cols)
+
+    t2tm_cols = [
+        "slice_index",
+        "variable",
+        "n_frames",
+        "ref_mean_over_frames",
+        "baseline_mean_over_frames",
+        "sr_mean_over_frames",
+        "re_baseline_mean_over_frames",
+        "re_sr_mean_over_frames",
+    ]
+    _write_csv(metrics_dir / "table2_like_temporal_mean.csv", table2_temporal_mean, t2tm_cols)
 
     t2c_cols = ["location", "slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
     _write_csv(metrics_dir / "table2_like_compact.csv", table2_compact, t2c_cols)
@@ -2336,12 +3396,12 @@ def main() -> None:
     for q_arr in (q_ref_time, q_base_time, q_sr_time):
         finite = np.isfinite(q_arr)
         if finite.any():
-            q_arr[~finite] = float(np.nanmedian(q_arr[finite]))
+            q_arr[~finite] = _scipy_median(q_arr[finite])
 
     if np.isfinite(float(args.q_ref)):
         q_ref_scalar = float(args.q_ref)
     else:
-        q_ref_scalar = float(np.median(q_ref_time[np.isfinite(q_ref_time)]))
+        q_ref_scalar = _scipy_median(q_ref_time[np.isfinite(q_ref_time)])
 
     if q_ref_time.size > 0:
         q_ref_abs = np.abs(np.asarray(q_ref_time, dtype=np.float64))
@@ -2355,11 +3415,11 @@ def main() -> None:
 
     def flow_summary(name: str, q_time: np.ndarray, idx: np.ndarray) -> Dict[str, Any]:
         q_sel = q_time[idx]
-        mad = float(np.mean(np.abs(q_sel - q_ref_scalar)))
+        mad = _scipy_mean(np.abs(q_sel - q_ref_scalar))
         return {
             "method": name,
-            "mean_Q_ml_s": float(np.mean(q_sel)),
-            "temporal_SD_Q_ml_s": float(np.std(q_sel, ddof=1)) if q_sel.size > 1 else float("nan"),
+            "mean_Q_ml_s": _scipy_mean(q_sel),
+            "temporal_SD_Q_ml_s": _scipy_std(q_sel),
             "MAD_Q_vs_qref_ml_s": mad,
             "MAD_Q_vs_qref_pct": 100.0 * mad / (abs(q_ref_scalar) + 1e-12),
         }
@@ -2507,7 +3567,7 @@ def main() -> None:
                 "q_sr_ml_s",
             ],
         )
-        fig_centerline = fig_dir / "centerline_overlay.png"
+        fig_centerline = fig_groups["centerline"] / "centerline_overlay.png"
         _save_centerline_overlay_figure(
             out_path=fig_centerline,
             mask_3d=centerline_bundle["mask_3d"],
@@ -2516,8 +3576,8 @@ def main() -> None:
             valid_plane_index=valid_flow_sections,
         )
         if fig_centerline.exists():
-            centerline_overlay_name = fig_centerline.name
-        fig_centerline_3d = fig_dir / "centerline_3d.png"
+            centerline_overlay_name = _rel_fig_path(fig_centerline, fig_dir)
+        fig_centerline_3d = fig_groups["centerline"] / "centerline_3d.png"
         _save_centerline_3d_figure(
             out_path=fig_centerline_3d,
             mask_3d=centerline_bundle["mask_3d"],
@@ -2527,7 +3587,7 @@ def main() -> None:
             valid_plane_index=valid_flow_sections,
         )
         if fig_centerline_3d.exists():
-            centerline_3d_name = fig_centerline_3d.name
+            centerline_3d_name = _rel_fig_path(fig_centerline_3d, fig_dir)
 
         centerline_section_qc_rows = _centerline_section_geometry_rows(
             mask_3d=centerline_bundle["mask_3d"],
@@ -2581,7 +3641,7 @@ def main() -> None:
             peak_idx=int(peak_idx),
         )
 
-        fig_sections = fig_dir / "centerline_plane_sections.png"
+        fig_sections = fig_groups["centerline"] / "centerline_plane_sections.png"
         _save_centerline_sections_figure(
             out_path=fig_sections,
             mask_3d=centerline_bundle["mask_3d"],
@@ -2593,9 +3653,9 @@ def main() -> None:
             valid_plane_index=valid_flow_sections,
         )
         if fig_sections.exists():
-            centerline_sections_name = fig_sections.name
+            centerline_sections_name = _rel_fig_path(fig_sections, fig_dir)
 
-        fig_qs = fig_dir / "centerline_flow_along_vessel_peak.png"
+        fig_qs = fig_groups["centerline"] / "centerline_flow_along_vessel_peak.png"
         _save_centerline_peak_qs_figure(
             out_path=fig_qs,
             q_ref_curves=q_ref_curves,
@@ -2608,7 +3668,7 @@ def main() -> None:
             sr_label=args.sr_label,
         )
         if fig_qs.exists():
-            centerline_peak_qs_name = fig_qs.name
+            centerline_peak_qs_name = _rel_fig_path(fig_qs, fig_dir)
 
         tangent_qc = _centerline_tangent_qc(centerline_bundle["plane_normals"])
         valid_geom = [r for r in centerline_section_qc_rows if int(r.get("is_valid_plane", 0)) == 1]
@@ -2635,7 +3695,7 @@ def main() -> None:
                 "qc_elongation_ratio_p95": float(np.nanquantile(elong, 0.95)) if np.isfinite(elong).any() else float("nan"),
                 "qc_compactness_ratio_median": _nmed(comp),
                 "qc_center_to_wall_over_eq_radius_median": _nmed(wall_ratio),
-                "qc_plane_points_inside_mask_pct": float(100.0 * np.mean(np.isfinite(wall_mm_all))) if wall_mm_all.size > 0 else float("nan"),
+                "qc_plane_points_inside_mask_pct": float(100.0 * _scipy_mean(np.isfinite(wall_mm_all).astype(np.float64))) if wall_mm_all.size > 0 else float("nan"),
                 "qc_area_cv_valid_planes": float(np.nanstd(area, ddof=1) / (abs(np.nanmean(area)) + 1e-12)) if np.isfinite(area).sum() > 1 else float("nan"),
                 "qc_peak_q_cv_ref": float(np.nanstd(q_ref_peak, ddof=1) / (abs(np.nanmean(q_ref_peak)) + 1e-12)) if np.isfinite(q_ref_peak).sum() > 1 else float("nan"),
                 "qc_peak_q_range_pct_ref": float((np.nanquantile(q_ref_peak, 0.95) - np.nanquantile(q_ref_peak, 0.05)) / (abs(np.nanmedian(q_ref_peak)) + 1e-12) * 100.0)
@@ -2677,13 +3737,13 @@ def main() -> None:
     _write_csv(metrics_dir / "flow_metrics_per_frame.csv", flow_per_frame_rows, flow_per_frame_cols)
 
     # Flow figure (temporal)
-    fig_flow = fig_dir / "flow_rate_profile.png"
+    fig_flow = fig_groups["flow"] / "flow_rate_profile.png"
     x_time = frame_source_indices.astype(np.int32)
     fig = plt.figure(figsize=(10, 5))
-    plt.plot(x_time, q_ref_time, label=ref_label, linewidth=2)
-    plt.plot(x_time, q_base_time, label=args.baseline_label, linewidth=2)
-    plt.plot(x_time, q_sr_time, label=args.sr_label, linewidth=2)
-    plt.axhline(q_ref_scalar, linestyle="--", color="black", label=f"Qref={q_ref_scalar:.3f} ml/s")
+    plt.plot(x_time, q_ref_time, label=ref_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_REF)
+    plt.plot(x_time, q_base_time, label=args.baseline_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_BASELINE)
+    plt.plot(x_time, q_sr_time, label=args.sr_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_SR)
+    plt.axhline(q_ref_scalar, linestyle="--", color=REPORT_COLOR_NEUTRAL, linewidth=1.2, label=f"Qref={q_ref_scalar:.3f} ml/s")
     plt.xlabel("Temporal frame index")
     plt.ylabel("Flow rate [ml/s]")
     if flow_method == "centerline":
@@ -2701,7 +3761,7 @@ def main() -> None:
     )
     plt.legend()
     plt.tight_layout()
-    fig.savefig(fig_flow, dpi=180)
+    fig.savefig(fig_flow, dpi=REPORT_FIG_DPI)
     plt.close(fig)
 
     # 3) WSS statistics (optional)
@@ -2825,7 +3885,7 @@ def main() -> None:
         else:
             p_wss = float("nan")
 
-        fig_wss = fig_dir / "wss_distribution.png"
+        fig_wss = fig_groups["wss"] / "wss_distribution.png"
         fig = plt.figure(figsize=(9, 5))
         bins = 80
         if tau_ref.size > 0:
@@ -2839,9 +3899,9 @@ def main() -> None:
         plt.title("Wall shear stress distribution (boundary samples)")
         plt.legend()
         plt.tight_layout()
-        fig.savefig(fig_wss, dpi=180)
+        fig.savefig(fig_wss, dpi=REPORT_FIG_DPI)
         plt.close(fig)
-        fig_wss_name = fig_wss.name
+        fig_wss_name = _rel_fig_path(fig_wss, fig_dir)
 
     # 4) Geometry metrics (paper-like) from temporal mask variability
     geom_rows: List[Dict[str, Any]] = []
@@ -2935,8 +3995,11 @@ def main() -> None:
     corr_rows: List[Dict[str, Any]] = []
     ba_rows: List[Dict[str, Any]] = []
     ba_speed_name = ""
+    ba_speed_single_names: Dict[str, str] = {}
     corr_speed_name = ""
+    corr_speed_single_names: Dict[str, str] = {}
     corr_flow_name = ""
+    corr_flow_single_names: Dict[str, str] = {}
 
     # Intraluminal speed diagnostics
     m_in = mask_ref > 0.5
@@ -2946,7 +4009,7 @@ def main() -> None:
 
     if sp_ref.size > 20:
         # Bland-Altman: baseline vs reference and SR vs reference
-        fig_ba = fig_dir / "bland_altman_speed_dual.png"
+        fig_ba = fig_groups["bland_altman"] / "bland_altman_speed_dual.png"
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         ba_base = _plot_bland_altman_panel(
             ax=axes[0],
@@ -2964,17 +4027,37 @@ def main() -> None:
             test_label=args.sr_label,
             seed=29,
         )
+        _sync_axis_limits(list(np.ravel(axes)), axis="y", symmetric=True, pad_ratio=0.08)
         fig.suptitle("Bland-Altman: intraluminal speed", fontsize=12)
         fig.tight_layout()
-        fig.savefig(fig_ba, dpi=180)
+        fig.savefig(fig_ba, dpi=REPORT_FIG_DPI)
         plt.close(fig)
-        ba_speed_name = fig_ba.name
+        ba_speed_name = _rel_fig_path(fig_ba, fig_dir)
+        # Standalone versions (no subplot)
+        for method_name, test_vals, seed_val in (
+            (args.baseline_label, sp_base, 17),
+            (args.sr_label, sp_sr, 29),
+        ):
+            fig_single = fig_groups["bland_altman"] / f"bland_altman_speed_intraluminal_{method_name.lower().replace(' ', '_')}.png"
+            fig_s, ax_s = plt.subplots(1, 1, figsize=(6.8, 5.0))
+            _plot_bland_altman_panel(
+                ax=ax_s,
+                ref_vals=sp_ref,
+                test_vals=test_vals,
+                ref_label=ref_label,
+                test_label=method_name,
+                seed=seed_val,
+            )
+            fig_s.tight_layout()
+            fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
+            plt.close(fig_s)
+            ba_speed_single_names[method_name] = _rel_fig_path(fig_single, fig_dir)
 
         ba_rows.append({"domain": "speed_intraluminal", "method": args.baseline_label, **ba_base})
         ba_rows.append({"domain": "speed_intraluminal", "method": args.sr_label, **ba_sr})
 
         # Correlation: baseline/ref and SR/ref
-        fig_corr_speed = fig_dir / "correlation_speed_intraluminal.png"
+        fig_corr_speed = fig_groups["correlation"] / "correlation_speed_intraluminal.png"
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         c_base = _plot_correlation_panel(
             ax=axes[0],
@@ -2983,7 +4066,7 @@ def main() -> None:
             x_label=f"{ref_label} speed [m/s]",
             y_label=f"{args.baseline_label} speed [m/s]",
             title=f"{args.baseline_label} vs {ref_label}",
-            color="#1d4ed8",
+            color=REPORT_COLOR_BASELINE,
             seed=41,
         )
         c_sr = _plot_correlation_panel(
@@ -2993,21 +4076,42 @@ def main() -> None:
             x_label=f"{ref_label} speed [m/s]",
             y_label=f"{args.sr_label} speed [m/s]",
             title=f"{args.sr_label} vs {ref_label}",
-            color="#b91c1c",
+            color=REPORT_COLOR_SR,
             seed=43,
         )
         fig.suptitle("Correlation: intraluminal speed", fontsize=12)
         fig.tight_layout()
-        fig.savefig(fig_corr_speed, dpi=180)
+        fig.savefig(fig_corr_speed, dpi=REPORT_FIG_DPI)
         plt.close(fig)
-        corr_speed_name = fig_corr_speed.name
+        corr_speed_name = _rel_fig_path(fig_corr_speed, fig_dir)
+        # Standalone versions (no subplot)
+        for method_name, y_vals, color_val, seed_val in (
+            (args.baseline_label, sp_base, REPORT_COLOR_BASELINE, 41),
+            (args.sr_label, sp_sr, REPORT_COLOR_SR, 43),
+        ):
+            fig_single = fig_groups["correlation"] / f"correlation_speed_intraluminal_{method_name.lower().replace(' ', '_')}.png"
+            fig_s, ax_s = plt.subplots(1, 1, figsize=(6.8, 5.0))
+            _plot_correlation_panel(
+                ax=ax_s,
+                x=sp_ref,
+                y=y_vals,
+                x_label=f"{ref_label} speed [m/s]",
+                y_label=f"{method_name} speed [m/s]",
+                title=f"{method_name} vs {ref_label}",
+                color=color_val,
+                seed=seed_val,
+            )
+            fig_s.tight_layout()
+            fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
+            plt.close(fig_s)
+            corr_speed_single_names[method_name] = _rel_fig_path(fig_single, fig_dir)
 
         corr_rows.append({"domain": "speed_intraluminal", "method": args.baseline_label, **c_base})
         corr_rows.append({"domain": "speed_intraluminal", "method": args.sr_label, **c_sr})
 
     # Temporal-flow correlation diagnostics
     if q_ref_time.size > 2:
-        fig_corr_flow = fig_dir / "correlation_flow_temporal.png"
+        fig_corr_flow = fig_groups["correlation"] / "correlation_flow_temporal.png"
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         cf_base = _plot_correlation_panel(
             ax=axes[0],
@@ -3016,7 +4120,7 @@ def main() -> None:
             x_label=f"{ref_label} flow [ml/s]",
             y_label=f"{args.baseline_label} flow [ml/s]",
             title=f"{args.baseline_label} vs {ref_label}",
-            color="#1d4ed8",
+            color=REPORT_COLOR_BASELINE,
             seed=53,
         )
         cf_sr = _plot_correlation_panel(
@@ -3026,19 +4130,40 @@ def main() -> None:
             x_label=f"{ref_label} flow [ml/s]",
             y_label=f"{args.sr_label} flow [ml/s]",
             title=f"{args.sr_label} vs {ref_label}",
-            color="#b91c1c",
+            color=REPORT_COLOR_SR,
             seed=59,
         )
         fig.suptitle("Correlation: temporal flow profile", fontsize=12)
         fig.tight_layout()
-        fig.savefig(fig_corr_flow, dpi=180)
+        fig.savefig(fig_corr_flow, dpi=REPORT_FIG_DPI)
         plt.close(fig)
-        corr_flow_name = fig_corr_flow.name
+        corr_flow_name = _rel_fig_path(fig_corr_flow, fig_dir)
+        # Standalone versions (no subplot)
+        for method_name, y_vals, color_val, seed_val in (
+            (args.baseline_label, q_base_time, REPORT_COLOR_BASELINE, 53),
+            (args.sr_label, q_sr_time, REPORT_COLOR_SR, 59),
+        ):
+            fig_single = fig_groups["correlation"] / f"correlation_flow_temporal_{method_name.lower().replace(' ', '_')}.png"
+            fig_s, ax_s = plt.subplots(1, 1, figsize=(6.8, 5.0))
+            _plot_correlation_panel(
+                ax=ax_s,
+                x=q_ref_time,
+                y=y_vals,
+                x_label=f"{ref_label} flow [ml/s]",
+                y_label=f"{method_name} flow [ml/s]",
+                title=f"{method_name} vs {ref_label}",
+                color=color_val,
+                seed=seed_val,
+            )
+            fig_s.tight_layout()
+            fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
+            plt.close(fig_s)
+            corr_flow_single_names[method_name] = _rel_fig_path(fig_single, fig_dir)
 
         corr_rows.append({"domain": "flow_temporal", "method": args.baseline_label, **cf_base})
         corr_rows.append({"domain": "flow_temporal", "method": args.sr_label, **cf_sr})
 
-    # Paper-like cerebrovascular metrics at peak flow (component-wise + core/wall)
+    # Paper-like cerebrovascular metrics: peak-frame summaries + all-frame component BA diagnostics.
     peak_mask = (mask_ref[peak_idx] > 0.5)
     core_mask = binary_erosion(peak_mask, iterations=1)
     if int(core_mask.sum()) == 0:
@@ -3068,8 +4193,11 @@ def main() -> None:
 
     comp_corr_rows: List[Dict[str, Any]] = []
     comp_ba_rows: List[Dict[str, Any]] = []
+    comp_ba_names: Dict[str, str] = {}
+    comp_corr_single_names: Dict[str, str] = {}
+    comp_ba_single_names: Dict[str, str] = {}
 
-    fig_comp_corr = fig_dir / "correlation_velocity_components_peak.png"
+    fig_comp_corr = fig_groups["correlation"] / "correlation_velocity_components_peak.png"
     fig, axes = plt.subplots(2, 4, figsize=(18, 9))
     for c_idx, comp_name in enumerate(("u", "v", "w", "mag")):
         rr = peak_ref_comp[comp_name][peak_mask]
@@ -3082,7 +4210,7 @@ def main() -> None:
             x_label=f"{ref_label} {comp_name}",
             y_label=f"{args.baseline_label} {comp_name}",
             title=f"{args.baseline_label} vs {ref_label} ({comp_name})",
-            color="#1d4ed8",
+            color=REPORT_COLOR_BASELINE,
             seed=101 + c_idx,
         )
         st_sr = _plot_correlation_panel(
@@ -3092,9 +4220,32 @@ def main() -> None:
             x_label=f"{ref_label} {comp_name}",
             y_label=f"{args.sr_label} {comp_name}",
             title=f"{args.sr_label} vs {ref_label} ({comp_name})",
-            color="#b91c1c",
+            color=REPORT_COLOR_SR,
             seed=111 + c_idx,
         )
+        # Standalone versions (no subplot)
+        for method_name, yy, color_val, seed_val in (
+            (args.baseline_label, bb, REPORT_COLOR_BASELINE, 101 + c_idx),
+            (args.sr_label, ss, REPORT_COLOR_SR, 111 + c_idx),
+        ):
+            fig_single = fig_groups["correlation"] / (
+                f"correlation_velocity_component_peak_{comp_name}_{method_name.lower().replace(' ', '_')}.png"
+            )
+            fig_s, ax_s = plt.subplots(1, 1, figsize=(6.6, 5.0))
+            _plot_correlation_panel(
+                ax=ax_s,
+                x=rr,
+                y=yy,
+                x_label=f"{ref_label} {comp_name}",
+                y_label=f"{method_name} {comp_name}",
+                title=f"{method_name} vs {ref_label} ({comp_name})",
+                color=color_val,
+                seed=seed_val,
+            )
+            fig_s.tight_layout()
+            fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
+            plt.close(fig_s)
+            comp_corr_single_names[f"{comp_name}_{method_name}"] = _rel_fig_path(fig_single, fig_dir)
         comp_corr_rows.append(
             {
                 "domain": "velocity_component_peak",
@@ -3119,18 +4270,41 @@ def main() -> None:
         )
     fig.suptitle("Peak-flow component correlation (intraluminal)", fontsize=13)
     fig.tight_layout()
-    fig.savefig(fig_comp_corr, dpi=180)
+    fig.savefig(fig_comp_corr, dpi=REPORT_FIG_DPI)
     plt.close(fig)
-    comp_corr_name = fig_comp_corr.name
+    comp_corr_name = _rel_fig_path(fig_comp_corr, fig_dir)
 
-    fig_comp_ba = fig_dir / "bland_altman_velocity_components_peak.png"
-    fig, axes = plt.subplots(2, 4, figsize=(18, 9))
+    comp_ref_all = {
+        "u": gt_phys[:, 0],
+        "v": gt_phys[:, 1],
+        "w": gt_phys[:, 2],
+        "mag": speed_ref,
+    }
+    comp_base_all = {
+        "u": lr_vel_phys_metrics[:, 0],
+        "v": lr_vel_phys_metrics[:, 1],
+        "w": lr_vel_phys_metrics[:, 2],
+        "mag": speed_base,
+    }
+    comp_sr_all = {
+        "u": pred_phys[:, 0],
+        "v": pred_phys[:, 1],
+        "w": pred_phys[:, 2],
+        "mag": speed_sr,
+    }
+    comp_title = {"u": "U component", "v": "V component", "w": "W component", "mag": "Speed magnitude"}
+
     for c_idx, comp_name in enumerate(("u", "v", "w", "mag")):
-        rr = peak_ref_comp[comp_name][peak_mask]
-        bb = peak_base_comp[comp_name][peak_mask]
-        ss = peak_sr_comp[comp_name][peak_mask]
+        rr = comp_ref_all[comp_name][m_in]
+        bb = comp_base_all[comp_name][m_in]
+        ss = comp_sr_all[comp_name][m_in]
+        if rr.size < 20:
+            continue
+
+        fig_comp_ba = fig_groups["bland_altman"] / f"bland_altman_velocity_component_{comp_name}_allframes.png"
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         ba_base = _plot_bland_altman_panel(
-            ax=axes[0, c_idx],
+            ax=axes[0],
             ref_vals=rr,
             test_vals=bb,
             ref_label=ref_label,
@@ -3138,42 +4312,68 @@ def main() -> None:
             seed=201 + c_idx,
         )
         ba_sr = _plot_bland_altman_panel(
-            ax=axes[1, c_idx],
+            ax=axes[1],
             ref_vals=rr,
             test_vals=ss,
             ref_label=ref_label,
             test_label=args.sr_label,
             seed=211 + c_idx,
         )
+        _sync_axis_limits(list(np.ravel(axes)), axis="y", symmetric=True, pad_ratio=0.08)
+        fig.suptitle(
+            f"Bland-Altman: {comp_title[comp_name]} (all frames, in-mask voxels)",
+            fontsize=12,
+        )
+        fig.tight_layout()
+        fig.savefig(fig_comp_ba, dpi=REPORT_FIG_DPI)
+        plt.close(fig)
+        comp_ba_names[comp_name] = _rel_fig_path(fig_comp_ba, fig_dir)
+        # Standalone versions (no subplot)
+        for method_name, test_vals, seed_val in (
+            (args.baseline_label, bb, 201 + c_idx),
+            (args.sr_label, ss, 211 + c_idx),
+        ):
+            fig_single = fig_groups["bland_altman"] / (
+                f"bland_altman_velocity_component_{comp_name}_{method_name.lower().replace(' ', '_')}.png"
+            )
+            fig_s, ax_s = plt.subplots(1, 1, figsize=(6.6, 5.0))
+            _plot_bland_altman_panel(
+                ax=ax_s,
+                ref_vals=rr,
+                test_vals=test_vals,
+                ref_label=ref_label,
+                test_label=method_name,
+                seed=seed_val,
+            )
+            fig_s.tight_layout()
+            fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
+            plt.close(fig_s)
+            comp_ba_single_names[f"{comp_name}_{method_name}"] = _rel_fig_path(fig_single, fig_dir)
+
         comp_ba_rows.append(
             {
-                "domain": "velocity_component_peak",
+                "domain": "velocity_component_all_frames",
                 "region": "intraluminal",
                 "component": comp_name,
                 "method": args.baseline_label,
-                "frame_payload_index": int(peak_idx),
-                "frame_source_index": int(peak_frame_src),
+                "frame_payload_index": -1,
+                "frame_source_index": -1,
                 **ba_base,
             }
         )
         comp_ba_rows.append(
             {
-                "domain": "velocity_component_peak",
+                "domain": "velocity_component_all_frames",
                 "region": "intraluminal",
                 "component": comp_name,
                 "method": args.sr_label,
-                "frame_payload_index": int(peak_idx),
-                "frame_source_index": int(peak_frame_src),
+                "frame_payload_index": -1,
+                "frame_source_index": -1,
                 **ba_sr,
             }
         )
-    fig.suptitle("Peak-flow component Bland-Altman (intraluminal)", fontsize=13)
-    fig.tight_layout()
-    fig.savefig(fig_comp_ba, dpi=180)
-    plt.close(fig)
-    comp_ba_name = fig_comp_ba.name
 
-    # Peak speed metrics in core and wall regions
+    # Peak speed metrics in core, wall, and full intraluminal regions.
     def _region_peak_speed_metrics(region_mask: np.ndarray, region_name: str, method_name: str, test_speed: np.ndarray) -> Dict[str, Any]:
         r = speed_ref[peak_idx][region_mask]
         t = test_speed[peak_idx][region_mask]
@@ -3190,7 +4390,7 @@ def main() -> None:
                 "relative_error_pct": float("nan"),
                 "cosine_similarity": float("nan"),
             }
-        rel = float(np.mean(np.abs(t - r) / (np.abs(r) + 1e-12)) * 100.0)
+        rel = float(_scipy_mean(np.abs(t - r) / (np.abs(r) + 1e-12)) * 100.0)
         num = float(np.dot(r.astype(np.float64), t.astype(np.float64)))
         den = float(np.linalg.norm(r.astype(np.float64)) * np.linalg.norm(t.astype(np.float64)) + 1e-12)
         return {
@@ -3200,8 +4400,8 @@ def main() -> None:
             "frame_payload_index": int(peak_idx),
             "frame_source_index": int(peak_frame_src),
             "n": int(r.size),
-            "mae": float(np.mean(np.abs(t - r))),
-            "rmse": float(np.sqrt(np.mean((t - r) ** 2))),
+            "mae": _scipy_mean(np.abs(t - r)),
+            "rmse": _scipy_rmse(t - r),
             "relative_error_pct": rel,
             "cosine_similarity": float(num / den),
         }
@@ -3211,7 +4411,134 @@ def main() -> None:
         _region_peak_speed_metrics(core_mask, "core", args.sr_label, speed_sr),
         _region_peak_speed_metrics(wall_mask, "wall", args.baseline_label, speed_base),
         _region_peak_speed_metrics(wall_mask, "wall", args.sr_label, speed_sr),
+        _region_peak_speed_metrics(peak_mask, "intraluminal", args.baseline_label, speed_base),
+        _region_peak_speed_metrics(peak_mask, "intraluminal", args.sr_label, speed_sr),
     ]
+
+    def _region_mean_speed_metrics(region_name: str, method_name: str, test_speed: np.ndarray) -> Dict[str, Any]:
+        ref_parts: List[np.ndarray] = []
+        test_parts: List[np.ndarray] = []
+        for t in range(t_count):
+            mask_t = mask_ref[t] > 0.5
+            if int(mask_t.sum()) == 0:
+                continue
+            core_t = binary_erosion(mask_t, iterations=1)
+            if int(core_t.sum()) == 0:
+                core_t = mask_t.copy()
+            wall_t = mask_t & (~core_t)
+            if int(wall_t.sum()) == 0:
+                wall_t = mask_t.copy()
+            if region_name == "core":
+                region_mask = core_t
+            elif region_name == "wall":
+                region_mask = wall_t
+            else:
+                region_mask = mask_t
+            r_t = speed_ref[t][region_mask]
+            s_t = test_speed[t][region_mask]
+            if r_t.size == 0:
+                continue
+            ref_parts.append(np.asarray(r_t, dtype=np.float64))
+            test_parts.append(np.asarray(s_t, dtype=np.float64))
+
+        if not ref_parts:
+            return {
+                "domain": "mean_velocity_magnitude",
+                "region": region_name,
+                "method": method_name,
+                "frame_payload_index": -1,
+                "frame_source_index": -1,
+                "n": 0,
+                "mae": float("nan"),
+                "rmse": float("nan"),
+                "relative_error_pct": float("nan"),
+                "cosine_similarity": float("nan"),
+            }
+
+        r = np.concatenate(ref_parts, axis=0)
+        t = np.concatenate(test_parts, axis=0)
+        rel = float(_scipy_mean(np.abs(t - r) / (np.abs(r) + 1e-12)) * 100.0)
+        num = float(np.dot(r, t))
+        den = float(np.linalg.norm(r) * np.linalg.norm(t) + 1e-12)
+        return {
+            "domain": "mean_velocity_magnitude",
+            "region": region_name,
+            "method": method_name,
+            "frame_payload_index": -1,
+            "frame_source_index": -1,
+            "n": int(r.size),
+            "mae": _scipy_mean(np.abs(t - r)),
+            "rmse": _scipy_rmse(t - r),
+            "relative_error_pct": rel,
+            "cosine_similarity": float(num / den),
+        }
+
+    mean_speed_rows = [
+        _region_mean_speed_metrics("core", args.baseline_label, speed_base),
+        _region_mean_speed_metrics("core", args.sr_label, speed_sr),
+        _region_mean_speed_metrics("wall", args.baseline_label, speed_base),
+        _region_mean_speed_metrics("wall", args.sr_label, speed_sr),
+        _region_mean_speed_metrics("intraluminal", args.baseline_label, speed_base),
+        _region_mean_speed_metrics("intraluminal", args.sr_label, speed_sr),
+    ]
+
+    # Statistical significance (paired Wilcoxon) for voxel-wise absolute errors: baseline vs SR.
+    pvalue_rows: List[Dict[str, Any]] = []
+
+    # 1) Peak velocity significance at peak frame (core/wall/intraluminal).
+    for region_name, region_mask in (("core", core_mask), ("wall", wall_mask), ("intraluminal", peak_mask)):
+        r_peak = speed_ref[peak_idx][region_mask]
+        err_base_peak = np.abs(speed_base[peak_idx][region_mask] - r_peak)
+        err_sr_peak = np.abs(speed_sr[peak_idx][region_mask] - r_peak)
+        p_val = _wilcoxon_p(err_base_peak.tolist(), err_sr_peak.tolist())
+        pvalue_rows.append(
+            {
+                "analysis": "Peak Velocity (Systolic)",
+                "region": region_name,
+                "wilcoxon_p_value": p_val,
+                "n_voxels": int(r_peak.size),
+            }
+        )
+
+    # 2) Mean velocity significance using all frames with per-frame dynamic masks.
+    for region_name in ("core", "wall", "intraluminal"):
+        err_base_mean_parts: List[np.ndarray] = []
+        err_sr_mean_parts: List[np.ndarray] = []
+        for t in range(t_count):
+            mask_t = mask_ref[t] > 0.5
+            if int(mask_t.sum()) == 0:
+                continue
+            core_t = binary_erosion(mask_t, iterations=1)
+            if int(core_t.sum()) == 0:
+                core_t = mask_t.copy()
+            wall_t = mask_t & (~core_t)
+            if int(wall_t.sum()) == 0:
+                wall_t = mask_t.copy()
+
+            if region_name == "core":
+                region_mask_t = core_t
+            elif region_name == "wall":
+                region_mask_t = wall_t
+            else:
+                region_mask_t = mask_t
+            r_t = speed_ref[t][region_mask_t]
+            if r_t.size == 0:
+                continue
+            err_base_mean_parts.append(np.abs(speed_base[t][region_mask_t] - r_t))
+            err_sr_mean_parts.append(np.abs(speed_sr[t][region_mask_t] - r_t))
+
+        if err_base_mean_parts:
+            err_base_mean = np.concatenate(err_base_mean_parts, axis=0)
+            err_sr_mean = np.concatenate(err_sr_mean_parts, axis=0)
+            p_val_mean = _wilcoxon_p(err_base_mean.tolist(), err_sr_mean.tolist())
+            pvalue_rows.append(
+                {
+                    "analysis": "Mean Velocity (All frames)",
+                    "region": region_name,
+                    "wilcoxon_p_value": p_val_mean,
+                    "n_voxels": int(err_base_mean.size),
+                }
+            )
 
     # Flow peak-like metrics (temporal)
     flow_peak_rows = []
@@ -3226,8 +4553,24 @@ def main() -> None:
                 "peak_method_flow_ml_s": float(q_time[peak_idx]),
                 "peak_abs_err_ml_s": float(abs(q_time[peak_idx] - q_ref_time[peak_idx])),
                 "peak_relative_err_pct": float(abs(q_time[peak_idx] - q_ref_time[peak_idx]) / (abs(q_ref_time[peak_idx]) + 1e-12) * 100.0),
-                "rmse_over_time_ml_s": float(np.sqrt(np.mean((q_time - q_ref_time) ** 2))),
-                "relative_err_over_time_pct": float(np.mean(np.abs(q_time - q_ref_time) / (np.abs(q_ref_time) + 1e-12)) * 100.0),
+                "rmse_over_time_ml_s": _scipy_rmse(q_time - q_ref_time),
+                "relative_err_over_time_pct": float(_scipy_mean(np.abs(q_time - q_ref_time) / (np.abs(q_ref_time) + 1e-12)) * 100.0),
+            }
+        )
+
+    flow_average_rows = []
+    for method_name, q_time in ((args.baseline_label, q_base_time), (args.sr_label, q_sr_time)):
+        abs_err = np.abs(q_time - q_ref_time)
+        rel_err = np.abs(q_time - q_ref_time) / (np.abs(q_ref_time) + 1e-12)
+        flow_average_rows.append(
+            {
+                "domain": "flow_temporal_mean",
+                "method": method_name,
+                "mean_ref_flow_ml_s": _scipy_mean(q_ref_time),
+                "mean_method_flow_ml_s": _scipy_mean(q_time),
+                "mean_abs_err_ml_s": _scipy_mean(abs_err),
+                "mean_relative_err_pct": float(_scipy_mean(rel_err) * 100.0),
+                "rmse_over_time_ml_s": _scipy_rmse(q_time - q_ref_time),
             }
         )
 
@@ -3260,6 +4603,11 @@ def main() -> None:
         ["domain", "region", "method", "frame_payload_index", "frame_source_index", "n", "mae", "rmse", "relative_error_pct", "cosine_similarity"],
     )
     _write_csv(
+        metrics_dir / "mean_velocity_metrics.csv",
+        mean_speed_rows,
+        ["domain", "region", "method", "frame_payload_index", "frame_source_index", "n", "mae", "rmse", "relative_error_pct", "cosine_similarity"],
+    )
+    _write_csv(
         metrics_dir / "flow_peak_metrics.csv",
         flow_peak_rows,
         [
@@ -3275,13 +4623,77 @@ def main() -> None:
             "relative_err_over_time_pct",
         ],
     )
+    _write_csv(
+        metrics_dir / "flow_average_metrics.csv",
+        flow_average_rows,
+        [
+            "domain",
+            "method",
+            "mean_ref_flow_ml_s",
+            "mean_method_flow_ml_s",
+            "mean_abs_err_ml_s",
+            "mean_relative_err_pct",
+            "rmse_over_time_ml_s",
+        ],
+    )
+    _write_csv(
+        metrics_dir / "significance_pvalues.csv",
+        pvalue_rows,
+        ["analysis", "region", "wilcoxon_p_value", "n_voxels"],
+    )
+    publication_figs_raw = _save_publication_figures(
+        fig_dir=fig_groups["publication"],
+        baseline_label=args.baseline_label,
+        sr_label=args.sr_label,
+        ref_label=ref_label,
+        peak_speed_rows=peak_speed_rows,
+        mean_speed_rows=mean_speed_rows,
+        table2_all_rows=table2_all,
+        table2_temporal_mean_rows=table2_temporal_mean,
+        corr_rows=corr_rows,
+        voxel_dist_rows=voxel_dist_rows,
+        pvalue_rows=pvalue_rows,
+        q_ref_time=q_ref_time,
+        q_base_time=q_base_time,
+        q_sr_time=q_sr_time,
+        frame_source_indices=frame_source_indices,
+    )
+    publication_figs = {
+        k: _rel_fig_path(fig_groups["publication"] / str(v), fig_dir)
+        for k, v in publication_figs_raw.items()
+    }
 
     ba_cols = ["domain", "region", "component", "method", "frame_payload_index", "frame_source_index", "n", "bias", "sd_diff", "loa_low", "loa_high"]
     if ba_rows:
         _write_csv(metrics_dir / "bland_altman_stats.csv", ba_rows, ba_cols)
 
+    _write_csv(
+        metrics_dir / "run_context.csv",
+        [
+            {
+                "task_mode": task_mode_tag,
+                "task_mode_label": task_mode_label,
+                "res_increase_detected": None if detected_res_increase is None else int(detected_res_increase),
+                "reference_label": str(ref_label),
+                "baseline_label": str(args.baseline_label),
+                "sr_label": str(args.sr_label),
+            }
+        ],
+        [
+            "task_mode",
+            "task_mode_label",
+            "res_increase_detected",
+            "reference_label",
+            "baseline_label",
+            "sr_label",
+        ],
+    )
+
     summary = {
         "report_title": args.report_title,
+        "task_mode": task_mode_tag,
+        "task_mode_label": task_mode_label,
+        "res_increase_detected": None if detected_res_increase is None else int(detected_res_increase),
         "labels": {
             "reference": ref_label,
             "baseline": args.baseline_label,
@@ -3302,6 +4714,7 @@ def main() -> None:
         },
         "statistics": {
             "table2_wilcoxon_p_re_baseline_vs_sr": p_re,
+            "table2_temporal_mean_rows": table2_temporal_mean,
             "flow_wilcoxon_p_abs_err": p_flow,
             "wss_wilcoxon_p_abs_err": p_wss,
             "flow_reference_q_ml_s": q_ref_scalar,
@@ -3314,10 +4727,15 @@ def main() -> None:
             "centerline": centerline_summary,
             "wss_enabled": bool(args.include_wss),
             "relative_pressure_status": "pending_vwerp_implementation",
+            "task_mode": task_mode_tag,
+            "res_increase_detected": None if detected_res_increase is None else int(detected_res_increase),
             "correlation_rows": corr_rows,
             "bland_altman_rows": ba_rows,
             "peak_velocity_rows": peak_speed_rows,
+            "mean_velocity_rows": mean_speed_rows,
+            "significance_pvalue_rows": pvalue_rows,
             "flow_peak_rows": flow_peak_rows,
+            "flow_average_rows": flow_average_rows,
             "geometry_status": geom_status,
             "geometry_note": geom_note,
             "geometry_summary": geom_summary,
@@ -3328,6 +4746,10 @@ def main() -> None:
             "max_display_slices": int(args.max_display_slices),
             "panel_cols": int(args.panel_cols),
             "hist_bins": int(args.hist_bins),
+            "voxel_histogram_overview_figure": str(_rel_fig_path(fig_voxel_hist, fig_dir)),
+            "voxel_histogram_channel_figures": {k: str(v) for k, v in voxel_hist_channel_figs.items()},
+            "component_bland_altman_figures": {k: str(v) for k, v in comp_ba_names.items()},
+            "publication_style_figures": {k: str(v) for k, v in publication_figs.items()},
             "centerline_overlay_figure": str(centerline_overlay_name),
             "centerline_3d_figure": str(centerline_3d_name),
             "centerline_sections_figure": str(centerline_sections_name),
@@ -3353,6 +4775,17 @@ def main() -> None:
 
     t2_comp_cols = ["location", "slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
     t2_comp_html = _html_table(fmt_rows(table2_compact, t2_comp_cols, nd=6), t2_comp_cols)
+    t2_tm_cols = [
+        "slice_index",
+        "variable",
+        "n_frames",
+        "ref_mean_over_frames",
+        "baseline_mean_over_frames",
+        "sr_mean_over_frames",
+        "re_baseline_mean_over_frames",
+        "re_sr_mean_over_frames",
+    ]
+    t2_tm_html = _html_table(fmt_rows(table2_temporal_mean, t2_tm_cols, nd=6), t2_tm_cols) if table2_temporal_mean else "<p class=\"muted\">No temporal-mean Table-2 rows.</p>"
 
     t3_cols = ["metric", "ref", "baseline", "sr", "re_baseline", "re_sr"]
     t3_html = _html_table(fmt_rows(table3_rows, t3_cols, nd=6), t3_cols) if table3_rows else ""
@@ -3380,6 +4813,10 @@ def main() -> None:
     ba_html = _html_table(fmt_rows(ba_rows, ba_cols, nd=6), ba_cols) if ba_rows else "<p class=\"muted\">No Bland-Altman rows available.</p>"
     peak_vel_cols = ["domain", "region", "method", "frame_payload_index", "frame_source_index", "n", "mae", "rmse", "relative_error_pct", "cosine_similarity"]
     peak_vel_html = _html_table(fmt_rows(peak_speed_rows, peak_vel_cols, nd=6), peak_vel_cols) if peak_speed_rows else "<p class=\"muted\">No peak velocity rows.</p>"
+    mean_vel_cols = ["domain", "region", "method", "frame_payload_index", "frame_source_index", "n", "mae", "rmse", "relative_error_pct", "cosine_similarity"]
+    mean_vel_html = _html_table(fmt_rows(mean_speed_rows, mean_vel_cols, nd=6), mean_vel_cols) if mean_speed_rows else "<p class=\"muted\">No mean velocity rows.</p>"
+    pvalue_cols = ["analysis", "region", "wilcoxon_p_value", "n_voxels"]
+    pvalue_html = _html_table(fmt_rows(pvalue_rows, pvalue_cols, nd=6), pvalue_cols) if pvalue_rows else "<p class=\"muted\">No statistical significance rows.</p>"
     flow_peak_cols = [
         "domain",
         "method",
@@ -3393,6 +4830,16 @@ def main() -> None:
         "relative_err_over_time_pct",
     ]
     flow_peak_html = _html_table(fmt_rows(flow_peak_rows, flow_peak_cols, nd=6), flow_peak_cols) if flow_peak_rows else "<p class=\"muted\">No peak flow rows.</p>"
+    flow_avg_cols = [
+        "domain",
+        "method",
+        "mean_ref_flow_ml_s",
+        "mean_method_flow_ml_s",
+        "mean_abs_err_ml_s",
+        "mean_relative_err_pct",
+        "rmse_over_time_ml_s",
+    ]
+    flow_avg_html = _html_table(fmt_rows(flow_average_rows, flow_avg_cols, nd=6), flow_avg_cols) if flow_average_rows else "<p class=\"muted\">No mean flow rows.</p>"
 
     flow_html = _html_table(fmt_rows(flow_rows, flow_cols, nd=6), flow_cols)
     voxel_dist_html = _html_table(fmt_rows(voxel_dist_rows, voxel_dist_cols, nd=6), voxel_dist_cols)
@@ -3425,6 +4872,10 @@ def main() -> None:
     ch_img_tags = "\n".join(
         f"<h4>Channel {k}</h4><img src='figures/{v}' alt='{k} comparison'/>" for k, v in channel_figs.items()
     )
+    voxel_hist_channel_tags = "\n".join(
+        f"<h4>Intensity Histogram {k.upper()}</h4><img src='figures/{v}' alt='Intensity histogram {k.upper()}'/>"
+        for k, v in voxel_hist_channel_figs.items()
+    )
 
     wss_summary_text = (
         f"{p_wss:.4g}" if (bool(args.include_wss) and np.isfinite(p_wss)) else ("disabled" if not bool(args.include_wss) else "nan")
@@ -3433,7 +4884,106 @@ def main() -> None:
     corr_speed_tag = f'<img src="figures/{corr_speed_name}" alt="Correlation speed"/>' if corr_speed_name else ""
     corr_flow_tag = f'<img src="figures/{corr_flow_name}" alt="Correlation temporal flow"/>' if corr_flow_name else ""
     comp_corr_tag = f'<img src="figures/{comp_corr_name}" alt="Correlation velocity components peak"/>' if comp_corr_name else ""
-    comp_ba_tag = f'<img src="figures/{comp_ba_name}" alt="Bland-Altman velocity components peak"/>' if comp_ba_name else ""
+    corr_speed_tags = (
+        "\n".join(
+            [
+                f"<h4>Correlation speed ({m})</h4><img src='figures/{p}' alt='Correlation speed {m}'/>"
+                for m, p in corr_speed_single_names.items()
+            ]
+        )
+        if corr_speed_single_names
+        else corr_speed_tag
+    )
+    corr_flow_tags = (
+        "\n".join(
+            [
+                f"<h4>Correlation flow temporal ({m})</h4><img src='figures/{p}' alt='Correlation flow temporal {m}'/>"
+                for m, p in corr_flow_single_names.items()
+            ]
+        )
+        if corr_flow_single_names
+        else corr_flow_tag
+    )
+    ba_speed_tags = (
+        "\n".join(
+            [
+                f"<h4>Bland-Altman intraluminal speed ({m})</h4><img src='figures/{p}' alt='Bland-Altman intraluminal speed {m}'/>"
+                for m, p in ba_speed_single_names.items()
+            ]
+        )
+        if ba_speed_single_names
+        else (f'<img src="figures/{ba_speed_name}" alt="Bland-Altman speed"/>' if ba_speed_name else "")
+    )
+    comp_corr_tags = (
+        "\n".join(
+            [
+                f"<h4>Peak component correlation {k.replace('_', ' | ')}</h4><img src='figures/{v}' alt='Peak component correlation {k}'/>"
+                for k, v in comp_corr_single_names.items()
+            ]
+        )
+        if comp_corr_single_names
+        else comp_corr_tag
+    )
+    comp_ba_tags = "\n".join(
+        [
+            (
+                f"<h4>Bland-Altman {k.upper()} (all frames, in-mask voxels)</h4>"
+                f"<img src='figures/{v}' alt='Bland-Altman {k.upper()} all frames in-mask voxels'/>"
+            )
+            for k, v in comp_ba_names.items()
+        ]
+    )
+    if comp_ba_single_names:
+        comp_ba_tags = "\n".join(
+            [
+                f"<h4>Bland-Altman {k.replace('_', ' | ')}</h4><img src='figures/{v}' alt='Bland-Altman {k}'/>"
+                for k, v in comp_ba_single_names.items()
+            ]
+        )
+    saved_comp_ba_items = "".join([f"<li><code>figures/{v}</code></li>" for _, v in comp_ba_names.items()])
+    saved_comp_ba_single_items = "".join([f"<li><code>figures/{v}</code></li>" for _, v in comp_ba_single_names.items()])
+    saved_corr_single_items = "".join([f"<li><code>figures/{v}</code></li>" for _, v in corr_speed_single_names.items()])
+    saved_corr_single_items += "".join([f"<li><code>figures/{v}</code></li>" for _, v in corr_flow_single_names.items()])
+    saved_corr_single_items += "".join([f"<li><code>figures/{v}</code></li>" for _, v in comp_corr_single_names.items()])
+    saved_ba_speed_single_items = "".join([f"<li><code>figures/{v}</code></li>" for _, v in ba_speed_single_names.items()])
+    saved_voxel_hist_items = "".join([f"<li><code>figures/{v}</code></li>" for _, v in voxel_hist_channel_figs.items()])
+    publication_fig_order = [
+        ("velocity_error_mae_systolic_peak_peak_frame", "Velocity Error MAE (Peak Frame)"),
+        ("velocity_error_rmse_systolic_peak_peak_frame", "Velocity Error RMSE (Peak Frame)"),
+        ("velocity_error_mae_temporal_mean_all_frames", "Velocity Error MAE (Temporal Mean)"),
+        ("velocity_error_rmse_temporal_mean_all_frames", "Velocity Error RMSE (Temporal Mean)"),
+        ("velocity_relative_error_pct_peak", "Velocity Relative Error (%) Peak"),
+        ("velocity_relative_error_pct_temporal_mean", "Velocity Relative Error (%) Temporal Mean"),
+        ("slice_relative_errors", "Slice-wise Relative Errors"),
+        ("table2_relative_error_violin_velocity", "Table-2 Relative Error Violin (Velocity)"),
+        ("table2_relative_error_violin_vorticity", "Table-2 Relative Error Violin (Vorticity)"),
+        ("table2_temporal_mean_relative_error_bar", "Table-2 Temporal-Mean Relative Error (Bar)"),
+        ("table2_temporal_mean_relative_error_violin_velocity", "Table-2 Temporal-Mean Violin (Velocity)"),
+        ("table2_temporal_mean_relative_error_violin_vorticity", "Table-2 Temporal-Mean Violin (Vorticity)"),
+        ("flow_abs_error_over_time", "Temporal Flow Absolute Error"),
+        ("correlation_pearson_r", "Correlation (Pearson r)"),
+        ("correlation_rmse_only", "Correlation (RMSE)"),
+        ("voxel_distribution_std", "Voxel Distribution Std Dev"),
+        ("significance_pvalues", "Wilcoxon Significance Summary"),
+    ]
+    publication_fig_tags = "\n".join(
+        [
+            f"<h3>{title}</h3><img src='figures/{publication_figs[key]}' alt='{title}'/>"
+            for key, title in publication_fig_order
+            if key in publication_figs
+        ]
+    )
+    publication_fig_section = (
+        "<h2>Additional Publication-style Figures</h2>"
+        "<p class=\"muted\">Automated summary figures generated from report metrics with a colorblind-safe palette "
+        "(reference=green, baseline=orange, SR=blue).</p>"
+        f"{publication_fig_tags}"
+        if publication_fig_tags
+        else ""
+    )
+    saved_publication_fig_items = "".join(
+        [f"<li><code>figures/{publication_figs[key]}</code></li>" for key, _ in publication_fig_order if key in publication_figs]
+    )
     centerline_overlay_tag = f'<img src="figures/{centerline_overlay_name}" alt="Centerline overlay"/>' if centerline_overlay_name else ""
     centerline_3d_tag = f'<img src="figures/{centerline_3d_name}" alt="Centerline 3D"/>' if centerline_3d_name else ""
     centerline_sections_tag = f'<img src="figures/{centerline_sections_name}" alt="Centerline plane sections"/>' if centerline_sections_name else ""
@@ -3475,9 +5025,9 @@ def main() -> None:
 
     corr_section = (
         "<h2>Correlation Diagnostics</h2>"
-        f"{corr_speed_tag}"
-        f"{corr_flow_tag}"
-        f"{comp_corr_tag}"
+        f"{corr_speed_tags}"
+        f"{corr_flow_tags}"
+        f"{comp_corr_tags}"
         f"{corr_html}"
     )
 
@@ -3488,7 +5038,8 @@ def main() -> None:
     )
 
     saved_wss_items = (
-        "<li><code>metrics/table3_like_wss.csv</code></li><li><code>metrics/table3_like_wss_per_frame.csv</code></li>"
+        f"<li><code>{metrics_rel_prefix}/table3_like_wss.csv</code></li>"
+        f"<li><code>{metrics_rel_prefix}/table3_like_wss_per_frame.csv</code></li>"
         if bool(args.include_wss)
         else ""
     )
@@ -3537,16 +5088,16 @@ def main() -> None:
             "<p class=\"muted\">Negative temporal correlation with reference may indicate inverted proximal-distal orientation.</p>"
             f"{centerline_sign_html}"
         )
-        saved_centerline_items = (
-            "<li><code>metrics/centerline_points.csv</code></li>"
-            "<li><code>metrics/flow_centerline_planes_per_frame.csv</code></li>"
-            "<li><code>metrics/centerline_section_qc.csv</code></li>"
-            "<li><code>metrics/centerline_sign_qc.csv</code></li>"
-            "<li><code>figures/centerline_overlay.png</code></li>"
-            "<li><code>figures/centerline_3d.png</code></li>"
-            "<li><code>figures/centerline_plane_sections.png</code></li>"
-            "<li><code>figures/centerline_flow_along_vessel_peak.png</code></li>"
-        )
+        saved_centerline_parts = [
+            f"<li><code>{metrics_rel_prefix}/centerline_points.csv</code></li>",
+            f"<li><code>{metrics_rel_prefix}/flow_centerline_planes_per_frame.csv</code></li>",
+            f"<li><code>{metrics_rel_prefix}/centerline_section_qc.csv</code></li>",
+            f"<li><code>{metrics_rel_prefix}/centerline_sign_qc.csv</code></li>",
+        ]
+        for fig_rel in (centerline_overlay_name, centerline_3d_name, centerline_sections_name, centerline_peak_qs_name):
+            if fig_rel:
+                saved_centerline_parts.append(f"<li><code>figures/{fig_rel}</code></li>")
+        saved_centerline_items = "".join(saved_centerline_parts)
     else:
         centerline_exec_bullet = ""
         flow_axis_bullet = f"Flow axis used: <b>{selected_flow_axis}</b> (mode: {args.flow_axis}, suggested: {suggested_flow_axis})"
@@ -3564,14 +5115,16 @@ def main() -> None:
         centerline_section = ""
         saved_centerline_items = ""
 
+    report_title_with_mode = f"{args.report_title} [{task_mode_label}]"
+    detected_res_text = "unknown" if detected_res_increase is None else str(int(detected_res_increase))
     html = f"""
 <!DOCTYPE html>
 <html lang=\"en\">
 <head>
   <meta charset=\"utf-8\" />
-  <title>{args.report_title}</title>
+  <title>{report_title_with_mode}</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 24px; color: #1f2937; }}
+    body {{ font-family: 'Times New Roman', Times, serif; margin: 24px; color: #1f2937; }}
     h1, h2, h3 {{ color: #111827; }}
     .muted {{ color: #6b7280; }}
     table {{ border-collapse: collapse; width: 100%; margin: 10px 0 20px 0; font-size: 13px; }}
@@ -3583,10 +5136,12 @@ def main() -> None:
   </style>
 </head>
 <body>
-  <h1>{args.report_title}</h1>
+  <h1>{report_title_with_mode}</h1>
   <p class=\"muted\">Generated from payload: <code>{Path(args.payload_npz).resolve()}</code></p>
+  <p class=\"muted\">Mode-specific outputs are saved under <code>figures/{task_mode_tag}/</code> and <code>{metrics_rel_prefix}/</code>.</p>
 
   <p>
+    <span class=\"pill\">Task mode: {task_mode_label}</span>
     <span class=\"pill\">Reference: {ref_label}</span>
     <span class=\"pill\">Baseline: {args.baseline_label}</span>
     <span class=\"pill\">Super-resolved: {args.sr_label}</span>
@@ -3598,6 +5153,7 @@ def main() -> None:
     <li>Temporal flow absolute error comparison (Wilcoxon p): <b>{'nan' if not np.isfinite(p_flow) else f'{p_flow:.4g}'}</b></li>
     <li>WSS absolute error comparison (Wilcoxon p): <b>{wss_summary_text}</b></li>
     <li>Flow reference value used (ml/s): <b>{q_ref_scalar:.6f}</b></li>
+    <li>Task naming mode: <b>{task_mode_tag}</b> (res_increase detected: <b>{detected_res_text}</b>)</li>
     {centerline_exec_bullet}
     <li>{flow_method_bullet}</li>
     <li>{flow_axis_bullet}</li>
@@ -3612,11 +5168,12 @@ def main() -> None:
 
   <h2>Voxel Distribution Inside Mask</h2>
   <p class=\"muted\">Histogram comparison over all in-mask voxels across all processed frames{'' if not roi_info.get('enabled', False) else ' (restricted to ROI bbox)'}.</p>
-  <img src=\"figures/{fig_voxel_hist.name}\" alt=\"In-mask voxel histograms\"/>
+  <img src=\"figures/{_rel_fig_path(fig_voxel_hist, fig_dir)}\" alt=\"In-mask voxel histograms\"/>
+  {voxel_hist_channel_tags}
   {voxel_dist_html}
 
   <h2>Flow-rate Diagnostics</h2>
-  <img src=\"figures/{fig_flow.name}\" alt=\"Flow profile\"/>
+  <img src=\"figures/{_rel_fig_path(fig_flow, fig_dir)}\" alt=\"Flow profile\"/>
   <p class=\"muted\">{flow_diag_text}</p>
   {flow_axis_section}
   {centerline_section}
@@ -3624,6 +5181,9 @@ def main() -> None:
   <h2>Paper-style Table 2 (Representative Slices)</h2>
   <p class=\"muted\">Variables: mean/SD/skewness/kurtosis of intraluminal velocity and vorticity (aggregated over all processed frames). Location labels are voxel slice IDs along the selected flow axis.</p>
   {t2_comp_html}
+  <h3>Table 2 Temporal Mean (Averaged Over Frames)</h3>
+  <p class=\"muted\">Frame-wise Table-2 metrics averaged over time for each slice and variable.</p>
+  {t2_tm_html}
 
   <h2>Paper-style Flow Metrics</h2>
   <p class=\"muted\">Temporal summaries against reference flow (Qref).</p>
@@ -3631,6 +5191,9 @@ def main() -> None:
   <h3>Flow Peak Metrics (Paper-style)</h3>
   <p class=\"muted\">Peak-frame and temporal RMSE/relative-error summaries aligned with cerebrovascular SR comparisons.</p>
   {flow_peak_html}
+  <h3>Flow Average Metrics (Paper-style)</h3>
+  <p class=\"muted\">Temporal mean-flow and average-error summaries using all frames.</p>
+  {flow_avg_html}
 
   {wss_section}
 
@@ -3643,43 +5206,69 @@ def main() -> None:
   {pressure_section}
 
   <h2>Bland-Altman</h2>
-  {'' if not ba_speed_name else f'<img src="figures/{ba_speed_name}" alt="Bland-Altman speed"/>'}
-  {comp_ba_tag}
+  {ba_speed_tags}
+  <p class=\"muted\">Component plots below use all in-mask voxels aggregated over all processed frames.</p>
+  {comp_ba_tags}
   {ba_html}
 
-  <h2>Peak Velocity Metrics (Core/Wall)</h2>
-  <p class=\"muted\">Peak-flow velocity magnitude metrics (MAE, RMSE, relative error, cosine similarity), split by core and wall masks.</p>
+  <h2>Peak Velocity Metrics (Core/Wall/Intraluminal)</h2>
+  <p class=\"muted\">Peak-flow velocity magnitude metrics (MAE, RMSE, relative error, cosine similarity), reported for core, wall, and full intraluminal masks.</p>
   {peak_vel_html}
+  <h2>Mean Velocity Metrics (Core/Wall/Intraluminal)</h2>
+  <p class=\"muted\">All-frames in-mask velocity magnitude metrics (MAE, RMSE, relative error, cosine similarity), reported for core, wall, and full intraluminal masks.</p>
+  {mean_vel_html}
+
+  <h2>Statistical Significance (Baseline vs SR)</h2>
+  <p class=\"muted\">Paired Wilcoxon tests on voxel-wise absolute errors against reference (peak frame and all-frame mean analyses).</p>
+  {pvalue_html}
+
+  {publication_fig_section}
 
   <h2>Saved Artifacts</h2>
   <ul>
-    <li><code>metrics/table2_like_all_slices.csv</code></li>
-    <li><code>metrics/table2_like_per_frame_all_slices.csv</code></li>
-    <li><code>metrics/table2_like_compact.csv</code></li>
-    <li><code>metrics/flow_metrics.csv</code></li>
-    <li><code>metrics/flow_metrics_per_frame.csv</code></li>
-    <li><code>metrics/flow_rate_curves_per_frame.csv</code></li>
+    <li><code>{metrics_rel_prefix}/table2_like_all_slices.csv</code></li>
+    <li><code>{metrics_rel_prefix}/table2_like_per_frame_all_slices.csv</code></li>
+    <li><code>{metrics_rel_prefix}/table2_like_temporal_mean.csv</code></li>
+    <li><code>{metrics_rel_prefix}/table2_like_compact.csv</code></li>
+    <li><code>{metrics_rel_prefix}/flow_metrics.csv</code></li>
+    <li><code>{metrics_rel_prefix}/flow_metrics_per_frame.csv</code></li>
+    <li><code>{metrics_rel_prefix}/flow_rate_curves_per_frame.csv</code></li>
     {saved_centerline_items}
     {saved_wss_items}
-    <li><code>metrics/geometry_temporal_surface_metrics.csv</code></li>
-    <li><code>metrics/voxel_distribution_stats.csv</code></li>
-    <li><code>metrics/correlation_metrics.csv</code></li>
-    <li><code>metrics/bland_altman_stats.csv</code></li>
-    <li><code>metrics/peak_velocity_metrics.csv</code></li>
-    <li><code>metrics/flow_peak_metrics.csv</code></li>
-    <li><code>metrics/summary_metrics.json</code></li>
+    <li><code>{metrics_rel_prefix}/geometry_temporal_surface_metrics.csv</code></li>
+    <li><code>{metrics_rel_prefix}/voxel_distribution_stats.csv</code></li>
+    <li><code>{metrics_rel_prefix}/correlation_metrics.csv</code></li>
+    <li><code>{metrics_rel_prefix}/bland_altman_stats.csv</code></li>
+    <li><code>{metrics_rel_prefix}/peak_velocity_metrics.csv</code></li>
+    <li><code>{metrics_rel_prefix}/mean_velocity_metrics.csv</code></li>
+    <li><code>{metrics_rel_prefix}/significance_pvalues.csv</code></li>
+    <li><code>{metrics_rel_prefix}/flow_peak_metrics.csv</code></li>
+    <li><code>{metrics_rel_prefix}/flow_average_metrics.csv</code></li>
+    <li><code>{metrics_rel_prefix}/run_context.csv</code></li>
+    {saved_voxel_hist_items}
+    {saved_ba_speed_single_items}
+    {saved_corr_single_items}
+    {saved_comp_ba_items}
+    {saved_comp_ba_single_items}
+    {saved_publication_fig_items}
+    <li><code>{metrics_rel_prefix}/summary_metrics.json</code></li>
   </ul>
 
 </body>
 </html>
 """
 
+    report_mode_path = out_dir / f"report_{task_mode_tag}.html"
+    report_mode_path.write_text(html, encoding="utf-8")
     report_path = out_dir / "report.html"
-    report_path.write_text(html, encoding="utf-8")
+    if report_path != report_mode_path:
+        report_path.write_text(html, encoding="utf-8")
 
     print("Report generated:")
-    print(f"- HTML: {report_path}")
-    print(f"- Figures: {fig_dir}")
+    print(f"- HTML (mode-specific): {report_mode_path}")
+    if report_path != report_mode_path:
+        print(f"- HTML (latest alias): {report_path}")
+    print(f"- Figures: {fig_mode_dir}")
     print(f"- Metrics: {metrics_dir}")
 
 

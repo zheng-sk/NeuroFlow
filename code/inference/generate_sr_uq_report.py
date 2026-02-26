@@ -22,6 +22,7 @@ REPORT_COLOR_REF = "#009E73"
 REPORT_COLOR_BASELINE = "#D55E00"
 REPORT_COLOR_SR = "#0072B2"
 REPORT_COLOR_NEUTRAL = "#111827"
+VIOLIN_UPPER_PERCENTILE = 95.0
 
 if sns is not None:
     sns.set_theme(
@@ -150,6 +151,18 @@ def _scipy_rmse(err: Sequence[float] | np.ndarray) -> float:
     if arr.size == 0:
         return float("nan")
     return float(np.sqrt(stats.tmean(arr**2)))
+
+
+def _winsorize_upper_percentile(x: Sequence[float] | np.ndarray, upper_p: float = 95.0) -> np.ndarray:
+    """Cap upper tails at a robust percentile to keep violin scales readable."""
+    arr = _finite_values(x)
+    if arr.size == 0:
+        return arr
+    p = float(np.clip(upper_p, 50.0, 100.0))
+    hi = _scipy_percentile(arr, p)
+    if not np.isfinite(hi):
+        return arr
+    return np.minimum(arr, hi)
 
 
 def _extract_slice(arr: np.ndarray, axis: int, idx: int) -> np.ndarray:
@@ -1283,6 +1296,26 @@ def _upsample_spatial(arr: np.ndarray, out_shape_xyz: Tuple[int, int, int], mode
     return out.astype(np.float32)
 
 
+def _common_spatial_shape(*arrays: np.ndarray) -> Tuple[int, int, int]:
+    shapes = [tuple(int(v) for v in np.asarray(a).shape[-3:]) for a in arrays]
+    if not shapes:
+        raise ValueError("No arrays provided to compute common spatial shape.")
+    sx = min(s[0] for s in shapes)
+    sy = min(s[1] for s in shapes)
+    sz = min(s[2] for s in shapes)
+    if sx <= 0 or sy <= 0 or sz <= 0:
+        raise ValueError(f"Invalid common spatial shape from {shapes}")
+    return int(sx), int(sy), int(sz)
+
+
+def _crop_spatial_to_shape(arr: np.ndarray, shape_xyz: Tuple[int, int, int]) -> np.ndarray:
+    sx, sy, sz = [int(v) for v in shape_xyz]
+    if arr.ndim < 3:
+        raise ValueError(f"Expected array with >=3 dims, got shape {arr.shape}")
+    slices = (slice(None),) * (arr.ndim - 3) + (slice(0, sx), slice(0, sy), slice(0, sz))
+    return np.asarray(arr[slices], dtype=arr.dtype)
+
+
 def _clip_bbox_xyz(bbox_xyz: Sequence[int], shape_xyz: Tuple[int, int, int]) -> Tuple[int, int, int, int, int, int]:
     if len(bbox_xyz) != 6:
         raise ValueError(f"ROI bbox expects 6 integers [x0,x1,y0,y1,z0,z1), got {bbox_xyz}")
@@ -1431,6 +1464,25 @@ def _resolve_task_mode(
     else:
         mode_label = f"{base_label} (res_increase=unknown)"
     return mode_tag, mode_label, detected_res
+
+
+def _resolve_method_labels(task_mode_tag: str, baseline_label_arg: str, sr_label_arg: str) -> Tuple[str, str, str]:
+    baseline_label = str(baseline_label_arg).strip() or "3T"
+    sr_label = str(sr_label_arg).strip() or "3T SR"
+    sr_role_label = "Super-resolved"
+
+    sr_default_aliases = {
+        "3t sr",
+        "3t superresolution",
+        "superresolution",
+        "sr",
+    }
+    if str(task_mode_tag).strip().lower() == "denoising":
+        sr_role_label = "Denoised"
+        if sr_label.strip().lower() in sr_default_aliases:
+            sr_label = "3T Denoised"
+
+    return baseline_label, sr_label, sr_role_label
 
 
 def _robust_range(
@@ -1652,6 +1704,11 @@ def _save_channel_figure(
         pred_view = pred
         gt_view = gt
 
+    common_xyz = _common_spatial_shape(lr_view, pred_view, gt_view)
+    lr_view = _crop_spatial_to_shape(lr_view, common_xyz)
+    pred_view = _crop_spatial_to_shape(pred_view, common_xyz)
+    gt_view = _crop_spatial_to_shape(gt_view, common_xyz)
+
     n_slices = gt_view.shape[-1]
     if n_slices <= 0:
         raise ValueError("Channel figure received empty ROI after bbox cropping.")
@@ -1864,12 +1921,20 @@ def _save_publication_figures(
                 plt.close(fig_s)
                 out[f"velocity_error_{slug_metric}_{slug_type}"] = name_s
 
-    # 2) Boxplot: slice-wise relative errors for selected variables.
+    # 2) Boxplot: slice-wise absolute errors for selected variables.
     vars_of_interest = ["Mean velocity [m/s]", "SD velocity [m/s]", "Mean vorticity [1/s]"]
     t2_by_var: Dict[str, Dict[str, np.ndarray]] = {}
     for v in vars_of_interest:
-        base_vals = [float(r.get("re_baseline", float("nan"))) for r in table2_all_rows if str(r.get("variable", "")) == v]
-        sr_vals = [float(r.get("re_sr", float("nan"))) for r in table2_all_rows if str(r.get("variable", "")) == v]
+        base_vals = [
+            abs(float(r.get("baseline", float("nan"))) - float(r.get("ref", float("nan"))))
+            for r in table2_all_rows
+            if str(r.get("variable", "")) == v
+        ]
+        sr_vals = [
+            abs(float(r.get("sr", float("nan"))) - float(r.get("ref", float("nan"))))
+            for r in table2_all_rows
+            if str(r.get("variable", "")) == v
+        ]
         b = _finite_values(base_vals)
         s = _finite_values(sr_vals)
         if b.size > 0 or s.size > 0:
@@ -1903,8 +1968,8 @@ def _save_publication_figures(
         ax.set_xticks(x0)
         ax.set_xticklabels([v.replace(" [m/s]", "").replace(" [1/s]", "") for v in vars_order])
         ax.set_xlabel("Hemodynamic Parameter")
-        ax.set_ylabel("Relative Error (vs reference)")
-        ax.set_title("Distribution of Relative Errors Across All Slices")
+        ax.set_ylabel("Absolute Error (vs reference)")
+        ax.set_title("Distribution of Absolute Errors Across All Slices")
         ax.grid(axis="y", linestyle="--", alpha=0.35)
         if sns is not None:
             sns.despine(ax=ax)
@@ -1919,7 +1984,7 @@ def _save_publication_figures(
         plt.close(fig)
         out["slice_relative_errors"] = name
 
-    # 2b) Violin plots: relative error distribution split by velocity vs vorticity variables.
+    # 2b) Violin plots: absolute error distribution split by velocity vs vorticity variables.
     t2_all_by_var: Dict[str, Dict[str, np.ndarray]] = {}
     for row in table2_all_rows:
         var_name = str(row.get("variable", "")).strip()
@@ -1927,90 +1992,81 @@ def _save_publication_figures(
             continue
         if var_name not in t2_all_by_var:
             t2_all_by_var[var_name] = {baseline_label: np.asarray([], dtype=np.float64), sr_label: np.asarray([], dtype=np.float64)}
-        b = _finite_values([float(row.get("re_baseline", float("nan")))])
-        s = _finite_values([float(row.get("re_sr", float("nan")))])
+        ref_v = float(row.get("ref", float("nan")))
+        base_v = float(row.get("baseline", float("nan")))
+        sr_v = float(row.get("sr", float("nan")))
+        b = _finite_values([abs(base_v - ref_v) if np.isfinite(base_v) and np.isfinite(ref_v) else float("nan")])
+        s = _finite_values([abs(sr_v - ref_v) if np.isfinite(sr_v) and np.isfinite(ref_v) else float("nan")])
         if b.size > 0:
             t2_all_by_var[var_name][baseline_label] = np.concatenate([t2_all_by_var[var_name][baseline_label], b], axis=0)
         if s.size > 0:
             t2_all_by_var[var_name][sr_label] = np.concatenate([t2_all_by_var[var_name][sr_label], s], axis=0)
 
     if t2_all_by_var and sns is not None:
-        var_order_all = sorted(
-            list(t2_all_by_var.keys()),
-            key=lambda v: _scipy_mean(t2_all_by_var[v][baseline_label]) if np.isfinite(_scipy_mean(t2_all_by_var[v][baseline_label])) else -1e9,
-            reverse=True,
-        )
-        var_groups: List[Tuple[str, str, List[str]]] = [
-            ("velocity", "Velocity", [v for v in var_order_all if "velocity" in v.lower()]),
-            ("vorticity", "Vorticity", [v for v in var_order_all if "vorticity" in v.lower()]),
+        # Strategy: split moments (Mean/SD vs Skewness/Kurtosis) to avoid mixed-scale distortion.
+        velocity_pref = ["Mean velocity [m/s]", "SD velocity [m/s]", "Skewness velocity", "Kurtosis velocity"]
+        vorticity_pref = ["Mean vorticity [1/s]", "SD vorticity [1/s]", "Skewness vorticity", "Kurtosis vorticity"]
+        family_specs: List[Tuple[str, str, List[str]]] = [
+            ("velocity", "Velocity", [v for v in velocity_pref if v in t2_all_by_var]),
+            ("vorticity", "Vorticity", [v for v in vorticity_pref if v in t2_all_by_var]),
         ]
-        for group_tag, group_title, var_order in var_groups:
-            if not var_order:
+        moment_specs: List[Tuple[str, str, List[str]]] = [
+            ("scale", "Mean & SD", ["Mean", "SD"]),
+            ("shape", "Skewness & Kurtosis", ["Skewness", "Kurtosis"]),
+        ]
+        for family_tag, family_title, family_vars in family_specs:
+            if not family_vars:
                 continue
-            display_names = {v: v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order}
-            x_vals: List[str] = []
-            y_vals: List[float] = []
-            h_vals: List[str] = []
-            for var_name in var_order:
-                for method_name in (baseline_label, sr_label):
-                    vals = t2_all_by_var[var_name][method_name]
-                    if vals.size == 0:
-                        continue
-                    x_vals.extend([display_names[var_name]] * int(vals.size))
-                    y_vals.extend(vals.astype(np.float64).tolist())
-                    h_vals.extend([method_name] * int(vals.size))
+            for moment_tag, moment_title, prefixes in moment_specs:
+                var_order = [v for v in family_vars if any(v.startswith(p) for p in prefixes)]
+                if not var_order:
+                    continue
+                display_names = {v: v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order}
+                x_vals: List[str] = []
+                y_vals: List[float] = []
+                h_vals: List[str] = []
+                for var_name in var_order:
+                    for method_name in (baseline_label, sr_label):
+                        vals = _winsorize_upper_percentile(
+                            t2_all_by_var[var_name][method_name],
+                            upper_p=VIOLIN_UPPER_PERCENTILE,
+                        )
+                        if vals.size == 0:
+                            continue
+                        x_vals.extend([display_names[var_name]] * int(vals.size))
+                        y_vals.extend(vals.astype(np.float64).tolist())
+                        h_vals.extend([method_name] * int(vals.size))
 
-            if not y_vals:
-                continue
-            order_disp = [display_names[v] for v in var_order]
-            fig_w = max(7.2, 1.35 * float(len(order_disp)) + 1.8)
-            fig, ax = plt.subplots(1, 1, figsize=(fig_w, 5.8))
-            sns.violinplot(
-                x=x_vals,
-                y=y_vals,
-                hue=h_vals,
-                order=order_disp,
-                cut=0,
-                inner="quartile",
-                linewidth=1.0,
-                palette=method_colors,
-                ax=ax,
-                dodge=True,
-            )
-            y_arr = _finite_values(np.asarray(y_vals, dtype=np.float64))
-            y_hi_full = float(np.max(y_arr)) if y_arr.size > 0 else float("nan")
-            y_hi_p = _scipy_percentile(y_arr, 97.5) if y_arr.size > 0 else float("nan")
-            use_clip = bool(np.isfinite(y_hi_full) and np.isfinite(y_hi_p) and y_hi_full > (1.20 * y_hi_p))
-            y_hi = float(y_hi_p if use_clip else y_hi_full)
-            if np.isfinite(y_hi) and y_hi > 0:
-                ax.set_ylim(0.0, y_hi * 1.05)
-
-            ax.set_title(f"Table-2 Relative Error Distribution ({group_title}, across slices)")
-            ax.set_xlabel("Variable")
-            ax.set_ylabel("Relative Error vs Reference")
-            ax.grid(axis="y", linestyle="--", alpha=0.35)
-            sns.despine(ax=ax)
-            handles, labels = ax.get_legend_handles_labels()
-            if handles:
-                ax.legend(handles[:2], labels[:2], title="Method", frameon=False, loc="upper right")
-            ax.tick_params(axis="x", rotation=18)
-            if use_clip:
-                n_clip = int(np.count_nonzero(y_arr > y_hi))
-                ax.text(
-                    0.995,
-                    0.985,
-                    f"Y clipped at p97.5={y_hi:.2f} (n={n_clip} outliers)",
-                    transform=ax.transAxes,
-                    ha="right",
-                    va="top",
-                    fontsize=8,
-                    color="#6b7280",
+                if not y_vals:
+                    continue
+                order_disp = [display_names[v] for v in var_order]
+                fig_w = max(6.8, 1.35 * float(len(order_disp)) + 1.8)
+                fig, ax = plt.subplots(1, 1, figsize=(fig_w, 5.6))
+                sns.violinplot(
+                    x=x_vals,
+                    y=y_vals,
+                    hue=h_vals,
+                    order=order_disp,
+                    cut=0,
+                    inner="quartile",
+                    linewidth=1.0,
+                    palette=method_colors,
+                    ax=ax,
+                    dodge=True,
                 )
-            fig.tight_layout()
-            name = f"prof_table2_relative_error_violin_{group_tag}.png"
-            fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
-            plt.close(fig)
-            out[f"table2_relative_error_violin_{group_tag}"] = name
+                ax.set_title(f"Absolute Error Distribution ({family_title}: {moment_title})")
+                ax.set_xlabel("Variable")
+                ax.set_ylabel(f"Absolute Error vs Reference (winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})")
+                ax.grid(axis="y", linestyle="--", alpha=0.35)
+                sns.despine(ax=ax)
+                if ax.get_legend() is not None:
+                    ax.get_legend().remove()
+                ax.tick_params(axis="x", rotation=12)
+                fig.tight_layout()
+                name = f"prof_table2_abs_error_violin_{family_tag}_{moment_tag}.png"
+                fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+                plt.close(fig)
+                out[f"table2_abs_error_violin_{family_tag}_{moment_tag}"] = name
 
     # 2c) Temporal-mean Table-2 plots (averaged over frames first, then compared across slices/variables).
     t2_tm_by_var: Dict[str, Dict[str, np.ndarray]] = {}
@@ -2020,8 +2076,11 @@ def _save_publication_figures(
             continue
         if var_name not in t2_tm_by_var:
             t2_tm_by_var[var_name] = {baseline_label: np.asarray([], dtype=np.float64), sr_label: np.asarray([], dtype=np.float64)}
-        b = _finite_values([float(row.get("re_baseline_mean_over_frames", float("nan")))])
-        s = _finite_values([float(row.get("re_sr_mean_over_frames", float("nan")))])
+        ref_v = float(row.get("ref_mean_over_frames", float("nan")))
+        base_v = float(row.get("baseline_mean_over_frames", float("nan")))
+        sr_v = float(row.get("sr_mean_over_frames", float("nan")))
+        b = _finite_values([abs(base_v - ref_v) if np.isfinite(base_v) and np.isfinite(ref_v) else float("nan")])
+        s = _finite_values([abs(sr_v - ref_v) if np.isfinite(sr_v) and np.isfinite(ref_v) else float("nan")])
         if b.size > 0:
             t2_tm_by_var[var_name][baseline_label] = np.concatenate([t2_tm_by_var[var_name][baseline_label], b], axis=0)
         if s.size > 0:
@@ -2034,7 +2093,7 @@ def _save_publication_figures(
             reverse=True,
         )
 
-        # Summary bars: mean RE across slices from temporal-mean table.
+        # Summary bars: mean absolute error across slices from temporal-mean table.
         fig_h = max(5.6, 0.58 * float(len(tm_var_order)) + 1.4)
         fig, ax = plt.subplots(1, 1, figsize=(12.2, fig_h))
         y = np.arange(len(tm_var_order), dtype=np.float64)
@@ -2049,7 +2108,7 @@ def _save_publication_figures(
             edgecolor=REPORT_COLOR_NEUTRAL,
             linewidth=0.8,
             alpha=0.90,
-            label=f"{baseline_label} mean RE (temporal-mean)",
+            label=f"{baseline_label} mean absolute error (temporal-mean)",
         )
         bars_sr = ax.barh(
             y - 0.5 * height,
@@ -2059,7 +2118,7 @@ def _save_publication_figures(
             edgecolor=REPORT_COLOR_NEUTRAL,
             linewidth=0.8,
             alpha=0.90,
-            label=f"{sr_label} mean RE (temporal-mean)",
+            label=f"{sr_label} mean absolute error (temporal-mean)",
         )
         for k, v in enumerate(vals_base):
             if not np.isfinite(v):
@@ -2069,8 +2128,8 @@ def _save_publication_figures(
                 bars_sr[k].set_alpha(0.12)
         ax.set_yticks(y)
         ax.set_yticklabels(tm_var_order)
-        ax.set_xlabel("Mean relative error vs reference (temporal-mean across frames)")
-        ax.set_title("Table-2 Temporal-Mean Relative Error by Variable")
+        ax.set_xlabel("Mean absolute error vs reference (temporal-mean across frames)")
+        ax.set_title("Temporal-Mean Absolute Error by Variable")
         ax.grid(axis="x", linestyle="--", alpha=0.35)
         if sns is not None:
             sns.despine(ax=ax)
@@ -2081,79 +2140,73 @@ def _save_publication_figures(
         plt.close(fig)
         out["table2_temporal_mean_relative_error_bar"] = name
 
-        # Violin over slices of temporal-mean RE for each variable (split velocity vs vorticity).
+        # Violin over slices of temporal-mean absolute error split by moment family.
         if sns is not None:
-            tm_groups: List[Tuple[str, str, List[str]]] = [
-                ("velocity", "Velocity", [v for v in tm_var_order if "velocity" in v.lower()]),
-                ("vorticity", "Vorticity", [v for v in tm_var_order if "vorticity" in v.lower()]),
+            velocity_pref = ["Mean velocity [m/s]", "SD velocity [m/s]", "Skewness velocity", "Kurtosis velocity"]
+            vorticity_pref = ["Mean vorticity [1/s]", "SD vorticity [1/s]", "Skewness vorticity", "Kurtosis vorticity"]
+            tm_family_specs: List[Tuple[str, str, List[str]]] = [
+                ("velocity", "Velocity", [v for v in velocity_pref if v in tm_var_order]),
+                ("vorticity", "Vorticity", [v for v in vorticity_pref if v in tm_var_order]),
             ]
-            for group_tag, group_title, var_order in tm_groups:
-                if not var_order:
+            moment_specs: List[Tuple[str, str, List[str]]] = [
+                ("scale", "Mean & SD", ["Mean", "SD"]),
+                ("shape", "Skewness & Kurtosis", ["Skewness", "Kurtosis"]),
+            ]
+            for family_tag, family_title, family_vars in tm_family_specs:
+                if not family_vars:
                     continue
-                display_names = {v: v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order}
-                x_vals_tm: List[str] = []
-                y_vals_tm: List[float] = []
-                h_vals_tm: List[str] = []
-                for var_name in var_order:
-                    for method_name in (baseline_label, sr_label):
-                        vals = t2_tm_by_var[var_name][method_name]
-                        if vals.size == 0:
-                            continue
-                        x_vals_tm.extend([display_names[var_name]] * int(vals.size))
-                        y_vals_tm.extend(vals.astype(np.float64).tolist())
-                        h_vals_tm.extend([method_name] * int(vals.size))
+                for moment_tag, moment_title, prefixes in moment_specs:
+                    var_order = [v for v in family_vars if any(v.startswith(p) for p in prefixes)]
+                    if not var_order:
+                        continue
+                    display_names = {v: v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order}
+                    x_vals_tm: List[str] = []
+                    y_vals_tm: List[float] = []
+                    h_vals_tm: List[str] = []
+                    for var_name in var_order:
+                        for method_name in (baseline_label, sr_label):
+                            vals = _winsorize_upper_percentile(
+                                t2_tm_by_var[var_name][method_name],
+                                upper_p=VIOLIN_UPPER_PERCENTILE,
+                            )
+                            if vals.size == 0:
+                                continue
+                            x_vals_tm.extend([display_names[var_name]] * int(vals.size))
+                            y_vals_tm.extend(vals.astype(np.float64).tolist())
+                            h_vals_tm.extend([method_name] * int(vals.size))
 
-                if not y_vals_tm:
-                    continue
-                order_disp_tm = [display_names[v] for v in var_order]
-                fig_w_vi = max(7.2, 1.35 * float(len(order_disp_tm)) + 1.8)
-                fig, ax = plt.subplots(1, 1, figsize=(fig_w_vi, 5.8))
-                sns.violinplot(
-                    x=x_vals_tm,
-                    y=y_vals_tm,
-                    hue=h_vals_tm,
-                    order=order_disp_tm,
-                    cut=0,
-                    inner="quartile",
-                    linewidth=1.0,
-                    palette=method_colors,
-                    ax=ax,
-                    dodge=True,
-                )
-                y_arr_tm = _finite_values(np.asarray(y_vals_tm, dtype=np.float64))
-                y_hi_full_tm = float(np.max(y_arr_tm)) if y_arr_tm.size > 0 else float("nan")
-                y_hi_p_tm = _scipy_percentile(y_arr_tm, 97.5) if y_arr_tm.size > 0 else float("nan")
-                use_clip_tm = bool(np.isfinite(y_hi_full_tm) and np.isfinite(y_hi_p_tm) and y_hi_full_tm > (1.20 * y_hi_p_tm))
-                y_hi_tm = float(y_hi_p_tm if use_clip_tm else y_hi_full_tm)
-                if np.isfinite(y_hi_tm) and y_hi_tm > 0:
-                    ax.set_ylim(0.0, y_hi_tm * 1.05)
-
-                ax.set_title(f"Table-2 Temporal-Mean Relative Error Distribution ({group_title})")
-                ax.set_xlabel("Variable")
-                ax.set_ylabel("Relative Error vs Reference (temporal-mean over frames)")
-                ax.grid(axis="y", linestyle="--", alpha=0.35)
-                sns.despine(ax=ax)
-                handles, labels = ax.get_legend_handles_labels()
-                if handles:
-                    ax.legend(handles[:2], labels[:2], title="Method", frameon=False, loc="upper right")
-                ax.tick_params(axis="x", rotation=18)
-                if use_clip_tm:
-                    n_clip_tm = int(np.count_nonzero(y_arr_tm > y_hi_tm))
-                    ax.text(
-                        0.995,
-                        0.985,
-                        f"Y clipped at p97.5={y_hi_tm:.2f} (n={n_clip_tm} outliers)",
-                        transform=ax.transAxes,
-                        ha="right",
-                        va="top",
-                        fontsize=8,
-                        color="#6b7280",
+                    if not y_vals_tm:
+                        continue
+                    order_disp_tm = [display_names[v] for v in var_order]
+                    fig_w_vi = max(6.8, 1.35 * float(len(order_disp_tm)) + 1.8)
+                    fig, ax = plt.subplots(1, 1, figsize=(fig_w_vi, 5.6))
+                    sns.violinplot(
+                        x=x_vals_tm,
+                        y=y_vals_tm,
+                        hue=h_vals_tm,
+                        order=order_disp_tm,
+                        cut=0,
+                        inner="quartile",
+                        linewidth=1.0,
+                        palette=method_colors,
+                        ax=ax,
+                        dodge=True,
                     )
-                fig.tight_layout()
-                name = f"prof_table2_temporal_mean_relative_error_violin_{group_tag}.png"
-                fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
-                plt.close(fig)
-                out[f"table2_temporal_mean_relative_error_violin_{group_tag}"] = name
+                    ax.set_title(f"Temporal-Mean Absolute Error Distribution ({family_title}: {moment_title})")
+                    ax.set_xlabel("Variable")
+                    ax.set_ylabel(
+                        f"Absolute Error vs Reference (temporal-mean over frames, winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})"
+                    )
+                    ax.grid(axis="y", linestyle="--", alpha=0.35)
+                    sns.despine(ax=ax)
+                    if ax.get_legend() is not None:
+                        ax.get_legend().remove()
+                    ax.tick_params(axis="x", rotation=12)
+                    fig.tight_layout()
+                    name = f"prof_table2_temporal_mean_abs_error_violin_{family_tag}_{moment_tag}.png"
+                    fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+                    plt.close(fig)
+                    out[f"table2_temporal_mean_abs_error_violin_{family_tag}_{moment_tag}"] = name
 
     # 3) Correlation and RMSE barplots.
     corr_filtered: List[Dict[str, Any]] = []
@@ -2467,7 +2520,7 @@ def _save_publication_figures(
         ax.set_xticklabels([_region_label(r) for r in pval_region_order])
         ax.set_ylabel("-log10(p-value)")
         ax.set_xlabel("Region")
-        ax.set_title("Wilcoxon Significance Summary (Baseline vs SR)")
+        ax.set_title("Wilcoxon Significance Summary")
         ax.grid(axis="y", linestyle="--", alpha=0.35)
         if sns is not None:
             sns.despine(ax=ax)
@@ -2967,6 +3020,14 @@ def main() -> None:
         )
     )
     parser.add_argument("--payload-npz", required=True, help="Path to analysis_payload.npz produced by run_sr_inference_case.py")
+    parser.add_argument(
+        "--baseline-payload-npz",
+        default="",
+        help=(
+            "Optional analysis_payload.npz used only for baseline 3T (lr_norm + venc). "
+            "Useful to keep identical 3T baseline across workflows (e.g., use denoising baseline for superresolution)."
+        ),
+    )
     parser.add_argument("--metadata-json", default="", help="Optional inference_metadata.json for richer report context")
     parser.add_argument("--out-dir", required=True, help="Output directory for report artifacts")
 
@@ -3081,6 +3142,18 @@ def main() -> None:
         raise ValueError("Use --centerline-start-xyz and --centerline-end-xyz together, or omit both.")
 
     payload = _load_payload(args.payload_npz)
+    baseline_payload = payload
+    baseline_payload_path = str(Path(args.payload_npz).resolve())
+    baseline_source_tag = "main_payload_lr"
+    if str(args.baseline_payload_npz).strip():
+        bpath = Path(args.baseline_payload_npz).resolve()
+        baseline_payload = _load_payload(str(bpath))
+        baseline_payload_path = str(bpath)
+        baseline_source_tag = "external_payload_lr"
+        if "lr_norm" not in baseline_payload:
+            raise ValueError(f"Baseline payload missing 'lr_norm': {bpath}")
+        if "venc" not in baseline_payload:
+            raise ValueError(f"Baseline payload missing 'venc': {bpath}")
     metadata = {}
     if args.metadata_json:
         mpath = Path(args.metadata_json)
@@ -3091,6 +3164,11 @@ def main() -> None:
         task_mode_arg=args.task_mode,
         metadata=metadata,
         payload=payload,
+    )
+    baseline_label, sr_label, sr_role_label = _resolve_method_labels(
+        task_mode_tag=task_mode_tag,
+        baseline_label_arg=args.baseline_label,
+        sr_label_arg=args.sr_label,
     )
     metrics_rel_prefix = f"metrics/{task_mode_tag}"
 
@@ -3119,12 +3197,34 @@ def main() -> None:
     if str(ref_label).lower() == "auto":
         ref_label = _autodetect_reference_label(metadata)
 
-    lr_norm = payload["lr_norm"].astype(np.float32)  # [T,6,X,Y,Z]
+    lr_norm_inference = payload["lr_norm"].astype(np.float32)  # [T,6,X,Y,Z] from inference payload
+    lr_norm = baseline_payload["lr_norm"].astype(np.float32)  # [T,6,X,Y,Z] baseline source used for metrics/plots
     pred_norm = payload["pred_norm"].astype(np.float32)  # [T,4,X,Y,Z]
     gt_norm = payload["gt_norm"].astype(np.float32)  # [T,4,X,Y,Z]
     mask = payload["mask"].astype(np.float32)  # [T,X,Y,Z]
-    venc = payload["venc"].astype(np.float32)  # [T]
+    venc = payload["venc"].astype(np.float32)  # [T] for pred/gt denormalization
+    venc_baseline = baseline_payload["venc"].astype(np.float32)  # [T] for baseline denormalization
     hr_spacing = tuple(float(x) for x in payload["hr_spacing"].tolist())
+    if lr_norm.ndim != 5 or lr_norm.shape[1] < 3:
+        raise ValueError(f"Baseline lr_norm must be [T,C,X,Y,Z] with C>=3. Got {lr_norm.shape}")
+
+    spatial_shapes_original = {
+        "pred_xyz": [int(x) for x in pred_norm.shape[-3:]],
+        "gt_xyz": [int(x) for x in gt_norm.shape[-3:]],
+        "mask_xyz": [int(x) for x in mask.shape[-3:]],
+    }
+    common_xyz = _common_spatial_shape(pred_norm, gt_norm, mask)
+    pred_norm = _crop_spatial_to_shape(pred_norm, common_xyz)
+    gt_norm = _crop_spatial_to_shape(gt_norm, common_xyz)
+    mask = _crop_spatial_to_shape(mask, common_xyz)
+    spatial_shapes_cropped = {
+        "pred_xyz": [int(x) for x in pred_norm.shape[-3:]],
+        "gt_xyz": [int(x) for x in gt_norm.shape[-3:]],
+        "mask_xyz": [int(x) for x in mask.shape[-3:]],
+    }
+    spatial_crop_applied = any(
+        spatial_shapes_original[k] != spatial_shapes_cropped[k] for k in spatial_shapes_original.keys()
+    )
 
     if pred_norm.shape[1] != 4 or gt_norm.shape[1] != 4:
         raise ValueError(f"Expected 4-channel pred/gt tensors. Got pred={pred_norm.shape}, gt={gt_norm.shape}")
@@ -3134,6 +3234,37 @@ def main() -> None:
         frame_source_indices = np.asarray(payload["frame_indices"], dtype=np.int32)
     else:
         frame_source_indices = np.arange(t_count, dtype=np.int32)
+    baseline_t = int(lr_norm.shape[0])
+    if baseline_t <= 0:
+        raise ValueError(f"Baseline lr_norm is empty. shape={lr_norm.shape}")
+    baseline_frame_source_indices: np.ndarray
+    if "frame_indices" in baseline_payload and np.asarray(baseline_payload["frame_indices"]).shape[0] == baseline_t:
+        baseline_frame_source_indices = np.asarray(baseline_payload["frame_indices"], dtype=np.int32)
+    else:
+        baseline_frame_source_indices = np.arange(baseline_t, dtype=np.int32)
+
+    # Align baseline temporal axis to the report payload frame order.
+    if baseline_t != t_count or not np.array_equal(baseline_frame_source_indices, frame_source_indices):
+        src_to_pos = {int(src): i for i, src in enumerate(baseline_frame_source_indices.tolist())}
+        if not all(int(src) in src_to_pos for src in frame_source_indices.tolist()):
+            raise ValueError(
+                "Baseline payload frames do not cover report payload frame indices. "
+                f"report={frame_source_indices.tolist()} baseline={baseline_frame_source_indices.tolist()}"
+            )
+        pick_idx = np.asarray([src_to_pos[int(src)] for src in frame_source_indices.tolist()], dtype=np.int64)
+        lr_norm = lr_norm[pick_idx]
+        if venc_baseline.shape[0] == baseline_t:
+            venc_baseline = venc_baseline[pick_idx]
+        baseline_t = int(lr_norm.shape[0])
+        baseline_frame_source_indices = frame_source_indices.copy()
+    if baseline_t != t_count:
+        raise ValueError(
+            f"Baseline payload temporal length ({baseline_t}) does not match report payload ({t_count}) after alignment."
+        )
+    if venc_baseline.shape[0] != t_count:
+        raise ValueError(
+            f"Baseline venc length ({venc_baseline.shape[0]}) does not match temporal length ({t_count})."
+        )
     fidx = int(np.clip(args.selected_frame, 0, t_count - 1))
 
     # Denormalize to physical units for velocity-related metrics
@@ -3143,7 +3274,7 @@ def main() -> None:
     for t in range(t_count):
         pred_phys[t, :3] *= float(venc[t])
         gt_phys[t, :3] *= float(venc[t])
-        lr_vel_phys[t] *= float(venc[t])
+        lr_vel_phys[t] *= float(venc_baseline[t])
 
     # If LR baseline is spatially smaller (downsampled input), upsample to HR grid for fair metric comparison.
     if lr_vel_phys.shape[2:] != gt_phys.shape[2:]:
@@ -3161,8 +3292,13 @@ def main() -> None:
     if int((mask_metrics > 0.5).sum()) == 0:
         raise ValueError("Selected ROI produced an empty in-mask region. Please adjust ROI bbox.")
 
-    # Derive LR 4-channel display tensor (u,v,w,mag) using a single LR magnitude channel.
-    lr_mag_single = lr_norm[:, 3 + int(args.lr_mag_channel)].astype(np.float32)
+    # Derive LR 4-channel display tensor (u,v,w,mag) from available baseline channels.
+    if lr_norm.shape[1] >= 6:
+        lr_mag_single = lr_norm[:, 3 + int(args.lr_mag_channel)].astype(np.float32)
+    elif lr_norm.shape[1] >= 4:
+        lr_mag_single = lr_norm[:, 3].astype(np.float32)
+    else:
+        lr_mag_single = np.sqrt(np.maximum(0.0, (lr_norm[:, 0] ** 2 + lr_norm[:, 1] ** 2 + lr_norm[:, 2] ** 2))).astype(np.float32)
     lr_4ch = np.concatenate([lr_norm[:, :3], lr_mag_single[:, None]], axis=1).astype(np.float32)
 
     # Suggest best flow axis from reference consistency, then resolve selected axis.
@@ -3210,8 +3346,8 @@ def main() -> None:
         gt_4ch=gt_norm,
         mask=mask_metrics,
         bins=int(args.hist_bins),
-        baseline_label=args.baseline_label,
-        sr_label=args.sr_label,
+        baseline_label=baseline_label,
+        sr_label=sr_label,
         ref_label=ref_label,
     )
     voxel_hist_channel_figs = {
@@ -3427,8 +3563,8 @@ def main() -> None:
     all_idx = np.arange(q_ref_time.shape[0], dtype=np.int32)
     flow_rows = [
         flow_summary(ref_label, q_ref_time, all_idx),
-        flow_summary(args.baseline_label, q_base_time, all_idx),
-        flow_summary(args.sr_label, q_sr_time, all_idx),
+        flow_summary(baseline_label, q_base_time, all_idx),
+        flow_summary(sr_label, q_sr_time, all_idx),
     ]
 
     if args.cca_range:
@@ -3440,8 +3576,8 @@ def main() -> None:
                 flow_rows.extend(
                     [
                         {**flow_summary(ref_label, q_ref_time, win_idx), "method": f"{ref_label} (window)"},
-                        {**flow_summary(args.baseline_label, q_base_time, win_idx), "method": f"{args.baseline_label} (window)"},
-                        {**flow_summary(args.sr_label, q_sr_time, win_idx), "method": f"{args.sr_label} (window)"},
+                        {**flow_summary(baseline_label, q_base_time, win_idx), "method": f"{baseline_label} (window)"},
+                        {**flow_summary(sr_label, q_sr_time, win_idx), "method": f"{sr_label} (window)"},
                     ]
                 )
         except Exception:
@@ -3624,8 +3760,8 @@ def main() -> None:
             q_ref_time=q_ref_time,
             q_base_time=q_base_time,
             q_sr_time=q_sr_time,
-            baseline_label=args.baseline_label,
-            sr_label=args.sr_label,
+            baseline_label=baseline_label,
+            sr_label=sr_label,
         )
         if centerline_sign_rows:
             _write_csv(
@@ -3664,8 +3800,8 @@ def main() -> None:
             valid_sections=valid_flow_sections,
             peak_idx=int(peak_idx),
             ref_label=ref_label,
-            baseline_label=args.baseline_label,
-            sr_label=args.sr_label,
+            baseline_label=baseline_label,
+            sr_label=sr_label,
         )
         if fig_qs.exists():
             centerline_peak_qs_name = _rel_fig_path(fig_qs, fig_dir)
@@ -3713,7 +3849,7 @@ def main() -> None:
     flow_per_frame_rows: List[Dict[str, Any]] = []
     for t in range(t_count):
         ref_t = float(q_ref_time[t])
-        for method_name, q_val in ((ref_label, ref_t), (args.baseline_label, float(q_base_time[t])), (args.sr_label, float(q_sr_time[t]))):
+        for method_name, q_val in ((ref_label, ref_t), (baseline_label, float(q_base_time[t])), (sr_label, float(q_sr_time[t]))):
             flow_per_frame_rows.append(
                 {
                     "frame_payload_index": int(t),
@@ -3741,8 +3877,8 @@ def main() -> None:
     x_time = frame_source_indices.astype(np.int32)
     fig = plt.figure(figsize=(10, 5))
     plt.plot(x_time, q_ref_time, label=ref_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_REF)
-    plt.plot(x_time, q_base_time, label=args.baseline_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_BASELINE)
-    plt.plot(x_time, q_sr_time, label=args.sr_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_SR)
+    plt.plot(x_time, q_base_time, label=baseline_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_BASELINE)
+    plt.plot(x_time, q_sr_time, label=sr_label, linewidth=2.0, marker="o", markersize=3.6, color=REPORT_COLOR_SR)
     plt.axhline(q_ref_scalar, linestyle="--", color=REPORT_COLOR_NEUTRAL, linewidth=1.2, label=f"Qref={q_ref_scalar:.3f} ml/s")
     plt.xlabel("Temporal frame index")
     plt.ylabel("Flow rate [ml/s]")
@@ -3891,9 +4027,9 @@ def main() -> None:
         if tau_ref.size > 0:
             plt.hist(tau_ref, bins=bins, alpha=0.4, density=True, label=ref_label)
         if tau_base.size > 0:
-            plt.hist(tau_base, bins=bins, alpha=0.4, density=True, label=args.baseline_label)
+            plt.hist(tau_base, bins=bins, alpha=0.4, density=True, label=baseline_label)
         if tau_sr.size > 0:
-            plt.hist(tau_sr, bins=bins, alpha=0.4, density=True, label=args.sr_label)
+            plt.hist(tau_sr, bins=bins, alpha=0.4, density=True, label=sr_label)
         plt.xlabel("WSS [Pa]")
         plt.ylabel("Density")
         plt.title("Wall shear stress distribution (boundary samples)")
@@ -4016,7 +4152,7 @@ def main() -> None:
             ref_vals=sp_ref,
             test_vals=sp_base,
             ref_label=ref_label,
-            test_label=args.baseline_label,
+            test_label=baseline_label,
             seed=17,
         )
         ba_sr = _plot_bland_altman_panel(
@@ -4024,7 +4160,7 @@ def main() -> None:
             ref_vals=sp_ref,
             test_vals=sp_sr,
             ref_label=ref_label,
-            test_label=args.sr_label,
+            test_label=sr_label,
             seed=29,
         )
         _sync_axis_limits(list(np.ravel(axes)), axis="y", symmetric=True, pad_ratio=0.08)
@@ -4035,8 +4171,8 @@ def main() -> None:
         ba_speed_name = _rel_fig_path(fig_ba, fig_dir)
         # Standalone versions (no subplot)
         for method_name, test_vals, seed_val in (
-            (args.baseline_label, sp_base, 17),
-            (args.sr_label, sp_sr, 29),
+            (baseline_label, sp_base, 17),
+            (sr_label, sp_sr, 29),
         ):
             fig_single = fig_groups["bland_altman"] / f"bland_altman_speed_intraluminal_{method_name.lower().replace(' ', '_')}.png"
             fig_s, ax_s = plt.subplots(1, 1, figsize=(6.8, 5.0))
@@ -4053,8 +4189,8 @@ def main() -> None:
             plt.close(fig_s)
             ba_speed_single_names[method_name] = _rel_fig_path(fig_single, fig_dir)
 
-        ba_rows.append({"domain": "speed_intraluminal", "method": args.baseline_label, **ba_base})
-        ba_rows.append({"domain": "speed_intraluminal", "method": args.sr_label, **ba_sr})
+        ba_rows.append({"domain": "speed_intraluminal", "method": baseline_label, **ba_base})
+        ba_rows.append({"domain": "speed_intraluminal", "method": sr_label, **ba_sr})
 
         # Correlation: baseline/ref and SR/ref
         fig_corr_speed = fig_groups["correlation"] / "correlation_speed_intraluminal.png"
@@ -4064,8 +4200,8 @@ def main() -> None:
             x=sp_ref,
             y=sp_base,
             x_label=f"{ref_label} speed [m/s]",
-            y_label=f"{args.baseline_label} speed [m/s]",
-            title=f"{args.baseline_label} vs {ref_label}",
+            y_label=f"{baseline_label} speed [m/s]",
+            title=f"{baseline_label} vs {ref_label}",
             color=REPORT_COLOR_BASELINE,
             seed=41,
         )
@@ -4074,8 +4210,8 @@ def main() -> None:
             x=sp_ref,
             y=sp_sr,
             x_label=f"{ref_label} speed [m/s]",
-            y_label=f"{args.sr_label} speed [m/s]",
-            title=f"{args.sr_label} vs {ref_label}",
+            y_label=f"{sr_label} speed [m/s]",
+            title=f"{sr_label} vs {ref_label}",
             color=REPORT_COLOR_SR,
             seed=43,
         )
@@ -4086,8 +4222,8 @@ def main() -> None:
         corr_speed_name = _rel_fig_path(fig_corr_speed, fig_dir)
         # Standalone versions (no subplot)
         for method_name, y_vals, color_val, seed_val in (
-            (args.baseline_label, sp_base, REPORT_COLOR_BASELINE, 41),
-            (args.sr_label, sp_sr, REPORT_COLOR_SR, 43),
+            (baseline_label, sp_base, REPORT_COLOR_BASELINE, 41),
+            (sr_label, sp_sr, REPORT_COLOR_SR, 43),
         ):
             fig_single = fig_groups["correlation"] / f"correlation_speed_intraluminal_{method_name.lower().replace(' ', '_')}.png"
             fig_s, ax_s = plt.subplots(1, 1, figsize=(6.8, 5.0))
@@ -4106,8 +4242,8 @@ def main() -> None:
             plt.close(fig_s)
             corr_speed_single_names[method_name] = _rel_fig_path(fig_single, fig_dir)
 
-        corr_rows.append({"domain": "speed_intraluminal", "method": args.baseline_label, **c_base})
-        corr_rows.append({"domain": "speed_intraluminal", "method": args.sr_label, **c_sr})
+        corr_rows.append({"domain": "speed_intraluminal", "method": baseline_label, **c_base})
+        corr_rows.append({"domain": "speed_intraluminal", "method": sr_label, **c_sr})
 
     # Temporal-flow correlation diagnostics
     if q_ref_time.size > 2:
@@ -4118,8 +4254,8 @@ def main() -> None:
             x=q_ref_time,
             y=q_base_time,
             x_label=f"{ref_label} flow [ml/s]",
-            y_label=f"{args.baseline_label} flow [ml/s]",
-            title=f"{args.baseline_label} vs {ref_label}",
+            y_label=f"{baseline_label} flow [ml/s]",
+            title=f"{baseline_label} vs {ref_label}",
             color=REPORT_COLOR_BASELINE,
             seed=53,
         )
@@ -4128,8 +4264,8 @@ def main() -> None:
             x=q_ref_time,
             y=q_sr_time,
             x_label=f"{ref_label} flow [ml/s]",
-            y_label=f"{args.sr_label} flow [ml/s]",
-            title=f"{args.sr_label} vs {ref_label}",
+            y_label=f"{sr_label} flow [ml/s]",
+            title=f"{sr_label} vs {ref_label}",
             color=REPORT_COLOR_SR,
             seed=59,
         )
@@ -4140,8 +4276,8 @@ def main() -> None:
         corr_flow_name = _rel_fig_path(fig_corr_flow, fig_dir)
         # Standalone versions (no subplot)
         for method_name, y_vals, color_val, seed_val in (
-            (args.baseline_label, q_base_time, REPORT_COLOR_BASELINE, 53),
-            (args.sr_label, q_sr_time, REPORT_COLOR_SR, 59),
+            (baseline_label, q_base_time, REPORT_COLOR_BASELINE, 53),
+            (sr_label, q_sr_time, REPORT_COLOR_SR, 59),
         ):
             fig_single = fig_groups["correlation"] / f"correlation_flow_temporal_{method_name.lower().replace(' ', '_')}.png"
             fig_s, ax_s = plt.subplots(1, 1, figsize=(6.8, 5.0))
@@ -4160,8 +4296,8 @@ def main() -> None:
             plt.close(fig_s)
             corr_flow_single_names[method_name] = _rel_fig_path(fig_single, fig_dir)
 
-        corr_rows.append({"domain": "flow_temporal", "method": args.baseline_label, **cf_base})
-        corr_rows.append({"domain": "flow_temporal", "method": args.sr_label, **cf_sr})
+        corr_rows.append({"domain": "flow_temporal", "method": baseline_label, **cf_base})
+        corr_rows.append({"domain": "flow_temporal", "method": sr_label, **cf_sr})
 
     # Paper-like cerebrovascular metrics: peak-frame summaries + all-frame component BA diagnostics.
     peak_mask = (mask_ref[peak_idx] > 0.5)
@@ -4208,8 +4344,8 @@ def main() -> None:
             x=rr,
             y=bb,
             x_label=f"{ref_label} {comp_name}",
-            y_label=f"{args.baseline_label} {comp_name}",
-            title=f"{args.baseline_label} vs {ref_label} ({comp_name})",
+            y_label=f"{baseline_label} {comp_name}",
+            title=f"{baseline_label} vs {ref_label} ({comp_name})",
             color=REPORT_COLOR_BASELINE,
             seed=101 + c_idx,
         )
@@ -4218,15 +4354,15 @@ def main() -> None:
             x=rr,
             y=ss,
             x_label=f"{ref_label} {comp_name}",
-            y_label=f"{args.sr_label} {comp_name}",
-            title=f"{args.sr_label} vs {ref_label} ({comp_name})",
+            y_label=f"{sr_label} {comp_name}",
+            title=f"{sr_label} vs {ref_label} ({comp_name})",
             color=REPORT_COLOR_SR,
             seed=111 + c_idx,
         )
         # Standalone versions (no subplot)
         for method_name, yy, color_val, seed_val in (
-            (args.baseline_label, bb, REPORT_COLOR_BASELINE, 101 + c_idx),
-            (args.sr_label, ss, REPORT_COLOR_SR, 111 + c_idx),
+            (baseline_label, bb, REPORT_COLOR_BASELINE, 101 + c_idx),
+            (sr_label, ss, REPORT_COLOR_SR, 111 + c_idx),
         ):
             fig_single = fig_groups["correlation"] / (
                 f"correlation_velocity_component_peak_{comp_name}_{method_name.lower().replace(' ', '_')}.png"
@@ -4251,7 +4387,7 @@ def main() -> None:
                 "domain": "velocity_component_peak",
                 "region": "intraluminal",
                 "component": comp_name,
-                "method": args.baseline_label,
+                "method": baseline_label,
                 "frame_payload_index": int(peak_idx),
                 "frame_source_index": int(peak_frame_src),
                 **st_base,
@@ -4262,7 +4398,7 @@ def main() -> None:
                 "domain": "velocity_component_peak",
                 "region": "intraluminal",
                 "component": comp_name,
-                "method": args.sr_label,
+                "method": sr_label,
                 "frame_payload_index": int(peak_idx),
                 "frame_source_index": int(peak_frame_src),
                 **st_sr,
@@ -4308,7 +4444,7 @@ def main() -> None:
             ref_vals=rr,
             test_vals=bb,
             ref_label=ref_label,
-            test_label=args.baseline_label,
+            test_label=baseline_label,
             seed=201 + c_idx,
         )
         ba_sr = _plot_bland_altman_panel(
@@ -4316,7 +4452,7 @@ def main() -> None:
             ref_vals=rr,
             test_vals=ss,
             ref_label=ref_label,
-            test_label=args.sr_label,
+            test_label=sr_label,
             seed=211 + c_idx,
         )
         _sync_axis_limits(list(np.ravel(axes)), axis="y", symmetric=True, pad_ratio=0.08)
@@ -4330,8 +4466,8 @@ def main() -> None:
         comp_ba_names[comp_name] = _rel_fig_path(fig_comp_ba, fig_dir)
         # Standalone versions (no subplot)
         for method_name, test_vals, seed_val in (
-            (args.baseline_label, bb, 201 + c_idx),
-            (args.sr_label, ss, 211 + c_idx),
+            (baseline_label, bb, 201 + c_idx),
+            (sr_label, ss, 211 + c_idx),
         ):
             fig_single = fig_groups["bland_altman"] / (
                 f"bland_altman_velocity_component_{comp_name}_{method_name.lower().replace(' ', '_')}.png"
@@ -4355,7 +4491,7 @@ def main() -> None:
                 "domain": "velocity_component_all_frames",
                 "region": "intraluminal",
                 "component": comp_name,
-                "method": args.baseline_label,
+                "method": baseline_label,
                 "frame_payload_index": -1,
                 "frame_source_index": -1,
                 **ba_base,
@@ -4366,7 +4502,7 @@ def main() -> None:
                 "domain": "velocity_component_all_frames",
                 "region": "intraluminal",
                 "component": comp_name,
-                "method": args.sr_label,
+                "method": sr_label,
                 "frame_payload_index": -1,
                 "frame_source_index": -1,
                 **ba_sr,
@@ -4407,12 +4543,12 @@ def main() -> None:
         }
 
     peak_speed_rows = [
-        _region_peak_speed_metrics(core_mask, "core", args.baseline_label, speed_base),
-        _region_peak_speed_metrics(core_mask, "core", args.sr_label, speed_sr),
-        _region_peak_speed_metrics(wall_mask, "wall", args.baseline_label, speed_base),
-        _region_peak_speed_metrics(wall_mask, "wall", args.sr_label, speed_sr),
-        _region_peak_speed_metrics(peak_mask, "intraluminal", args.baseline_label, speed_base),
-        _region_peak_speed_metrics(peak_mask, "intraluminal", args.sr_label, speed_sr),
+        _region_peak_speed_metrics(core_mask, "core", baseline_label, speed_base),
+        _region_peak_speed_metrics(core_mask, "core", sr_label, speed_sr),
+        _region_peak_speed_metrics(wall_mask, "wall", baseline_label, speed_base),
+        _region_peak_speed_metrics(wall_mask, "wall", sr_label, speed_sr),
+        _region_peak_speed_metrics(peak_mask, "intraluminal", baseline_label, speed_base),
+        _region_peak_speed_metrics(peak_mask, "intraluminal", sr_label, speed_sr),
     ]
 
     def _region_mean_speed_metrics(region_name: str, method_name: str, test_speed: np.ndarray) -> Dict[str, Any]:
@@ -4474,12 +4610,12 @@ def main() -> None:
         }
 
     mean_speed_rows = [
-        _region_mean_speed_metrics("core", args.baseline_label, speed_base),
-        _region_mean_speed_metrics("core", args.sr_label, speed_sr),
-        _region_mean_speed_metrics("wall", args.baseline_label, speed_base),
-        _region_mean_speed_metrics("wall", args.sr_label, speed_sr),
-        _region_mean_speed_metrics("intraluminal", args.baseline_label, speed_base),
-        _region_mean_speed_metrics("intraluminal", args.sr_label, speed_sr),
+        _region_mean_speed_metrics("core", baseline_label, speed_base),
+        _region_mean_speed_metrics("core", sr_label, speed_sr),
+        _region_mean_speed_metrics("wall", baseline_label, speed_base),
+        _region_mean_speed_metrics("wall", sr_label, speed_sr),
+        _region_mean_speed_metrics("intraluminal", baseline_label, speed_base),
+        _region_mean_speed_metrics("intraluminal", sr_label, speed_sr),
     ]
 
     # Statistical significance (paired Wilcoxon) for voxel-wise absolute errors: baseline vs SR.
@@ -4542,7 +4678,7 @@ def main() -> None:
 
     # Flow peak-like metrics (temporal)
     flow_peak_rows = []
-    for method_name, q_time in ((args.baseline_label, q_base_time), (args.sr_label, q_sr_time)):
+    for method_name, q_time in ((baseline_label, q_base_time), (sr_label, q_sr_time)):
         flow_peak_rows.append(
             {
                 "domain": "flow_temporal",
@@ -4559,7 +4695,7 @@ def main() -> None:
         )
 
     flow_average_rows = []
-    for method_name, q_time in ((args.baseline_label, q_base_time), (args.sr_label, q_sr_time)):
+    for method_name, q_time in ((baseline_label, q_base_time), (sr_label, q_sr_time)):
         abs_err = np.abs(q_time - q_ref_time)
         rel_err = np.abs(q_time - q_ref_time) / (np.abs(q_ref_time) + 1e-12)
         flow_average_rows.append(
@@ -4643,8 +4779,8 @@ def main() -> None:
     )
     publication_figs_raw = _save_publication_figures(
         fig_dir=fig_groups["publication"],
-        baseline_label=args.baseline_label,
-        sr_label=args.sr_label,
+        baseline_label=baseline_label,
+        sr_label=sr_label,
         ref_label=ref_label,
         peak_speed_rows=peak_speed_rows,
         mean_speed_rows=mean_speed_rows,
@@ -4675,8 +4811,16 @@ def main() -> None:
                 "task_mode_label": task_mode_label,
                 "res_increase_detected": None if detected_res_increase is None else int(detected_res_increase),
                 "reference_label": str(ref_label),
-                "baseline_label": str(args.baseline_label),
-                "sr_label": str(args.sr_label),
+                "baseline_label": str(baseline_label),
+                "sr_label": str(sr_label),
+                "sr_role_label": str(sr_role_label),
+                "baseline_source": str(baseline_source_tag),
+                "baseline_payload_path": str(baseline_payload_path),
+                "baseline_lr_shape_xyz": json.dumps([int(x) for x in lr_norm.shape[2:]]),
+                "inference_lr_shape_xyz": json.dumps([int(x) for x in lr_norm_inference.shape[2:]]),
+                "spatial_shape_original_xyz": json.dumps(spatial_shapes_original),
+                "spatial_shape_used_xyz": json.dumps(spatial_shapes_cropped),
+                "spatial_crop_applied": bool(spatial_crop_applied),
             }
         ],
         [
@@ -4686,6 +4830,14 @@ def main() -> None:
             "reference_label",
             "baseline_label",
             "sr_label",
+            "sr_role_label",
+            "baseline_source",
+            "baseline_payload_path",
+            "baseline_lr_shape_xyz",
+            "inference_lr_shape_xyz",
+            "spatial_shape_original_xyz",
+            "spatial_shape_used_xyz",
+            "spatial_crop_applied",
         ],
     )
 
@@ -4696,16 +4848,23 @@ def main() -> None:
         "res_increase_detected": None if detected_res_increase is None else int(detected_res_increase),
         "labels": {
             "reference": ref_label,
-            "baseline": args.baseline_label,
-            "super_resolved": args.sr_label,
+            "baseline": baseline_label,
+            "super_resolved": sr_label,
+            "enhanced_role": sr_role_label,
         },
         "payload_path": str(Path(args.payload_npz).resolve()),
+        "baseline_payload_path": str(baseline_payload_path),
+        "baseline_source": str(baseline_source_tag),
         "metadata": metadata,
         "dimensions": {
             "T": int(t_count),
             "frame_source_indices": [int(x) for x in frame_source_indices.tolist()],
             "lr_shape_xyz": [int(x) for x in lr_norm.shape[2:]],
+            "inference_lr_shape_xyz": [int(x) for x in lr_norm_inference.shape[2:]],
             "shape_XYZ": [int(x) for x in pred_norm.shape[2:]],
+            "spatial_shape_original": spatial_shapes_original,
+            "spatial_shape_used": spatial_shapes_cropped,
+            "spatial_crop_applied": bool(spatial_crop_applied),
             "flow_method": str(flow_method),
             "flow_section_kind": str(flow_section_kind),
             "flow_axis": int(selected_flow_axis),
@@ -4869,25 +5028,63 @@ def main() -> None:
         ["mean_surface_distance_mm", "std_surface_distance_mm", "mean_hausdorff_distance_mm"],
     )
 
+    def _img_with_caption(rel_path: str, alt: str, desc: str) -> str:
+        return f"<img src='figures/{rel_path}' alt='{alt}'/><p class=\"muted\">{desc}</p>"
+
+    def _titled_img(title: str, rel_path: str, alt: str, desc: str) -> str:
+        return f"<h4>{title}</h4>{_img_with_caption(rel_path, alt, desc)}"
+
     ch_img_tags = "\n".join(
-        f"<h4>Channel {k}</h4><img src='figures/{v}' alt='{k} comparison'/>" for k, v in channel_figs.items()
+        _titled_img(
+            title=f"Channel {k}",
+            rel_path=v,
+            alt=f"{k} comparison",
+            desc=f"Compara input LR interpolado, predicción {sr_role_label}, referencia y error absoluto en cortes representativos.",
+        )
+        for k, v in channel_figs.items()
     )
     voxel_hist_channel_tags = "\n".join(
-        f"<h4>Intensity Histogram {k.upper()}</h4><img src='figures/{v}' alt='Intensity histogram {k.upper()}'/>"
+        _titled_img(
+            title=f"Intensity Histogram {k.upper()}",
+            rel_path=v,
+            alt=f"Intensity histogram {k.upper()}",
+            desc=f"Distribución de intensidades dentro de la máscara para referencia, baseline y {sr_role_label} en este canal.",
+        )
         for k, v in voxel_hist_channel_figs.items()
     )
 
     wss_summary_text = (
         f"{p_wss:.4g}" if (bool(args.include_wss) and np.isfinite(p_wss)) else ("disabled" if not bool(args.include_wss) else "nan")
     )
-    wss_img_tag = f'<img src="figures/{fig_wss_name}" alt="WSS distribution"/>' if fig_wss_name else ""
-    corr_speed_tag = f'<img src="figures/{corr_speed_name}" alt="Correlation speed"/>' if corr_speed_name else ""
-    corr_flow_tag = f'<img src="figures/{corr_flow_name}" alt="Correlation temporal flow"/>' if corr_flow_name else ""
-    comp_corr_tag = f'<img src="figures/{comp_corr_name}" alt="Correlation velocity components peak"/>' if comp_corr_name else ""
+    wss_img_tag = _img_with_caption(
+        fig_wss_name,
+        "WSS distribution",
+        f"Distribución de WSS en pared; permite comparar sesgo y dispersión entre baseline y {sr_role_label} frente a la referencia.",
+    ) if fig_wss_name else ""
+    corr_speed_tag = _img_with_caption(
+        corr_speed_name,
+        "Correlation speed",
+        "Correlación voxel a voxel de la magnitud de velocidad intraluminal contra la referencia.",
+    ) if corr_speed_name else ""
+    corr_flow_tag = _img_with_caption(
+        corr_flow_name,
+        "Correlation temporal flow",
+        "Correlación temporal del flujo por frame respecto a la referencia.",
+    ) if corr_flow_name else ""
+    comp_corr_tag = _img_with_caption(
+        comp_corr_name,
+        "Correlation velocity components peak",
+        "Correlación por componente de velocidad (u,v,w) en el frame pico frente a la referencia.",
+    ) if comp_corr_name else ""
     corr_speed_tags = (
         "\n".join(
             [
-                f"<h4>Correlation speed ({m})</h4><img src='figures/{p}' alt='Correlation speed {m}'/>"
+                _titled_img(
+                    title=f"Correlation speed ({m})",
+                    rel_path=p,
+                    alt=f"Correlation speed {m}",
+                    desc="Nube de dispersión y ajuste lineal de velocidad intraluminal vs referencia.",
+                )
                 for m, p in corr_speed_single_names.items()
             ]
         )
@@ -4897,7 +5094,12 @@ def main() -> None:
     corr_flow_tags = (
         "\n".join(
             [
-                f"<h4>Correlation flow temporal ({m})</h4><img src='figures/{p}' alt='Correlation flow temporal {m}'/>"
+                _titled_img(
+                    title=f"Correlation flow temporal ({m})",
+                    rel_path=p,
+                    alt=f"Correlation flow temporal {m}",
+                    desc="Comparación temporal frame a frame del flujo integrado frente a la referencia.",
+                )
                 for m, p in corr_flow_single_names.items()
             ]
         )
@@ -4907,17 +5109,35 @@ def main() -> None:
     ba_speed_tags = (
         "\n".join(
             [
-                f"<h4>Bland-Altman intraluminal speed ({m})</h4><img src='figures/{p}' alt='Bland-Altman intraluminal speed {m}'/>"
+                _titled_img(
+                    title=f"Bland-Altman intraluminal speed ({m})",
+                    rel_path=p,
+                    alt=f"Bland-Altman intraluminal speed {m}",
+                    desc="Diferencia vs media para velocidad intraluminal; muestra sesgo y límites de acuerdo.",
+                )
                 for m, p in ba_speed_single_names.items()
             ]
         )
         if ba_speed_single_names
-        else (f'<img src="figures/{ba_speed_name}" alt="Bland-Altman speed"/>' if ba_speed_name else "")
+        else (
+            _img_with_caption(
+                ba_speed_name,
+                "Bland-Altman speed",
+                "Diferencia vs media para velocidad intraluminal; permite ver sesgo y variabilidad.",
+            )
+            if ba_speed_name
+            else ""
+        )
     )
     comp_corr_tags = (
         "\n".join(
             [
-                f"<h4>Peak component correlation {k.replace('_', ' | ')}</h4><img src='figures/{v}' alt='Peak component correlation {k}'/>"
+                _titled_img(
+                    title=f"Peak component correlation {k.replace('_', ' | ')}",
+                    rel_path=v,
+                    alt=f"Peak component correlation {k}",
+                    desc="Correlación por componente en frame pico para evaluar fidelidad direccional.",
+                )
                 for k, v in comp_corr_single_names.items()
             ]
         )
@@ -4927,8 +5147,12 @@ def main() -> None:
     comp_ba_tags = "\n".join(
         [
             (
-                f"<h4>Bland-Altman {k.upper()} (all frames, in-mask voxels)</h4>"
-                f"<img src='figures/{v}' alt='Bland-Altman {k.upper()} all frames in-mask voxels'/>"
+                _titled_img(
+                    title=f"Bland-Altman {k.upper()} (all frames, in-mask voxels)",
+                    rel_path=v,
+                    alt=f"Bland-Altman {k.upper()} all frames in-mask voxels",
+                    desc="Bland-Altman por componente usando todos los voxeles intraluminales en todos los frames.",
+                )
             )
             for k, v in comp_ba_names.items()
         ]
@@ -4936,7 +5160,12 @@ def main() -> None:
     if comp_ba_single_names:
         comp_ba_tags = "\n".join(
             [
-                f"<h4>Bland-Altman {k.replace('_', ' | ')}</h4><img src='figures/{v}' alt='Bland-Altman {k}'/>"
+                _titled_img(
+                    title=f"Bland-Altman {k.replace('_', ' | ')}",
+                    rel_path=v,
+                    alt=f"Bland-Altman {k}",
+                    desc="Diferencia vs media para componente/método específico.",
+                )
                 for k, v in comp_ba_single_names.items()
             ]
         )
@@ -4954,21 +5183,48 @@ def main() -> None:
         ("velocity_error_rmse_temporal_mean_all_frames", "Velocity Error RMSE (Temporal Mean)"),
         ("velocity_relative_error_pct_peak", "Velocity Relative Error (%) Peak"),
         ("velocity_relative_error_pct_temporal_mean", "Velocity Relative Error (%) Temporal Mean"),
-        ("slice_relative_errors", "Slice-wise Relative Errors"),
-        ("table2_relative_error_violin_velocity", "Table-2 Relative Error Violin (Velocity)"),
-        ("table2_relative_error_violin_vorticity", "Table-2 Relative Error Violin (Vorticity)"),
-        ("table2_temporal_mean_relative_error_bar", "Table-2 Temporal-Mean Relative Error (Bar)"),
-        ("table2_temporal_mean_relative_error_violin_velocity", "Table-2 Temporal-Mean Violin (Velocity)"),
-        ("table2_temporal_mean_relative_error_violin_vorticity", "Table-2 Temporal-Mean Violin (Vorticity)"),
+        ("slice_relative_errors", "Slice-wise Absolute Errors"),
+        ("table2_abs_error_violin_velocity_scale", "Absolute Error Violin (Velocity: Mean & SD)"),
+        ("table2_abs_error_violin_velocity_shape", "Absolute Error Violin (Velocity: Skewness & Kurtosis)"),
+        ("table2_abs_error_violin_vorticity_scale", "Absolute Error Violin (Vorticity: Mean & SD)"),
+        ("table2_abs_error_violin_vorticity_shape", "Absolute Error Violin (Vorticity: Skewness & Kurtosis)"),
+        ("table2_temporal_mean_relative_error_bar", "Temporal-Mean Absolute Error (Bar)"),
+        ("table2_temporal_mean_abs_error_violin_velocity_scale", "Temporal-Mean Absolute Error Violin (Velocity: Mean & SD)"),
+        ("table2_temporal_mean_abs_error_violin_velocity_shape", "Temporal-Mean Absolute Error Violin (Velocity: Skewness & Kurtosis)"),
+        ("table2_temporal_mean_abs_error_violin_vorticity_scale", "Temporal-Mean Absolute Error Violin (Vorticity: Mean & SD)"),
+        ("table2_temporal_mean_abs_error_violin_vorticity_shape", "Temporal-Mean Absolute Error Violin (Vorticity: Skewness & Kurtosis)"),
         ("flow_abs_error_over_time", "Temporal Flow Absolute Error"),
         ("correlation_pearson_r", "Correlation (Pearson r)"),
         ("correlation_rmse_only", "Correlation (RMSE)"),
         ("voxel_distribution_std", "Voxel Distribution Std Dev"),
         ("significance_pvalues", "Wilcoxon Significance Summary"),
     ]
+    publication_desc = {
+        "velocity_error_mae_systolic_peak_peak_frame": "Error absoluto medio de velocidad en el frame pico.",
+        "velocity_error_rmse_systolic_peak_peak_frame": "RMSE de velocidad en el frame pico.",
+        "velocity_error_mae_temporal_mean_all_frames": "Error absoluto medio de velocidad agregando todos los frames.",
+        "velocity_error_rmse_temporal_mean_all_frames": "RMSE de velocidad agregando todos los frames.",
+        "velocity_relative_error_pct_peak": "Error relativo porcentual por región en frame pico.",
+        "velocity_relative_error_pct_temporal_mean": "Error relativo porcentual por región en promedio temporal.",
+        "slice_relative_errors": "Distribución de error absoluto entre slices para variables seleccionadas.",
+        "table2_abs_error_violin_velocity_scale": "Violin de error absoluto para variables de velocidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_abs_error_violin_velocity_shape": "Violin de error absoluto para variables de velocidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_abs_error_violin_vorticity_scale": "Violin de error absoluto para variables de vorticidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_abs_error_violin_vorticity_shape": "Violin de error absoluto para variables de vorticidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_temporal_mean_relative_error_bar": "Promedio temporal del error absoluto por variable.",
+        "table2_temporal_mean_abs_error_violin_velocity_scale": "Violin temporal-mean de error absoluto para velocidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_temporal_mean_abs_error_violin_velocity_shape": "Violin temporal-mean de error absoluto para velocidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_temporal_mean_abs_error_violin_vorticity_scale": "Violin temporal-mean de error absoluto para vorticidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_temporal_mean_abs_error_violin_vorticity_shape": "Violin temporal-mean de error absoluto para vorticidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "flow_abs_error_over_time": "Error absoluto temporal del flujo por frame.",
+        "correlation_pearson_r": "Comparación de Pearson r entre métricas y métodos.",
+        "correlation_rmse_only": "Comparación de RMSE entre métricas y métodos.",
+        "voxel_distribution_std": "Desviación estándar de la distribución voxel a voxel por canal.",
+        "significance_pvalues": "Resumen de significancia estadística (Wilcoxon) por análisis y región.",
+    }
     publication_fig_tags = "\n".join(
         [
-            f"<h3>{title}</h3><img src='figures/{publication_figs[key]}' alt='{title}'/>"
+            f"<h3>{title}</h3>{_img_with_caption(publication_figs[key], title, publication_desc.get(key, 'Figura resumen de métricas para comparación de métodos.'))}"
             for key, title in publication_fig_order
             if key in publication_figs
         ]
@@ -4976,7 +5232,7 @@ def main() -> None:
     publication_fig_section = (
         "<h2>Additional Publication-style Figures</h2>"
         "<p class=\"muted\">Automated summary figures generated from report metrics with a colorblind-safe palette "
-        "(reference=green, baseline=orange, SR=blue).</p>"
+        f"(reference=green, baseline=orange, {sr_role_label}=blue).</p>"
         f"{publication_fig_tags}"
         if publication_fig_tags
         else ""
@@ -4984,10 +5240,26 @@ def main() -> None:
     saved_publication_fig_items = "".join(
         [f"<li><code>figures/{publication_figs[key]}</code></li>" for key, _ in publication_fig_order if key in publication_figs]
     )
-    centerline_overlay_tag = f'<img src="figures/{centerline_overlay_name}" alt="Centerline overlay"/>' if centerline_overlay_name else ""
-    centerline_3d_tag = f'<img src="figures/{centerline_3d_name}" alt="Centerline 3D"/>' if centerline_3d_name else ""
-    centerline_sections_tag = f'<img src="figures/{centerline_sections_name}" alt="Centerline plane sections"/>' if centerline_sections_name else ""
-    centerline_peak_qs_tag = f'<img src="figures/{centerline_peak_qs_name}" alt="Centerline peak flow along vessel"/>' if centerline_peak_qs_name else ""
+    centerline_overlay_tag = _img_with_caption(
+        centerline_overlay_name,
+        "Centerline overlay",
+        "Proyecciones ortogonales de la máscara con trayectoria del centerline y puntos de planos válidos/no válidos.",
+    ) if centerline_overlay_name else ""
+    centerline_3d_tag = _img_with_caption(
+        centerline_3d_name,
+        "Centerline 3D",
+        "Vista 3D del lumen, centerline y planos muestreados para integración de flujo.",
+    ) if centerline_3d_name else ""
+    centerline_sections_tag = _img_with_caption(
+        centerline_sections_name,
+        "Centerline plane sections",
+        "Cortes ortogonales del centerline para control de calidad geométrico de secciones.",
+    ) if centerline_sections_name else ""
+    centerline_peak_qs_tag = _img_with_caption(
+        centerline_peak_qs_name,
+        "Centerline peak flow along vessel",
+        "Perfil Q(s) a lo largo del vaso en el frame pico para evaluar consistencia espacial del flujo.",
+    ) if centerline_peak_qs_name else ""
     centerline_qc_cols = [
         "plane_index",
         "is_valid_plane",
@@ -5049,7 +5321,7 @@ def main() -> None:
         p_peak_txt = "nan" if not np.isfinite(float(p_peak_planes)) else f"{float(p_peak_planes):.4g}"
         p_all_txt = "nan" if not np.isfinite(float(p_all_planes)) else f"{float(p_all_planes):.4g}"
         centerline_exec_bullet = (
-            f"<li>Centerline plane-error p-values (baseline vs SR): peak planes <b>{p_peak_txt}</b>, "
+            f"<li>Centerline plane-error p-values (baseline vs {sr_role_label.lower()}): peak planes <b>{p_peak_txt}</b>, "
             f"all frame-plane samples <b>{p_all_txt}</b></li>"
         )
         flow_axis_bullet = (
@@ -5081,7 +5353,7 @@ def main() -> None:
             f"{centerline_qc_html}"
             "<h3>Centerline Flow Consistency (Peak Frame)</h3>"
             "<p class=\"muted\">Q(s) should vary smoothly along nearby planes in branch-free tubular segments. "
-            f"Wilcoxon p (|err| baseline vs SR, peak frame planes): <b>{p_peak_txt}</b>; "
+            f"Wilcoxon p (|err| baseline vs {sr_role_label.lower()}, peak frame planes): <b>{p_peak_txt}</b>; "
             f"all frame-plane samples: <b>{p_all_txt}</b>.</p>"
             f"{centerline_peak_qs_tag}"
             "<h3>Centerline Sign QC</h3>"
@@ -5117,6 +5389,14 @@ def main() -> None:
 
     report_title_with_mode = f"{args.report_title} [{task_mode_label}]"
     detected_res_text = "unknown" if detected_res_increase is None else str(int(detected_res_increase))
+    if spatial_crop_applied:
+        spatial_crop_bullet = (
+            f"<li>Spatial shape harmonization: <b>cropped to {spatial_shapes_cropped['pred_xyz']}</b> "
+            f"(from pred={spatial_shapes_original['pred_xyz']}, gt={spatial_shapes_original['gt_xyz']}, "
+            f"mask={spatial_shapes_original['mask_xyz']})</li>"
+        )
+    else:
+        spatial_crop_bullet = "<li>Spatial shape harmonization: <b>not needed</b></li>"
     html = f"""
 <!DOCTYPE html>
 <html lang=\"en\">
@@ -5138,13 +5418,14 @@ def main() -> None:
 <body>
   <h1>{report_title_with_mode}</h1>
   <p class=\"muted\">Generated from payload: <code>{Path(args.payload_npz).resolve()}</code></p>
+  <p class=\"muted\">Baseline source payload: <code>{baseline_payload_path}</code> ({baseline_source_tag})</p>
   <p class=\"muted\">Mode-specific outputs are saved under <code>figures/{task_mode_tag}/</code> and <code>{metrics_rel_prefix}/</code>.</p>
 
   <p>
     <span class=\"pill\">Task mode: {task_mode_label}</span>
     <span class=\"pill\">Reference: {ref_label}</span>
-    <span class=\"pill\">Baseline: {args.baseline_label}</span>
-    <span class=\"pill\">Super-resolved: {args.sr_label}</span>
+    <span class=\"pill\">Baseline: {baseline_label}</span>
+    <span class=\"pill\">{sr_role_label}: {sr_label}</span>
   </p>
 
   <h2>Executive Summary</h2>
@@ -5158,8 +5439,10 @@ def main() -> None:
     <li>{flow_method_bullet}</li>
     <li>{flow_axis_bullet}</li>
     <li>{flow_temporal_bullet}</li>
+    {spatial_crop_bullet}
     <li>LR magnitude channel used for visualization: <b>{args.lr_mag_channel}</b></li>
     <li>ROI mode: <b>{'enabled' if roi_info.get('enabled', False) else 'disabled'}</b>{'' if not roi_info.get('enabled', False) else f" (bbox xyz: {roi_info.get('bbox_xyz')})"}</li>
+    <li>Baseline source: <b>{baseline_source_tag}</b> ({Path(baseline_payload_path).name})</li>
     <li>Baseline LR alignment for metrics: <b>{'upsampled to HR grid' if tuple(lr_norm.shape[2:]) != tuple(gt_norm.shape[2:]) else 'native HR size'}</b></li>
   </ul>
 
@@ -5169,11 +5452,13 @@ def main() -> None:
   <h2>Voxel Distribution Inside Mask</h2>
   <p class=\"muted\">Histogram comparison over all in-mask voxels across all processed frames{'' if not roi_info.get('enabled', False) else ' (restricted to ROI bbox)'}.</p>
   <img src=\"figures/{_rel_fig_path(fig_voxel_hist, fig_dir)}\" alt=\"In-mask voxel histograms\"/>
+  <p class=\"muted\">Histograma global dentro de la máscara: compara la distribución de valores entre referencia, baseline y {sr_role_label} usando todos los frames.</p>
   {voxel_hist_channel_tags}
   {voxel_dist_html}
 
   <h2>Flow-rate Diagnostics</h2>
   <img src=\"figures/{_rel_fig_path(fig_flow, fig_dir)}\" alt=\"Flow profile\"/>
+  <p class=\"muted\">Perfil temporal de flujo integrado por frame para referencia, baseline y {sr_role_label}.</p>
   <p class=\"muted\">{flow_diag_text}</p>
   {flow_axis_section}
   {centerline_section}
@@ -5189,7 +5474,7 @@ def main() -> None:
   <p class=\"muted\">Temporal summaries against reference flow (Qref).</p>
   {flow_html}
   <h3>Flow Peak Metrics (Paper-style)</h3>
-  <p class=\"muted\">Peak-frame and temporal RMSE/relative-error summaries aligned with cerebrovascular SR comparisons.</p>
+  <p class=\"muted\">Peak-frame and temporal RMSE/relative-error summaries aligned with cerebrovascular {sr_role_label.lower()} comparisons.</p>
   {flow_peak_html}
   <h3>Flow Average Metrics (Paper-style)</h3>
   <p class=\"muted\">Temporal mean-flow and average-error summaries using all frames.</p>
@@ -5218,7 +5503,7 @@ def main() -> None:
   <p class=\"muted\">All-frames in-mask velocity magnitude metrics (MAE, RMSE, relative error, cosine similarity), reported for core, wall, and full intraluminal masks.</p>
   {mean_vel_html}
 
-  <h2>Statistical Significance (Baseline vs SR)</h2>
+  <h2>Statistical Significance (Baseline vs {sr_role_label})</h2>
   <p class=\"muted\">Paired Wilcoxon tests on voxel-wise absolute errors against reference (peak frame and all-frame mean analyses).</p>
   {pvalue_html}
 

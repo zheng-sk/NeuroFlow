@@ -18,6 +18,11 @@ def main() -> None:
     parser.add_argument("--case-index", type=int, default=0)
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument(
+        "--baseline-payload-npz",
+        default="",
+        help="Optional analysis_payload.npz used as fixed 3T baseline for report metrics/plots.",
+    )
 
     parser.add_argument("--time-axis", type=int, default=-1)
     parser.add_argument("--frame-index", type=int, nargs="*", default=None)
@@ -214,6 +219,8 @@ def main() -> None:
     if args.centerline_end_xyz and len(args.centerline_end_xyz) == 3:
         report_cmd.append("--centerline-end-xyz")
         report_cmd.extend([str(v) for v in args.centerline_end_xyz])
+    if args.baseline_payload_npz:
+        report_cmd.extend(["--baseline-payload-npz", str(args.baseline_payload_npz)])
 
     _run(report_cmd)
 

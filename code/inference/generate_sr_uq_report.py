@@ -23,6 +23,8 @@ REPORT_COLOR_BASELINE = "#D55E00"
 REPORT_COLOR_SR = "#0072B2"
 REPORT_COLOR_NEUTRAL = "#111827"
 VIOLIN_UPPER_PERCENTILE = 95.0
+REPORT_FILL_ALPHA = 0.74
+REPORT_BOX_ALPHA = 0.48
 
 if sns is not None:
     sns.set_theme(
@@ -47,9 +49,13 @@ plt.rcParams.update(
         "font.family": REPORT_FONT_FAMILY,
         "font.serif": REPORT_FONT_SERIF,
         "mathtext.fontset": "stix",
-        "font.size": 10,
-        "axes.titlesize": 11,
-        "axes.labelsize": 10,
+        "font.size": 11.5,
+        "axes.titlesize": 13,
+        "axes.labelsize": 12,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "legend.fontsize": 11,
+        "legend.title_fontsize": 11,
         "grid.color": "#d1d5db",
         "grid.linewidth": 0.7,
         "grid.alpha": 0.35,
@@ -100,6 +106,16 @@ def _relative_error(val: float, ref: float) -> float:
     if denom < 1e-12:
         return float("nan")
     return abs(float(val) - float(ref)) / denom
+
+
+def _relative_error_eps(val: float, ref: float, eps: float) -> float:
+    denom = max(abs(float(ref)), max(float(eps), 1e-12))
+    return abs(float(val) - float(ref)) / denom
+
+
+def _smape_ratio(val: float, ref: float, eps: float = 1e-12) -> float:
+    denom = abs(float(val)) + abs(float(ref)) + max(float(eps), 1e-12)
+    return 2.0 * abs(float(val) - float(ref)) / denom
 
 
 def _wilcoxon_p(x: Sequence[float], y: Sequence[float]) -> float:
@@ -163,6 +179,117 @@ def _winsorize_upper_percentile(x: Sequence[float] | np.ndarray, upper_p: float 
     if not np.isfinite(hi):
         return arr
     return np.minimum(arr, hi)
+
+
+def _table2_ref_eps_map(rows: List[Dict[str, Any]], ref_key: str = "ref", q: float = 5.0) -> Dict[str, float]:
+    by_var: Dict[str, List[float]] = {}
+    for r in rows:
+        var = str(r.get("variable", "")).strip()
+        ref = float(r.get(ref_key, float("nan")))
+        if not var or not np.isfinite(ref):
+            continue
+        by_var.setdefault(var, []).append(abs(ref))
+    out: Dict[str, float] = {}
+    for var, vals in by_var.items():
+        arr = _finite_values(vals)
+        arr = arr[arr > 0]
+        if arr.size == 0:
+            out[var] = 1e-6
+            continue
+        eps = _scipy_percentile(arr, q)
+        if not np.isfinite(eps) or eps <= 0:
+            med = _scipy_median(arr)
+            eps = 0.1 * med if np.isfinite(med) and med > 0 else 1e-6
+        out[var] = max(float(eps), 1e-6)
+    return out
+
+
+def _augment_table2_rows_with_robust_relative(
+    rows: List[Dict[str, Any]],
+    eps_map: Dict[str, float],
+    ref_key: str,
+    baseline_key: str,
+    sr_key: str,
+) -> None:
+    for r in rows:
+        var = str(r.get("variable", "")).strip()
+        ref = float(r.get(ref_key, float("nan")))
+        base = float(r.get(baseline_key, float("nan")))
+        sr = float(r.get(sr_key, float("nan")))
+        eps = float(eps_map.get(var, 1e-6))
+        if np.isfinite(ref) and np.isfinite(base):
+            r["re_baseline_eps"] = _relative_error_eps(base, ref, eps)
+            r["smape_baseline"] = _smape_ratio(base, ref, eps=eps)
+        else:
+            r["re_baseline_eps"] = float("nan")
+            r["smape_baseline"] = float("nan")
+        if np.isfinite(ref) and np.isfinite(sr):
+            r["re_sr_eps"] = _relative_error_eps(sr, ref, eps)
+            r["smape_sr"] = _smape_ratio(sr, ref, eps=eps)
+        else:
+            r["re_sr_eps"] = float("nan")
+            r["smape_sr"] = float("nan")
+        r["ref_eps"] = float(eps)
+
+
+def _table2_relative_robust_summary(
+    rows: List[Dict[str, Any]],
+    ref_key: str,
+    baseline_key: str,
+    sr_key: str,
+    re_base_key: str,
+    re_sr_key: str,
+    re_base_eps_key: str,
+    re_sr_eps_key: str,
+    smape_base_key: str,
+    smape_sr_key: str,
+    ref_eps_key: str = "ref_eps",
+    baseline_method_label: str = "baseline",
+    sr_method_label: str = "sr",
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    methods = [
+        (baseline_method_label, baseline_key, re_base_key, re_base_eps_key, smape_base_key),
+        (sr_method_label, sr_key, re_sr_key, re_sr_eps_key, smape_sr_key),
+    ]
+    by_var = sorted(set(str(r.get("variable", "")).strip() for r in rows if str(r.get("variable", "")).strip()))
+    for var in by_var:
+        subset = [r for r in rows if str(r.get("variable", "")).strip() == var]
+        ref_vals = _finite_values([float(r.get(ref_key, float("nan"))) for r in subset])
+        eps_var = _scipy_median([float(r.get(ref_eps_key, float("nan"))) for r in subset])
+        for method_name, pred_key, re_key, re_eps_key, smape_key in methods:
+            pred_vals = _finite_values([float(r.get(pred_key, float("nan"))) for r in subset])
+            abs_err_vals = _finite_values([abs(float(r.get(pred_key, float("nan"))) - float(r.get(ref_key, float("nan")))) for r in subset])
+            re_vals = 100.0 * _finite_values([float(r.get(re_key, float("nan"))) for r in subset])
+            re_eps_vals = 100.0 * _finite_values([float(r.get(re_eps_key, float("nan"))) for r in subset])
+            smape_vals = 100.0 * _finite_values([float(r.get(smape_key, float("nan"))) for r in subset])
+            denom_raw = float(np.sum(np.abs(ref_vals))) if ref_vals.size else float("nan")
+            wape_raw = float(np.sum(abs_err_vals) / denom_raw * 100.0) if np.isfinite(denom_raw) and denom_raw > 1e-12 else float("nan")
+            if ref_vals.size:
+                denom_eps = float(np.sum(np.maximum(np.abs(ref_vals), max(float(eps_var), 1e-12))))
+                wape_eps = float(np.sum(abs_err_vals) / denom_eps * 100.0) if denom_eps > 1e-12 else float("nan")
+            else:
+                wape_eps = float("nan")
+            out.append(
+                {
+                    "variable": var,
+                    "method": method_name,
+                    "n": int(abs_err_vals.size),
+                    "ref_eps": float(eps_var) if np.isfinite(eps_var) else float("nan"),
+                    "mean_re_pct": _scipy_mean(re_vals),
+                    "median_re_pct": _scipy_median(re_vals),
+                    "p95_re_pct": _scipy_percentile(re_vals, 95.0),
+                    "mean_re_eps_pct": _scipy_mean(re_eps_vals),
+                    "median_re_eps_pct": _scipy_median(re_eps_vals),
+                    "p95_re_eps_pct": _scipy_percentile(re_eps_vals, 95.0),
+                    "mean_smape_pct": _scipy_mean(smape_vals),
+                    "median_smape_pct": _scipy_median(smape_vals),
+                    "p95_smape_pct": _scipy_percentile(smape_vals, 95.0),
+                    "wape_pct": wape_raw,
+                    "wape_eps_pct": wape_eps,
+                }
+            )
+    return out
 
 
 def _extract_slice(arr: np.ndarray, axis: int, idx: int) -> np.ndarray:
@@ -329,21 +456,17 @@ def _table2_rows_per_frame(
 def _table2_temporal_mean_rows(
     table2_per_frame_rows: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+    optional_fields = [f for f in ("re_baseline_eps", "re_sr_eps", "smape_baseline", "smape_sr", "ref_eps") if any(f in r for r in table2_per_frame_rows)]
+    fields = ["ref", "baseline", "sr", "re_baseline", "re_sr"] + optional_fields
     grouped: Dict[Tuple[int, str], Dict[str, List[float]]] = {}
     for row in table2_per_frame_rows:
         slice_idx = int(row.get("slice_index", -1))
         var_name = str(row.get("variable", ""))
         key = (slice_idx, var_name)
         if key not in grouped:
-            grouped[key] = {
-                "ref": [],
-                "baseline": [],
-                "sr": [],
-                "re_baseline": [],
-                "re_sr": [],
-            }
+            grouped[key] = {f: [] for f in fields}
         g = grouped[key]
-        for field in ("ref", "baseline", "sr", "re_baseline", "re_sr"):
+        for field in fields:
             g[field].append(float(row.get(field, float("nan"))))
 
     out: List[Dict[str, Any]] = []
@@ -353,19 +476,31 @@ def _table2_temporal_mean_rows(
         sr_v = _finite_values(vals["sr"])
         re_base_v = _finite_values(vals["re_baseline"])
         re_sr_v = _finite_values(vals["re_sr"])
+        re_base_eps_v = _finite_values(vals.get("re_baseline_eps", []))
+        re_sr_eps_v = _finite_values(vals.get("re_sr_eps", []))
+        smape_base_v = _finite_values(vals.get("smape_baseline", []))
+        smape_sr_v = _finite_values(vals.get("smape_sr", []))
+        ref_eps_v = _finite_values(vals.get("ref_eps", []))
         n_frames = int(max(ref_v.size, base_v.size, sr_v.size, re_base_v.size, re_sr_v.size))
-        out.append(
-            {
-                "slice_index": int(slice_idx),
-                "variable": str(var_name),
-                "n_frames": int(n_frames),
-                "ref_mean_over_frames": _scipy_mean(ref_v),
-                "baseline_mean_over_frames": _scipy_mean(base_v),
-                "sr_mean_over_frames": _scipy_mean(sr_v),
-                "re_baseline_mean_over_frames": _scipy_mean(re_base_v),
-                "re_sr_mean_over_frames": _scipy_mean(re_sr_v),
-            }
-        )
+        row_out = {
+            "slice_index": int(slice_idx),
+            "variable": str(var_name),
+            "n_frames": int(n_frames),
+            "ref_mean_over_frames": _scipy_mean(ref_v),
+            "baseline_mean_over_frames": _scipy_mean(base_v),
+            "sr_mean_over_frames": _scipy_mean(sr_v),
+            "re_baseline_mean_over_frames": _scipy_mean(re_base_v),
+            "re_sr_mean_over_frames": _scipy_mean(re_sr_v),
+        }
+        if re_base_eps_v.size or re_sr_eps_v.size:
+            row_out["re_baseline_eps_mean_over_frames"] = _scipy_mean(re_base_eps_v)
+            row_out["re_sr_eps_mean_over_frames"] = _scipy_mean(re_sr_eps_v)
+        if smape_base_v.size or smape_sr_v.size:
+            row_out["smape_baseline_mean_over_frames"] = _scipy_mean(smape_base_v)
+            row_out["smape_sr_mean_over_frames"] = _scipy_mean(smape_sr_v)
+        if ref_eps_v.size:
+            row_out["ref_eps_mean_over_frames"] = _scipy_mean(ref_eps_v)
+        out.append(row_out)
     return out
 
 
@@ -1010,6 +1145,66 @@ def _plot_bland_altman_panel(
         "loa_high": float(loa_high),
         "sd_diff": float(sd),
     }
+
+
+def _pad_limits(lo: float, hi: float, pad_ratio: float = 0.08) -> Tuple[float, float]:
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo, hi = -1.0, 1.0
+    pad = max(1e-6, (hi - lo) * float(pad_ratio))
+    return float(lo - pad), float(hi + pad)
+
+
+def _bland_altman_joint_limits(
+    ref_vals: np.ndarray,
+    test_vals_list: Sequence[np.ndarray],
+    pad_ratio: float = 0.08,
+) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    means: List[np.ndarray] = []
+    diffs: List[np.ndarray] = []
+    ref0 = np.asarray(ref_vals, dtype=np.float64).ravel()
+    for tv in test_vals_list:
+        test0 = np.asarray(tv, dtype=np.float64).ravel()
+        n = min(ref0.size, test0.size)
+        if n < 3:
+            continue
+        rr = ref0[:n]
+        tt = test0[:n]
+        m = np.isfinite(rr) & np.isfinite(tt)
+        rr = rr[m]
+        tt = tt[m]
+        if rr.size < 3:
+            continue
+        means.append(0.5 * (tt + rr))
+        diffs.append(tt - rr)
+    if not means or not diffs:
+        return None
+    x_lo, x_hi = _robust_range(means, symmetric=False, lower_q=0.2, upper_q=99.8)
+    y_lo, y_hi = _robust_range(diffs, symmetric=True, lower_q=0.2, upper_q=99.8)
+    x_lo, x_hi = _pad_limits(x_lo, x_hi, pad_ratio=pad_ratio)
+    y_lo, y_hi = _pad_limits(y_lo, y_hi, pad_ratio=pad_ratio)
+    return (x_lo, x_hi), (y_lo, y_hi)
+
+
+def _correlation_joint_limits(
+    ref_vals: np.ndarray,
+    test_vals_list: Sequence[np.ndarray],
+    pad_ratio: float = 0.05,
+) -> Optional[Tuple[float, float]]:
+    series: List[np.ndarray] = []
+    r0 = np.asarray(ref_vals, dtype=np.float64).ravel()
+    r0 = r0[np.isfinite(r0)]
+    if r0.size:
+        series.append(r0)
+    for tv in test_vals_list:
+        t0 = np.asarray(tv, dtype=np.float64).ravel()
+        t0 = t0[np.isfinite(t0)]
+        if t0.size:
+            series.append(t0)
+    if not series:
+        return None
+    lo, hi = _robust_range(series, symmetric=False, lower_q=0.2, upper_q=99.8)
+    lo, hi = _pad_limits(lo, hi, pad_ratio=pad_ratio)
+    return lo, hi
 
 
 def _suggest_flow_axis(
@@ -1813,6 +2008,184 @@ def _save_publication_figures(
     out: Dict[str, str] = {}
     method_colors = {baseline_label: REPORT_COLOR_BASELINE, sr_label: REPORT_COLOR_SR}
     voxel_colors = {ref_label: REPORT_COLOR_REF, baseline_label: REPORT_COLOR_BASELINE, sr_label: REPORT_COLOR_SR}
+    velocity_pref = ["Mean velocity [m/s]", "SD velocity [m/s]", "Skewness velocity", "Kurtosis velocity"]
+    vorticity_pref = ["Mean vorticity [1/s]", "SD vorticity [1/s]", "Skewness vorticity", "Kurtosis vorticity"]
+    moment_specs: List[Tuple[str, str, List[str]]] = [
+        ("scale", "Mean & SD", ["Mean", "SD"]),
+        ("shape", "Skewness & Kurtosis", ["Skewness", "Kurtosis"]),
+    ]
+
+    def _clean_var_name(v: str) -> str:
+        return str(v).replace(" [m/s]", "").replace(" [1/s]", "")
+
+    def _family_specs(by_var: Dict[str, Dict[str, np.ndarray]]) -> List[Tuple[str, str, List[str]]]:
+        return [
+            ("velocity", "Velocity", [v for v in velocity_pref if v in by_var]),
+            ("vorticity", "Vorticity", [v for v in vorticity_pref if v in by_var]),
+        ]
+
+    def _box_points_plot(
+        ax: plt.Axes,
+        x_vals: List[str],
+        y_vals: List[float],
+        h_vals: List[str],
+        order_vals: List[str],
+    ) -> None:
+        if sns is None:
+            return
+        xx = np.asarray(x_vals, dtype=object)
+        yy = np.asarray(y_vals, dtype=np.float64)
+        hh = np.asarray(h_vals, dtype=object)
+        if yy.size == 0:
+            return
+        if yy.size > 26000:
+            rng = np.random.default_rng(123)
+            keep = rng.choice(yy.size, size=26000, replace=False)
+            xx_plot = xx[keep]
+            yy_plot = yy[keep]
+            hh_plot = hh[keep]
+        else:
+            xx_plot = xx
+            yy_plot = yy
+            hh_plot = hh
+
+        sns.boxplot(
+            x=xx,
+            y=yy,
+            hue=hh,
+            order=order_vals,
+            palette=method_colors,
+            linewidth=1.0,
+            fliersize=0.0,
+            saturation=0.62,
+            dodge=True,
+            ax=ax,
+        )
+        for patch in ax.patches:
+            patch.set_alpha(REPORT_BOX_ALPHA)
+        sns.stripplot(
+            x=xx_plot,
+            y=yy_plot,
+            hue=hh_plot,
+            order=order_vals,
+            palette=method_colors,
+            dodge=True,
+            jitter=0.18,
+            size=2.4,
+            alpha=0.28,
+            linewidth=0,
+            ax=ax,
+        )
+        leg = ax.get_legend()
+        if leg is not None:
+            leg.remove()
+
+    def _save_table2_family_bar(
+        by_var: Dict[str, Dict[str, np.ndarray]],
+        temporal_mean: bool,
+        metric_kind: str,
+    ) -> None:
+        if not by_var:
+            return
+        for family_tag, family_title, var_order in _family_specs(by_var):
+            if not var_order:
+                continue
+            fig_w = max(8.4, 1.05 * float(len(var_order)) + 3.2)
+            fig, ax = plt.subplots(1, 1, figsize=(fig_w, 5.6))
+            x = np.arange(len(var_order), dtype=np.float64)
+            width = 0.36
+            for j, method_name in enumerate([baseline_label, sr_label]):
+                vals = [_scipy_mean(by_var[v][method_name]) for v in var_order]
+                bars = ax.bar(
+                    x + (j - 0.5) * width,
+                    [0.0 if not np.isfinite(v) else v for v in vals],
+                    width=width,
+                    color=method_colors[method_name],
+                    edgecolor=REPORT_COLOR_NEUTRAL,
+                    linewidth=0.8,
+                    label=method_name,
+                    alpha=REPORT_FILL_ALPHA,
+                )
+                for k, v in enumerate(vals):
+                    if not np.isfinite(v):
+                        bars[k].set_alpha(0.12)
+            ax.set_xticks(x)
+            ax.set_xticklabels([_clean_var_name(v) for v in var_order], rotation=15, ha="right")
+            tm_prefix = "Temporal-Mean " if temporal_mean else ""
+            if metric_kind == "relative":
+                ax.set_ylabel("Mean Relative Error [%] vs Reference")
+                ax.set_title(f"{tm_prefix}Relative Error by {family_title}")
+                slug = "relative_error_pct"
+            else:
+                ax.set_ylabel("Mean Absolute Error vs Reference")
+                ax.set_title(f"{tm_prefix}Absolute Error by {family_title}")
+                slug = "abs_error"
+            ax.set_xlabel("Variable")
+            ax.grid(axis="y", linestyle="--", alpha=0.35)
+            if sns is not None:
+                sns.despine(ax=ax)
+            ax.legend(title="Method", frameon=False, loc="best")
+            fig.tight_layout()
+            tm_slug = "temporal_mean_" if temporal_mean else ""
+            name = f"prof_table2_{tm_slug}{slug}_bar_{family_tag}.png"
+            fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+            plt.close(fig)
+            out[f"table2_{tm_slug}{slug}_bar_{family_tag}"] = name
+
+    def _save_table2_family_violin(
+        by_var: Dict[str, Dict[str, np.ndarray]],
+        temporal_mean: bool,
+        metric_kind: str,
+    ) -> None:
+        if sns is None or not by_var:
+            return
+        for family_tag, family_title, family_vars in _family_specs(by_var):
+            if not family_vars:
+                continue
+            for moment_tag, moment_title, prefixes in moment_specs:
+                var_order = [v for v in family_vars if any(v.startswith(p) for p in prefixes)]
+                if not var_order:
+                    continue
+                display_names = {v: _clean_var_name(v) for v in var_order}
+                x_vals: List[str] = []
+                y_vals: List[float] = []
+                h_vals: List[str] = []
+                for var_name in var_order:
+                    for method_name in (baseline_label, sr_label):
+                        vals = _winsorize_upper_percentile(
+                            by_var[var_name][method_name],
+                            upper_p=VIOLIN_UPPER_PERCENTILE,
+                        )
+                        if vals.size == 0:
+                            continue
+                        x_vals.extend([display_names[var_name]] * int(vals.size))
+                        y_vals.extend(vals.astype(np.float64).tolist())
+                        h_vals.extend([method_name] * int(vals.size))
+                if not y_vals:
+                    continue
+                fig_w = max(6.8, 1.35 * float(len(var_order)) + 1.8)
+                fig, ax = plt.subplots(1, 1, figsize=(fig_w, 5.6))
+                _box_points_plot(ax, x_vals, y_vals, h_vals, [display_names[v] for v in var_order])
+                tm_prefix = "Temporal-Mean " if temporal_mean else ""
+                if metric_kind == "relative":
+                    ax.set_title(f"{tm_prefix}Relative Error Boxplot ({family_title}: {moment_title})")
+                    ax.set_ylabel(f"Relative Error [%] vs Reference (winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})")
+                    slug = "relative_error_pct"
+                else:
+                    ax.set_title(f"{tm_prefix}Absolute Error Boxplot ({family_title}: {moment_title})")
+                    ax.set_ylabel(f"Absolute Error vs Reference (winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})")
+                    slug = "abs_error"
+                ax.set_xlabel("Variable")
+                ax.grid(axis="y", linestyle="--", alpha=0.35)
+                sns.despine(ax=ax)
+                ax.legend(handles=[Patch(facecolor=method_colors[m], edgecolor="#111827", label=m) for m in [baseline_label, sr_label]], title="Method", frameon=False, loc="upper right")
+                ax.tick_params(axis="x", rotation=12)
+                fig.tight_layout()
+                tm_slug = "temporal_mean_" if temporal_mean else ""
+                name = f"prof_table2_{tm_slug}{slug}_violin_{family_tag}_{moment_tag}.png"
+                fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
+                plt.close(fig)
+                out[f"table2_{tm_slug}{slug}_violin_{family_tag}_{moment_tag}"] = name
 
     # 1) Combined panel: mean vs peak velocity errors (MAE, RMSE).
     speed_regions_pref = ["core", "wall", "intraluminal"]
@@ -1852,7 +2225,7 @@ def _save_publication_figures(
                         edgecolor="#111827",
                         linewidth=0.8,
                         label=method_name,
-                        alpha=0.90,
+                        alpha=REPORT_FILL_ALPHA,
                     )
                     for k, v in enumerate(vals):
                         if not np.isfinite(v):
@@ -1900,7 +2273,7 @@ def _save_publication_figures(
                         edgecolor=REPORT_COLOR_NEUTRAL,
                         linewidth=0.8,
                         label=method_name,
-                        alpha=0.90,
+                        alpha=REPORT_FILL_ALPHA,
                     )
                     for k, v in enumerate(vals):
                         if not np.isfinite(v):
@@ -1964,7 +2337,7 @@ def _save_publication_figures(
                 )
                 for box in bp["boxes"]:
                     box.set_facecolor(method_colors[method_name])
-                    box.set_alpha(0.55)
+                    box.set_alpha(REPORT_BOX_ALPHA)
         ax.set_xticks(x0)
         ax.set_xticklabels([v.replace(" [m/s]", "").replace(" [1/s]", "") for v in vars_order])
         ax.set_xlabel("Hemodynamic Parameter")
@@ -1974,8 +2347,8 @@ def _save_publication_figures(
         if sns is not None:
             sns.despine(ax=ax)
         legend_handles = [
-            Patch(facecolor=method_colors[baseline_label], edgecolor="#111827", alpha=0.55, label=baseline_label),
-            Patch(facecolor=method_colors[sr_label], edgecolor="#111827", alpha=0.55, label=sr_label),
+            Patch(facecolor=method_colors[baseline_label], edgecolor="#111827", alpha=REPORT_BOX_ALPHA, label=baseline_label),
+            Patch(facecolor=method_colors[sr_label], edgecolor="#111827", alpha=REPORT_BOX_ALPHA, label=sr_label),
         ]
         ax.legend(handles=legend_handles, title="Method", frameon=False, loc="upper right")
         fig.tight_layout()
@@ -1984,35 +2357,40 @@ def _save_publication_figures(
         plt.close(fig)
         out["slice_relative_errors"] = name
 
-    # 2b) Violin plots: absolute error distribution split by velocity vs vorticity variables.
+    # 2b) Table-2 all-slices error distributions by variable (absolute + relative%).
     t2_all_by_var: Dict[str, Dict[str, np.ndarray]] = {}
+    t2_all_rel_by_var: Dict[str, Dict[str, np.ndarray]] = {}
     for row in table2_all_rows:
         var_name = str(row.get("variable", "")).strip()
         if not var_name:
             continue
         if var_name not in t2_all_by_var:
             t2_all_by_var[var_name] = {baseline_label: np.asarray([], dtype=np.float64), sr_label: np.asarray([], dtype=np.float64)}
+        if var_name not in t2_all_rel_by_var:
+            t2_all_rel_by_var[var_name] = {baseline_label: np.asarray([], dtype=np.float64), sr_label: np.asarray([], dtype=np.float64)}
         ref_v = float(row.get("ref", float("nan")))
         base_v = float(row.get("baseline", float("nan")))
         sr_v = float(row.get("sr", float("nan")))
+        re_base = float(row.get("re_baseline_eps", row.get("re_baseline", float("nan"))))
+        re_sr = float(row.get("re_sr_eps", row.get("re_sr", float("nan"))))
         b = _finite_values([abs(base_v - ref_v) if np.isfinite(base_v) and np.isfinite(ref_v) else float("nan")])
         s = _finite_values([abs(sr_v - ref_v) if np.isfinite(sr_v) and np.isfinite(ref_v) else float("nan")])
+        rb = _finite_values([100.0 * re_base if np.isfinite(re_base) else float("nan")])
+        rs = _finite_values([100.0 * re_sr if np.isfinite(re_sr) else float("nan")])
         if b.size > 0:
             t2_all_by_var[var_name][baseline_label] = np.concatenate([t2_all_by_var[var_name][baseline_label], b], axis=0)
         if s.size > 0:
             t2_all_by_var[var_name][sr_label] = np.concatenate([t2_all_by_var[var_name][sr_label], s], axis=0)
+        if rb.size > 0:
+            t2_all_rel_by_var[var_name][baseline_label] = np.concatenate([t2_all_rel_by_var[var_name][baseline_label], rb], axis=0)
+        if rs.size > 0:
+            t2_all_rel_by_var[var_name][sr_label] = np.concatenate([t2_all_rel_by_var[var_name][sr_label], rs], axis=0)
 
     if t2_all_by_var and sns is not None:
         # Strategy: split moments (Mean/SD vs Skewness/Kurtosis) to avoid mixed-scale distortion.
-        velocity_pref = ["Mean velocity [m/s]", "SD velocity [m/s]", "Skewness velocity", "Kurtosis velocity"]
-        vorticity_pref = ["Mean vorticity [1/s]", "SD vorticity [1/s]", "Skewness vorticity", "Kurtosis vorticity"]
         family_specs: List[Tuple[str, str, List[str]]] = [
             ("velocity", "Velocity", [v for v in velocity_pref if v in t2_all_by_var]),
             ("vorticity", "Vorticity", [v for v in vorticity_pref if v in t2_all_by_var]),
-        ]
-        moment_specs: List[Tuple[str, str, List[str]]] = [
-            ("scale", "Mean & SD", ["Mean", "SD"]),
-            ("shape", "Skewness & Kurtosis", ["Skewness", "Kurtosis"]),
         ]
         for family_tag, family_title, family_vars in family_specs:
             if not family_vars:
@@ -2042,25 +2420,13 @@ def _save_publication_figures(
                 order_disp = [display_names[v] for v in var_order]
                 fig_w = max(6.8, 1.35 * float(len(order_disp)) + 1.8)
                 fig, ax = plt.subplots(1, 1, figsize=(fig_w, 5.6))
-                sns.violinplot(
-                    x=x_vals,
-                    y=y_vals,
-                    hue=h_vals,
-                    order=order_disp,
-                    cut=0,
-                    inner="quartile",
-                    linewidth=1.0,
-                    palette=method_colors,
-                    ax=ax,
-                    dodge=True,
-                )
-                ax.set_title(f"Absolute Error Distribution ({family_title}: {moment_title})")
+                _box_points_plot(ax, x_vals, y_vals, h_vals, order_disp)
+                ax.set_title(f"Absolute Error Boxplot ({family_title}: {moment_title})")
                 ax.set_xlabel("Variable")
                 ax.set_ylabel(f"Absolute Error vs Reference (winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})")
                 ax.grid(axis="y", linestyle="--", alpha=0.35)
                 sns.despine(ax=ax)
-                if ax.get_legend() is not None:
-                    ax.get_legend().remove()
+                ax.legend(handles=[Patch(facecolor=method_colors[m], edgecolor="#111827", label=m) for m in [baseline_label, sr_label]], title="Method", frameon=False, loc="upper right")
                 ax.tick_params(axis="x", rotation=12)
                 fig.tight_layout()
                 name = f"prof_table2_abs_error_violin_{family_tag}_{moment_tag}.png"
@@ -2070,21 +2436,32 @@ def _save_publication_figures(
 
     # 2c) Temporal-mean Table-2 plots (averaged over frames first, then compared across slices/variables).
     t2_tm_by_var: Dict[str, Dict[str, np.ndarray]] = {}
+    t2_tm_rel_by_var: Dict[str, Dict[str, np.ndarray]] = {}
     for row in table2_temporal_mean_rows:
         var_name = str(row.get("variable", "")).strip()
         if not var_name:
             continue
         if var_name not in t2_tm_by_var:
             t2_tm_by_var[var_name] = {baseline_label: np.asarray([], dtype=np.float64), sr_label: np.asarray([], dtype=np.float64)}
+        if var_name not in t2_tm_rel_by_var:
+            t2_tm_rel_by_var[var_name] = {baseline_label: np.asarray([], dtype=np.float64), sr_label: np.asarray([], dtype=np.float64)}
         ref_v = float(row.get("ref_mean_over_frames", float("nan")))
         base_v = float(row.get("baseline_mean_over_frames", float("nan")))
         sr_v = float(row.get("sr_mean_over_frames", float("nan")))
+        re_base = float(row.get("re_baseline_eps_mean_over_frames", row.get("re_baseline_mean_over_frames", float("nan"))))
+        re_sr = float(row.get("re_sr_eps_mean_over_frames", row.get("re_sr_mean_over_frames", float("nan"))))
         b = _finite_values([abs(base_v - ref_v) if np.isfinite(base_v) and np.isfinite(ref_v) else float("nan")])
         s = _finite_values([abs(sr_v - ref_v) if np.isfinite(sr_v) and np.isfinite(ref_v) else float("nan")])
+        rb = _finite_values([100.0 * re_base if np.isfinite(re_base) else float("nan")])
+        rs = _finite_values([100.0 * re_sr if np.isfinite(re_sr) else float("nan")])
         if b.size > 0:
             t2_tm_by_var[var_name][baseline_label] = np.concatenate([t2_tm_by_var[var_name][baseline_label], b], axis=0)
         if s.size > 0:
             t2_tm_by_var[var_name][sr_label] = np.concatenate([t2_tm_by_var[var_name][sr_label], s], axis=0)
+        if rb.size > 0:
+            t2_tm_rel_by_var[var_name][baseline_label] = np.concatenate([t2_tm_rel_by_var[var_name][baseline_label], rb], axis=0)
+        if rs.size > 0:
+            t2_tm_rel_by_var[var_name][sr_label] = np.concatenate([t2_tm_rel_by_var[var_name][sr_label], rs], axis=0)
 
     if t2_tm_by_var:
         tm_var_order = sorted(
@@ -2107,7 +2484,7 @@ def _save_publication_figures(
             color=method_colors[baseline_label],
             edgecolor=REPORT_COLOR_NEUTRAL,
             linewidth=0.8,
-            alpha=0.90,
+            alpha=REPORT_FILL_ALPHA,
             label=f"{baseline_label} mean absolute error (temporal-mean)",
         )
         bars_sr = ax.barh(
@@ -2117,7 +2494,7 @@ def _save_publication_figures(
             color=method_colors[sr_label],
             edgecolor=REPORT_COLOR_NEUTRAL,
             linewidth=0.8,
-            alpha=0.90,
+            alpha=REPORT_FILL_ALPHA,
             label=f"{sr_label} mean absolute error (temporal-mean)",
         )
         for k, v in enumerate(vals_base):
@@ -2142,15 +2519,9 @@ def _save_publication_figures(
 
         # Violin over slices of temporal-mean absolute error split by moment family.
         if sns is not None:
-            velocity_pref = ["Mean velocity [m/s]", "SD velocity [m/s]", "Skewness velocity", "Kurtosis velocity"]
-            vorticity_pref = ["Mean vorticity [1/s]", "SD vorticity [1/s]", "Skewness vorticity", "Kurtosis vorticity"]
             tm_family_specs: List[Tuple[str, str, List[str]]] = [
                 ("velocity", "Velocity", [v for v in velocity_pref if v in tm_var_order]),
                 ("vorticity", "Vorticity", [v for v in vorticity_pref if v in tm_var_order]),
-            ]
-            moment_specs: List[Tuple[str, str, List[str]]] = [
-                ("scale", "Mean & SD", ["Mean", "SD"]),
-                ("shape", "Skewness & Kurtosis", ["Skewness", "Kurtosis"]),
             ]
             for family_tag, family_title, family_vars in tm_family_specs:
                 if not family_vars:
@@ -2180,33 +2551,29 @@ def _save_publication_figures(
                     order_disp_tm = [display_names[v] for v in var_order]
                     fig_w_vi = max(6.8, 1.35 * float(len(order_disp_tm)) + 1.8)
                     fig, ax = plt.subplots(1, 1, figsize=(fig_w_vi, 5.6))
-                    sns.violinplot(
-                        x=x_vals_tm,
-                        y=y_vals_tm,
-                        hue=h_vals_tm,
-                        order=order_disp_tm,
-                        cut=0,
-                        inner="quartile",
-                        linewidth=1.0,
-                        palette=method_colors,
-                        ax=ax,
-                        dodge=True,
-                    )
-                    ax.set_title(f"Temporal-Mean Absolute Error Distribution ({family_title}: {moment_title})")
+                    _box_points_plot(ax, x_vals_tm, y_vals_tm, h_vals_tm, order_disp_tm)
+                    ax.set_title(f"Temporal-Mean Absolute Error Boxplot ({family_title}: {moment_title})")
                     ax.set_xlabel("Variable")
                     ax.set_ylabel(
                         f"Absolute Error vs Reference (temporal-mean over frames, winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})"
                     )
                     ax.grid(axis="y", linestyle="--", alpha=0.35)
                     sns.despine(ax=ax)
-                    if ax.get_legend() is not None:
-                        ax.get_legend().remove()
+                    ax.legend(handles=[Patch(facecolor=method_colors[m], edgecolor="#111827", label=m) for m in [baseline_label, sr_label]], title="Method", frameon=False, loc="upper right")
                     ax.tick_params(axis="x", rotation=12)
                     fig.tight_layout()
                     name = f"prof_table2_temporal_mean_abs_error_violin_{family_tag}_{moment_tag}.png"
                     fig.savefig(fig_dir / name, dpi=REPORT_FIG_DPI)
                     plt.close(fig)
                     out[f"table2_temporal_mean_abs_error_violin_{family_tag}_{moment_tag}"] = name
+
+    # 2d) Additional Table-2 family figures requested for paper: absolute/relative, bars + violins.
+    _save_table2_family_bar(t2_all_by_var, temporal_mean=False, metric_kind="absolute")
+    _save_table2_family_bar(t2_all_rel_by_var, temporal_mean=False, metric_kind="relative")
+    _save_table2_family_violin(t2_all_rel_by_var, temporal_mean=False, metric_kind="relative")
+    _save_table2_family_bar(t2_tm_by_var, temporal_mean=True, metric_kind="absolute")
+    _save_table2_family_bar(t2_tm_rel_by_var, temporal_mean=True, metric_kind="relative")
+    _save_table2_family_violin(t2_tm_rel_by_var, temporal_mean=True, metric_kind="relative")
 
     # 3) Correlation and RMSE barplots.
     corr_filtered: List[Dict[str, Any]] = []
@@ -2252,7 +2619,7 @@ def _save_publication_figures(
                     edgecolor="#111827",
                     linewidth=0.8,
                     label=method_name,
-                    alpha=0.90,
+                    alpha=REPORT_FILL_ALPHA,
                 )
                 for k, v in enumerate(vals):
                     if not np.isfinite(v):
@@ -2288,7 +2655,7 @@ def _save_publication_figures(
                     edgecolor=REPORT_COLOR_NEUTRAL,
                     linewidth=0.8,
                     label=method_name,
-                    alpha=0.90,
+                    alpha=REPORT_FILL_ALPHA,
                 )
                 for k, v in enumerate(vals):
                     if not np.isfinite(v):
@@ -2338,7 +2705,7 @@ def _save_publication_figures(
                 edgecolor="#111827",
                 linewidth=0.8,
                 label=method_name,
-                alpha=0.90,
+                alpha=REPORT_FILL_ALPHA,
             )
             for k, v in enumerate(vals):
                 if not np.isfinite(v):
@@ -2383,7 +2750,7 @@ def _save_publication_figures(
                     color=method_colors[method_name],
                     edgecolor=REPORT_COLOR_NEUTRAL,
                     linewidth=0.8,
-                    alpha=0.90,
+                    alpha=REPORT_FILL_ALPHA,
                     label=method_name,
                 )
                 for k, v in enumerate(vals):
@@ -2426,7 +2793,7 @@ def _save_publication_figures(
                     color=method_colors[method_name],
                     edgecolor=REPORT_COLOR_NEUTRAL,
                     linewidth=0.8,
-                    alpha=0.90,
+                    alpha=REPORT_FILL_ALPHA,
                     label=method_name,
                 )
                 for k, v in enumerate(vals):
@@ -2508,7 +2875,7 @@ def _save_publication_figures(
                 color=analysis_palette[j % len(analysis_palette)],
                 edgecolor=REPORT_COLOR_NEUTRAL,
                 linewidth=0.8,
-                alpha=0.90,
+                alpha=REPORT_FILL_ALPHA,
                 label=analysis,
             )
             for k, v in enumerate(vals):
@@ -3390,7 +3757,52 @@ def main() -> None:
         min_voxels=int(args.mask_min_slice_voxels),
         frame_source_indices=frame_source_indices,
     )
+    ref_eps_map = _table2_ref_eps_map(table2_all, ref_key="ref", q=5.0)
+    _augment_table2_rows_with_robust_relative(
+        table2_all,
+        eps_map=ref_eps_map,
+        ref_key="ref",
+        baseline_key="baseline",
+        sr_key="sr",
+    )
+    _augment_table2_rows_with_robust_relative(
+        table2_per_frame,
+        eps_map=ref_eps_map,
+        ref_key="ref",
+        baseline_key="baseline",
+        sr_key="sr",
+    )
     table2_temporal_mean = _table2_temporal_mean_rows(table2_per_frame)
+    table2_relative_robust_summary = _table2_relative_robust_summary(
+        table2_all,
+        ref_key="ref",
+        baseline_key="baseline",
+        sr_key="sr",
+        re_base_key="re_baseline",
+        re_sr_key="re_sr",
+        re_base_eps_key="re_baseline_eps",
+        re_sr_eps_key="re_sr_eps",
+        smape_base_key="smape_baseline",
+        smape_sr_key="smape_sr",
+        ref_eps_key="ref_eps",
+        baseline_method_label=baseline_label,
+        sr_method_label=sr_label,
+    )
+    table2_temporal_mean_relative_robust_summary = _table2_relative_robust_summary(
+        table2_temporal_mean,
+        ref_key="ref_mean_over_frames",
+        baseline_key="baseline_mean_over_frames",
+        sr_key="sr_mean_over_frames",
+        re_base_key="re_baseline_mean_over_frames",
+        re_sr_key="re_sr_mean_over_frames",
+        re_base_eps_key="re_baseline_eps_mean_over_frames",
+        re_sr_eps_key="re_sr_eps_mean_over_frames",
+        smape_base_key="smape_baseline_mean_over_frames",
+        smape_sr_key="smape_sr_mean_over_frames",
+        ref_eps_key="ref_eps_mean_over_frames",
+        baseline_method_label=baseline_label,
+        sr_method_label=sr_label,
+    )
 
     p_re = _wilcoxon_p(re_base_all, re_sr_all)
 
@@ -3406,10 +3818,38 @@ def main() -> None:
             table2_compact.append(row2)
 
     # Save table2 CSVs
-    t2_cols = ["slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
+    t2_cols = [
+        "slice_index",
+        "variable",
+        "ref",
+        "baseline",
+        "sr",
+        "re_baseline",
+        "re_sr",
+        "re_baseline_eps",
+        "re_sr_eps",
+        "smape_baseline",
+        "smape_sr",
+        "ref_eps",
+    ]
     _write_csv(metrics_dir / "table2_like_all_slices.csv", table2_all, t2_cols)
 
-    t2pf_cols = ["frame_payload_index", "frame_source_index", "slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
+    t2pf_cols = [
+        "frame_payload_index",
+        "frame_source_index",
+        "slice_index",
+        "variable",
+        "ref",
+        "baseline",
+        "sr",
+        "re_baseline",
+        "re_sr",
+        "re_baseline_eps",
+        "re_sr_eps",
+        "smape_baseline",
+        "smape_sr",
+        "ref_eps",
+    ]
     _write_csv(metrics_dir / "table2_like_per_frame_all_slices.csv", table2_per_frame, t2pf_cols)
 
     t2tm_cols = [
@@ -3421,11 +3861,72 @@ def main() -> None:
         "sr_mean_over_frames",
         "re_baseline_mean_over_frames",
         "re_sr_mean_over_frames",
+        "re_baseline_eps_mean_over_frames",
+        "re_sr_eps_mean_over_frames",
+        "smape_baseline_mean_over_frames",
+        "smape_sr_mean_over_frames",
+        "ref_eps_mean_over_frames",
     ]
     _write_csv(metrics_dir / "table2_like_temporal_mean.csv", table2_temporal_mean, t2tm_cols)
 
-    t2c_cols = ["location", "slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
+    t2c_cols = [
+        "location",
+        "slice_index",
+        "variable",
+        "ref",
+        "baseline",
+        "sr",
+        "re_baseline",
+        "re_sr",
+        "re_baseline_eps",
+        "re_sr_eps",
+        "smape_baseline",
+        "smape_sr",
+        "ref_eps",
+    ]
     _write_csv(metrics_dir / "table2_like_compact.csv", table2_compact, t2c_cols)
+    _write_csv(
+        metrics_dir / "table2_relative_robust_summary.csv",
+        table2_relative_robust_summary,
+        [
+            "variable",
+            "method",
+            "n",
+            "ref_eps",
+            "mean_re_pct",
+            "median_re_pct",
+            "p95_re_pct",
+            "mean_re_eps_pct",
+            "median_re_eps_pct",
+            "p95_re_eps_pct",
+            "mean_smape_pct",
+            "median_smape_pct",
+            "p95_smape_pct",
+            "wape_pct",
+            "wape_eps_pct",
+        ],
+    )
+    _write_csv(
+        metrics_dir / "table2_temporal_mean_relative_robust_summary.csv",
+        table2_temporal_mean_relative_robust_summary,
+        [
+            "variable",
+            "method",
+            "n",
+            "ref_eps",
+            "mean_re_pct",
+            "median_re_pct",
+            "p95_re_pct",
+            "mean_re_eps_pct",
+            "median_re_eps_pct",
+            "p95_re_eps_pct",
+            "mean_smape_pct",
+            "median_smape_pct",
+            "p95_smape_pct",
+            "wape_pct",
+            "wape_eps_pct",
+        ],
+    )
 
     # 2) Flow-rate metrics (temporal profile)
     flow_method = str(args.flow_method).strip().lower()
@@ -4146,6 +4647,7 @@ def main() -> None:
     if sp_ref.size > 20:
         # Bland-Altman: baseline vs reference and SR vs reference
         fig_ba = fig_groups["bland_altman"] / "bland_altman_speed_dual.png"
+        ba_limits_speed = _bland_altman_joint_limits(sp_ref, [sp_base, sp_sr], pad_ratio=0.08)
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         ba_base = _plot_bland_altman_panel(
             ax=axes[0],
@@ -4163,7 +4665,13 @@ def main() -> None:
             test_label=sr_label,
             seed=29,
         )
-        _sync_axis_limits(list(np.ravel(axes)), axis="y", symmetric=True, pad_ratio=0.08)
+        if ba_limits_speed is not None:
+            (x_lo, x_hi), (y_lo, y_hi) = ba_limits_speed
+            for ax in np.ravel(axes):
+                ax.set_xlim(x_lo, x_hi)
+                ax.set_ylim(y_lo, y_hi)
+        else:
+            _sync_axis_limits(list(np.ravel(axes)), axis="y", symmetric=True, pad_ratio=0.08)
         fig.suptitle("Bland-Altman: intraluminal speed", fontsize=12)
         fig.tight_layout()
         fig.savefig(fig_ba, dpi=REPORT_FIG_DPI)
@@ -4184,6 +4692,10 @@ def main() -> None:
                 test_label=method_name,
                 seed=seed_val,
             )
+            if ba_limits_speed is not None:
+                (x_lo, x_hi), (y_lo, y_hi) = ba_limits_speed
+                ax_s.set_xlim(x_lo, x_hi)
+                ax_s.set_ylim(y_lo, y_hi)
             fig_s.tight_layout()
             fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
             plt.close(fig_s)
@@ -4194,6 +4706,7 @@ def main() -> None:
 
         # Correlation: baseline/ref and SR/ref
         fig_corr_speed = fig_groups["correlation"] / "correlation_speed_intraluminal.png"
+        corr_limits_speed = _correlation_joint_limits(sp_ref, [sp_base, sp_sr], pad_ratio=0.05)
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         c_base = _plot_correlation_panel(
             ax=axes[0],
@@ -4215,6 +4728,11 @@ def main() -> None:
             color=REPORT_COLOR_SR,
             seed=43,
         )
+        if corr_limits_speed is not None:
+            lo_c, hi_c = corr_limits_speed
+            for ax in np.ravel(axes):
+                ax.set_xlim(lo_c, hi_c)
+                ax.set_ylim(lo_c, hi_c)
         fig.suptitle("Correlation: intraluminal speed", fontsize=12)
         fig.tight_layout()
         fig.savefig(fig_corr_speed, dpi=REPORT_FIG_DPI)
@@ -4237,6 +4755,10 @@ def main() -> None:
                 color=color_val,
                 seed=seed_val,
             )
+            if corr_limits_speed is not None:
+                lo_c, hi_c = corr_limits_speed
+                ax_s.set_xlim(lo_c, hi_c)
+                ax_s.set_ylim(lo_c, hi_c)
             fig_s.tight_layout()
             fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
             plt.close(fig_s)
@@ -4248,6 +4770,7 @@ def main() -> None:
     # Temporal-flow correlation diagnostics
     if q_ref_time.size > 2:
         fig_corr_flow = fig_groups["correlation"] / "correlation_flow_temporal.png"
+        corr_limits_flow = _correlation_joint_limits(q_ref_time, [q_base_time, q_sr_time], pad_ratio=0.05)
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         cf_base = _plot_correlation_panel(
             ax=axes[0],
@@ -4269,6 +4792,11 @@ def main() -> None:
             color=REPORT_COLOR_SR,
             seed=59,
         )
+        if corr_limits_flow is not None:
+            lo_c, hi_c = corr_limits_flow
+            for ax in np.ravel(axes):
+                ax.set_xlim(lo_c, hi_c)
+                ax.set_ylim(lo_c, hi_c)
         fig.suptitle("Correlation: temporal flow profile", fontsize=12)
         fig.tight_layout()
         fig.savefig(fig_corr_flow, dpi=REPORT_FIG_DPI)
@@ -4291,6 +4819,10 @@ def main() -> None:
                 color=color_val,
                 seed=seed_val,
             )
+            if corr_limits_flow is not None:
+                lo_c, hi_c = corr_limits_flow
+                ax_s.set_xlim(lo_c, hi_c)
+                ax_s.set_ylim(lo_c, hi_c)
             fig_s.tight_layout()
             fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
             plt.close(fig_s)
@@ -4339,6 +4871,7 @@ def main() -> None:
         rr = peak_ref_comp[comp_name][peak_mask]
         bb = peak_base_comp[comp_name][peak_mask]
         ss = peak_sr_comp[comp_name][peak_mask]
+        corr_limits_comp = _correlation_joint_limits(rr, [bb, ss], pad_ratio=0.05)
         st_base = _plot_correlation_panel(
             ax=axes[0, c_idx],
             x=rr,
@@ -4359,6 +4892,12 @@ def main() -> None:
             color=REPORT_COLOR_SR,
             seed=111 + c_idx,
         )
+        if corr_limits_comp is not None:
+            lo_c, hi_c = corr_limits_comp
+            axes[0, c_idx].set_xlim(lo_c, hi_c)
+            axes[0, c_idx].set_ylim(lo_c, hi_c)
+            axes[1, c_idx].set_xlim(lo_c, hi_c)
+            axes[1, c_idx].set_ylim(lo_c, hi_c)
         # Standalone versions (no subplot)
         for method_name, yy, color_val, seed_val in (
             (baseline_label, bb, REPORT_COLOR_BASELINE, 101 + c_idx),
@@ -4378,6 +4917,10 @@ def main() -> None:
                 color=color_val,
                 seed=seed_val,
             )
+            if corr_limits_comp is not None:
+                lo_c, hi_c = corr_limits_comp
+                ax_s.set_xlim(lo_c, hi_c)
+                ax_s.set_ylim(lo_c, hi_c)
             fig_s.tight_layout()
             fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
             plt.close(fig_s)
@@ -4438,6 +4981,7 @@ def main() -> None:
             continue
 
         fig_comp_ba = fig_groups["bland_altman"] / f"bland_altman_velocity_component_{comp_name}_allframes.png"
+        ba_limits_comp = _bland_altman_joint_limits(rr, [bb, ss], pad_ratio=0.08)
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         ba_base = _plot_bland_altman_panel(
             ax=axes[0],
@@ -4455,7 +4999,13 @@ def main() -> None:
             test_label=sr_label,
             seed=211 + c_idx,
         )
-        _sync_axis_limits(list(np.ravel(axes)), axis="y", symmetric=True, pad_ratio=0.08)
+        if ba_limits_comp is not None:
+            (x_lo, x_hi), (y_lo, y_hi) = ba_limits_comp
+            for ax in np.ravel(axes):
+                ax.set_xlim(x_lo, x_hi)
+                ax.set_ylim(y_lo, y_hi)
+        else:
+            _sync_axis_limits(list(np.ravel(axes)), axis="y", symmetric=True, pad_ratio=0.08)
         fig.suptitle(
             f"Bland-Altman: {comp_title[comp_name]} (all frames, in-mask voxels)",
             fontsize=12,
@@ -4481,6 +5031,10 @@ def main() -> None:
                 test_label=method_name,
                 seed=seed_val,
             )
+            if ba_limits_comp is not None:
+                (x_lo, x_hi), (y_lo, y_hi) = ba_limits_comp
+                ax_s.set_xlim(x_lo, x_hi)
+                ax_s.set_ylim(y_lo, y_hi)
             fig_s.tight_layout()
             fig_s.savefig(fig_single, dpi=REPORT_FIG_DPI)
             plt.close(fig_s)
@@ -4856,6 +5410,8 @@ def main() -> None:
         "baseline_payload_path": str(baseline_payload_path),
         "baseline_source": str(baseline_source_tag),
         "metadata": metadata,
+        # Keep ROI at top-level for easier downstream tooling compatibility.
+        "roi": roi_info,
         "dimensions": {
             "T": int(t_count),
             "frame_source_indices": [int(x) for x in frame_source_indices.tolist()],
@@ -4932,7 +5488,20 @@ def main() -> None:
             out.append(rr)
         return out
 
-    t2_comp_cols = ["location", "slice_index", "variable", "ref", "baseline", "sr", "re_baseline", "re_sr"]
+    t2_comp_cols = [
+        "location",
+        "slice_index",
+        "variable",
+        "ref",
+        "baseline",
+        "sr",
+        "re_baseline",
+        "re_sr",
+        "re_baseline_eps",
+        "re_sr_eps",
+        "smape_baseline",
+        "smape_sr",
+    ]
     t2_comp_html = _html_table(fmt_rows(table2_compact, t2_comp_cols, nd=6), t2_comp_cols)
     t2_tm_cols = [
         "slice_index",
@@ -4943,6 +5512,10 @@ def main() -> None:
         "sr_mean_over_frames",
         "re_baseline_mean_over_frames",
         "re_sr_mean_over_frames",
+        "re_baseline_eps_mean_over_frames",
+        "re_sr_eps_mean_over_frames",
+        "smape_baseline_mean_over_frames",
+        "smape_sr_mean_over_frames",
     ]
     t2_tm_html = _html_table(fmt_rows(table2_temporal_mean, t2_tm_cols, nd=6), t2_tm_cols) if table2_temporal_mean else "<p class=\"muted\">No temporal-mean Table-2 rows.</p>"
 
@@ -5184,15 +5757,31 @@ def main() -> None:
         ("velocity_relative_error_pct_peak", "Velocity Relative Error (%) Peak"),
         ("velocity_relative_error_pct_temporal_mean", "Velocity Relative Error (%) Temporal Mean"),
         ("slice_relative_errors", "Slice-wise Absolute Errors"),
-        ("table2_abs_error_violin_velocity_scale", "Absolute Error Violin (Velocity: Mean & SD)"),
-        ("table2_abs_error_violin_velocity_shape", "Absolute Error Violin (Velocity: Skewness & Kurtosis)"),
-        ("table2_abs_error_violin_vorticity_scale", "Absolute Error Violin (Vorticity: Mean & SD)"),
-        ("table2_abs_error_violin_vorticity_shape", "Absolute Error Violin (Vorticity: Skewness & Kurtosis)"),
+        ("table2_abs_error_bar_velocity", "Absolute Error Bar (Velocity)"),
+        ("table2_abs_error_bar_vorticity", "Absolute Error Bar (Vorticity)"),
+        ("table2_relative_error_pct_bar_velocity", "Relative Error Bar [%] (Velocity)"),
+        ("table2_relative_error_pct_bar_vorticity", "Relative Error Bar [%] (Vorticity)"),
+        ("table2_abs_error_violin_velocity_scale", "Absolute Error Boxplot+Points (Velocity: Mean & SD)"),
+        ("table2_abs_error_violin_velocity_shape", "Absolute Error Boxplot+Points (Velocity: Skewness & Kurtosis)"),
+        ("table2_abs_error_violin_vorticity_scale", "Absolute Error Boxplot+Points (Vorticity: Mean & SD)"),
+        ("table2_abs_error_violin_vorticity_shape", "Absolute Error Boxplot+Points (Vorticity: Skewness & Kurtosis)"),
+        ("table2_relative_error_pct_violin_velocity_scale", "Relative Error Boxplot+Points [%] (Velocity: Mean & SD)"),
+        ("table2_relative_error_pct_violin_velocity_shape", "Relative Error Boxplot+Points [%] (Velocity: Skewness & Kurtosis)"),
+        ("table2_relative_error_pct_violin_vorticity_scale", "Relative Error Boxplot+Points [%] (Vorticity: Mean & SD)"),
+        ("table2_relative_error_pct_violin_vorticity_shape", "Relative Error Boxplot+Points [%] (Vorticity: Skewness & Kurtosis)"),
         ("table2_temporal_mean_relative_error_bar", "Temporal-Mean Absolute Error (Bar)"),
-        ("table2_temporal_mean_abs_error_violin_velocity_scale", "Temporal-Mean Absolute Error Violin (Velocity: Mean & SD)"),
-        ("table2_temporal_mean_abs_error_violin_velocity_shape", "Temporal-Mean Absolute Error Violin (Velocity: Skewness & Kurtosis)"),
-        ("table2_temporal_mean_abs_error_violin_vorticity_scale", "Temporal-Mean Absolute Error Violin (Vorticity: Mean & SD)"),
-        ("table2_temporal_mean_abs_error_violin_vorticity_shape", "Temporal-Mean Absolute Error Violin (Vorticity: Skewness & Kurtosis)"),
+        ("table2_temporal_mean_abs_error_bar_velocity", "Temporal-Mean Absolute Error Bar (Velocity)"),
+        ("table2_temporal_mean_abs_error_bar_vorticity", "Temporal-Mean Absolute Error Bar (Vorticity)"),
+        ("table2_temporal_mean_relative_error_pct_bar_velocity", "Temporal-Mean Relative Error Bar [%] (Velocity)"),
+        ("table2_temporal_mean_relative_error_pct_bar_vorticity", "Temporal-Mean Relative Error Bar [%] (Vorticity)"),
+        ("table2_temporal_mean_abs_error_violin_velocity_scale", "Temporal-Mean Absolute Error Boxplot+Points (Velocity: Mean & SD)"),
+        ("table2_temporal_mean_abs_error_violin_velocity_shape", "Temporal-Mean Absolute Error Boxplot+Points (Velocity: Skewness & Kurtosis)"),
+        ("table2_temporal_mean_abs_error_violin_vorticity_scale", "Temporal-Mean Absolute Error Boxplot+Points (Vorticity: Mean & SD)"),
+        ("table2_temporal_mean_abs_error_violin_vorticity_shape", "Temporal-Mean Absolute Error Boxplot+Points (Vorticity: Skewness & Kurtosis)"),
+        ("table2_temporal_mean_relative_error_pct_violin_velocity_scale", "Temporal-Mean Relative Error Boxplot+Points [%] (Velocity: Mean & SD)"),
+        ("table2_temporal_mean_relative_error_pct_violin_velocity_shape", "Temporal-Mean Relative Error Boxplot+Points [%] (Velocity: Skewness & Kurtosis)"),
+        ("table2_temporal_mean_relative_error_pct_violin_vorticity_scale", "Temporal-Mean Relative Error Boxplot+Points [%] (Vorticity: Mean & SD)"),
+        ("table2_temporal_mean_relative_error_pct_violin_vorticity_shape", "Temporal-Mean Relative Error Boxplot+Points [%] (Vorticity: Skewness & Kurtosis)"),
         ("flow_abs_error_over_time", "Temporal Flow Absolute Error"),
         ("correlation_pearson_r", "Correlation (Pearson r)"),
         ("correlation_rmse_only", "Correlation (RMSE)"),
@@ -5207,15 +5796,31 @@ def main() -> None:
         "velocity_relative_error_pct_peak": "Error relativo porcentual por región en frame pico.",
         "velocity_relative_error_pct_temporal_mean": "Error relativo porcentual por región en promedio temporal.",
         "slice_relative_errors": "Distribución de error absoluto entre slices para variables seleccionadas.",
-        "table2_abs_error_violin_velocity_scale": "Violin de error absoluto para variables de velocidad (Mean/SD), con cola superior robusta al P95.",
-        "table2_abs_error_violin_velocity_shape": "Violin de error absoluto para variables de velocidad (Skewness/Kurtosis), con cola superior robusta al P95.",
-        "table2_abs_error_violin_vorticity_scale": "Violin de error absoluto para variables de vorticidad (Mean/SD), con cola superior robusta al P95.",
-        "table2_abs_error_violin_vorticity_shape": "Violin de error absoluto para variables de vorticidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_abs_error_bar_velocity": "Barras del error absoluto medio por variable de velocidad.",
+        "table2_abs_error_bar_vorticity": "Barras del error absoluto medio por variable de vorticidad.",
+        "table2_relative_error_pct_bar_velocity": "Barras del error relativo medio (%) por variable de velocidad.",
+        "table2_relative_error_pct_bar_vorticity": "Barras del error relativo medio (%) por variable de vorticidad.",
+        "table2_abs_error_violin_velocity_scale": "Boxplot de error absoluto con puntos semitransparentes para velocidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_abs_error_violin_velocity_shape": "Boxplot de error absoluto con puntos semitransparentes para velocidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_abs_error_violin_vorticity_scale": "Boxplot de error absoluto con puntos semitransparentes para vorticidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_abs_error_violin_vorticity_shape": "Boxplot de error absoluto con puntos semitransparentes para vorticidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_relative_error_pct_violin_velocity_scale": "Boxplot de error relativo (%) con puntos semitransparentes para velocidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_relative_error_pct_violin_velocity_shape": "Boxplot de error relativo (%) con puntos semitransparentes para velocidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_relative_error_pct_violin_vorticity_scale": "Boxplot de error relativo (%) con puntos semitransparentes para vorticidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_relative_error_pct_violin_vorticity_shape": "Boxplot de error relativo (%) con puntos semitransparentes para vorticidad (Skewness/Kurtosis), con cola superior robusta al P95.",
         "table2_temporal_mean_relative_error_bar": "Promedio temporal del error absoluto por variable.",
-        "table2_temporal_mean_abs_error_violin_velocity_scale": "Violin temporal-mean de error absoluto para velocidad (Mean/SD), con cola superior robusta al P95.",
-        "table2_temporal_mean_abs_error_violin_velocity_shape": "Violin temporal-mean de error absoluto para velocidad (Skewness/Kurtosis), con cola superior robusta al P95.",
-        "table2_temporal_mean_abs_error_violin_vorticity_scale": "Violin temporal-mean de error absoluto para vorticidad (Mean/SD), con cola superior robusta al P95.",
-        "table2_temporal_mean_abs_error_violin_vorticity_shape": "Violin temporal-mean de error absoluto para vorticidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_temporal_mean_abs_error_bar_velocity": "Barras temporal-mean del error absoluto medio por variable de velocidad.",
+        "table2_temporal_mean_abs_error_bar_vorticity": "Barras temporal-mean del error absoluto medio por variable de vorticidad.",
+        "table2_temporal_mean_relative_error_pct_bar_velocity": "Barras temporal-mean del error relativo medio (%) por variable de velocidad.",
+        "table2_temporal_mean_relative_error_pct_bar_vorticity": "Barras temporal-mean del error relativo medio (%) por variable de vorticidad.",
+        "table2_temporal_mean_abs_error_violin_velocity_scale": "Boxplot temporal-mean de error absoluto con puntos para velocidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_temporal_mean_abs_error_violin_velocity_shape": "Boxplot temporal-mean de error absoluto con puntos para velocidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_temporal_mean_abs_error_violin_vorticity_scale": "Boxplot temporal-mean de error absoluto con puntos para vorticidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_temporal_mean_abs_error_violin_vorticity_shape": "Boxplot temporal-mean de error absoluto con puntos para vorticidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_temporal_mean_relative_error_pct_violin_velocity_scale": "Boxplot temporal-mean del error relativo (%) con puntos para velocidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_temporal_mean_relative_error_pct_violin_velocity_shape": "Boxplot temporal-mean del error relativo (%) con puntos para velocidad (Skewness/Kurtosis), con cola superior robusta al P95.",
+        "table2_temporal_mean_relative_error_pct_violin_vorticity_scale": "Boxplot temporal-mean del error relativo (%) con puntos para vorticidad (Mean/SD), con cola superior robusta al P95.",
+        "table2_temporal_mean_relative_error_pct_violin_vorticity_shape": "Boxplot temporal-mean del error relativo (%) con puntos para vorticidad (Skewness/Kurtosis), con cola superior robusta al P95.",
         "flow_abs_error_over_time": "Error absoluto temporal del flujo por frame.",
         "correlation_pearson_r": "Comparación de Pearson r entre métricas y métodos.",
         "correlation_rmse_only": "Comparación de RMSE entre métricas y métodos.",
@@ -5515,6 +6120,8 @@ def main() -> None:
     <li><code>{metrics_rel_prefix}/table2_like_per_frame_all_slices.csv</code></li>
     <li><code>{metrics_rel_prefix}/table2_like_temporal_mean.csv</code></li>
     <li><code>{metrics_rel_prefix}/table2_like_compact.csv</code></li>
+    <li><code>{metrics_rel_prefix}/table2_relative_robust_summary.csv</code></li>
+    <li><code>{metrics_rel_prefix}/table2_temporal_mean_relative_robust_summary.csv</code></li>
     <li><code>{metrics_rel_prefix}/flow_metrics.csv</code></li>
     <li><code>{metrics_rel_prefix}/flow_metrics_per_frame.csv</code></li>
     <li><code>{metrics_rel_prefix}/flow_rate_curves_per_frame.csv</code></li>

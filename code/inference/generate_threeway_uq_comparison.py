@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -18,6 +19,8 @@ REPORT_DPI = 320
 FONT_FAMILY = "Times New Roman"
 FONT_SERIF = ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"]
 VIOLIN_UPPER_PERCENTILE = 95.0
+BAR_FILL_ALPHA = 0.74
+BOX_FILL_ALPHA = 0.48
 
 
 def _setup_style() -> None:
@@ -38,9 +41,13 @@ def _setup_style() -> None:
             "font.family": FONT_FAMILY,
             "font.serif": FONT_SERIF,
             "mathtext.fontset": "stix",
-            "font.size": 10,
-            "axes.titlesize": 11,
-            "axes.labelsize": 10,
+            "font.size": 11.5,
+            "axes.titlesize": 13,
+            "axes.labelsize": 12,
+            "xtick.labelsize": 11,
+            "ytick.labelsize": 11,
+            "legend.fontsize": 11,
+            "legend.title_fontsize": 11,
             "grid.color": "#d1d5db",
             "grid.linewidth": 0.7,
             "grid.alpha": 0.35,
@@ -113,6 +120,14 @@ def _percentile(x: Sequence[float] | np.ndarray, p: float) -> float:
     return float(np.percentile(arr, p)) if arr.size else float("nan")
 
 
+def _relative_error(val: float, ref: float) -> float:
+    v = float(val)
+    r = abs(float(ref))
+    if not np.isfinite(v) or not np.isfinite(r) or r < 1e-12:
+        return float("nan")
+    return abs(v - float(ref)) / r
+
+
 def _winsorize_upper(x: Sequence[float] | np.ndarray, p: float) -> np.ndarray:
     arr = _finite(x)
     if arr.size == 0:
@@ -121,6 +136,67 @@ def _winsorize_upper(x: Sequence[float] | np.ndarray, p: float) -> np.ndarray:
     if not np.isfinite(hi):
         return arr
     return np.minimum(arr, hi)
+
+
+def _robust_limits(
+    arrays: Sequence[np.ndarray],
+    symmetric: bool = False,
+    lower_q: float = 0.2,
+    upper_q: float = 99.8,
+    pad_ratio: float = 0.08,
+) -> Tuple[float, float]:
+    vals = np.concatenate([_finite(a) for a in arrays if _finite(a).size > 0], axis=0) if arrays else np.asarray([], dtype=np.float64)
+    if vals.size == 0:
+        lo, hi = (-1.0, 1.0) if symmetric else (0.0, 1.0)
+    else:
+        if symmetric:
+            lo_raw = _percentile(vals, lower_q)
+            hi_raw = _percentile(vals, upper_q)
+            lim = max(abs(lo_raw), abs(hi_raw))
+            if not np.isfinite(lim) or lim <= 1e-8:
+                lim = max(float(np.nanmax(np.abs(vals))), 1e-3)
+            lo, hi = -lim, lim
+        else:
+            lo = _percentile(vals, lower_q)
+            hi = _percentile(vals, upper_q)
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo <= 1e-8:
+                lo = float(np.nanmin(vals))
+                hi = float(np.nanmax(vals))
+                if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo <= 1e-8:
+                    pad = max(1e-3, 0.05 * max(abs(lo), abs(hi), 1.0))
+                    lo -= pad
+                    hi += pad
+    pad = max(1e-6, (hi - lo) * float(pad_ratio))
+    return float(lo - pad), float(hi + pad)
+
+
+def _bland_altman_joint_limits(
+    ref_vals: np.ndarray,
+    test_vals_list: Sequence[np.ndarray],
+    pad_ratio: float = 0.08,
+) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    ref0 = np.asarray(ref_vals, dtype=np.float64).ravel()
+    means: List[np.ndarray] = []
+    diffs: List[np.ndarray] = []
+    for t in test_vals_list:
+        t0 = np.asarray(t, dtype=np.float64).ravel()
+        n = min(ref0.size, t0.size)
+        if n < 3:
+            continue
+        rr = ref0[:n]
+        tt = t0[:n]
+        m = np.isfinite(rr) & np.isfinite(tt)
+        rr = rr[m]
+        tt = tt[m]
+        if rr.size < 3:
+            continue
+        means.append(0.5 * (tt + rr))
+        diffs.append(tt - rr)
+    if not means or not diffs:
+        return None
+    xlim = _robust_limits(means, symmetric=False, lower_q=0.2, upper_q=99.8, pad_ratio=pad_ratio)
+    ylim = _robust_limits(diffs, symmetric=True, lower_q=0.2, upper_q=99.8, pad_ratio=pad_ratio)
+    return xlim, ylim
 
 
 def _legend_handles(methods: List[str], method_colors: Dict[str, str]) -> List[Patch]:
@@ -165,11 +241,15 @@ def _detect_metrics_dir(report_dir: Path, preferred_mode: str) -> Path:
     raise FileNotFoundError(f"Could not resolve metrics dir under {metrics_root} (preferred={preferred_mode}).")
 
 
-def _payload_path_from_metrics(metrics_dir: Path) -> Path:
+def _load_summary_metrics(metrics_dir: Path) -> Tuple[Path, Dict[str, Any]]:
     summary_path = metrics_dir / "summary_metrics.json"
     if not summary_path.exists():
         raise FileNotFoundError(f"Missing summary_metrics.json in {metrics_dir}")
     data = json.loads(summary_path.read_text(encoding="utf-8"))
+    return summary_path, data
+
+
+def _payload_path_from_summary(summary_path: Path, data: Dict[str, Any]) -> Path:
     p = str(data.get("payload_path", "")).strip()
     if not p:
         raise ValueError(f"summary_metrics.json has no payload_path in {summary_path}")
@@ -177,6 +257,95 @@ def _payload_path_from_metrics(metrics_dir: Path) -> Path:
     if not payload_path.exists():
         raise FileNotFoundError(f"payload_path from summary does not exist: {payload_path}")
     return payload_path
+
+
+def _clip_bbox_xyz(bbox_xyz: Sequence[int], shape_xyz: Tuple[int, int, int]) -> Optional[Tuple[int, int, int, int, int, int]]:
+    if len(bbox_xyz) != 6:
+        return None
+    sx, sy, sz = [int(v) for v in shape_xyz]
+    x0, x1, y0, y1, z0, z1 = [int(v) for v in bbox_xyz]
+    x0 = max(0, min(sx, x0))
+    x1 = max(0, min(sx, x1))
+    y0 = max(0, min(sy, y0))
+    y1 = max(0, min(sy, y1))
+    z0 = max(0, min(sz, z0))
+    z1 = max(0, min(sz, z1))
+    if x1 <= x0 or y1 <= y0 or z1 <= z0:
+        return None
+    return int(x0), int(x1), int(y0), int(y1), int(z0), int(z1)
+
+
+def _extract_roi_bbox_from_summary(data: Dict[str, Any]) -> Optional[Tuple[int, int, int, int, int, int]]:
+    candidates: List[Any] = []
+    candidates.append(data.get("roi"))
+    stats = data.get("statistics", {})
+    if isinstance(stats, dict):
+        candidates.append(stats.get("roi"))
+    for key in ("bbox_xyz", "bbox_hr_xyz", "roi_bbox_xyz", "roi_bbox_hr_xyz"):
+        if key in data:
+            candidates.append(data.get(key))
+        if isinstance(stats, dict) and key in stats:
+            candidates.append(stats.get(key))
+    for cand in candidates:
+        if isinstance(cand, dict):
+            enabled = cand.get("enabled", True)
+            if enabled is False:
+                continue
+            for key in ("bbox_xyz", "bbox_hr_xyz", "roi_bbox_xyz", "roi_bbox_hr_xyz"):
+                val = cand.get(key)
+                if isinstance(val, (list, tuple)) and len(val) == 6:
+                    try:
+                        return tuple(int(v) for v in val)  # type: ignore[return-value]
+                    except Exception:
+                        continue
+        elif isinstance(cand, (list, tuple)) and len(cand) == 6:
+            try:
+                return tuple(int(v) for v in cand)  # type: ignore[return-value]
+            except Exception:
+                continue
+    return None
+
+
+def _extract_roi_bbox_from_report_html(metrics_dir: Path) -> Optional[Tuple[int, int, int, int, int, int]]:
+    report_dir = metrics_dir.parent.parent
+    candidates = [report_dir / "report.html"] + sorted(report_dir.glob("report_*.html"))
+    pat = re.compile(r"bbox xyz:\s*\[([^\]]+)\]", flags=re.IGNORECASE)
+    for p in candidates:
+        if not p.exists():
+            continue
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+        m = pat.search(txt)
+        if m is None:
+            continue
+        raw = m.group(1)
+        try:
+            vals = [int(v.strip()) for v in raw.split(",")]
+            if len(vals) == 6:
+                return tuple(vals)  # type: ignore[return-value]
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_roi_bbox_from_metrics(metrics_dir: Path, summary_data: Dict[str, Any]) -> Optional[Tuple[int, int, int, int, int, int]]:
+    bbox = _extract_roi_bbox_from_summary(summary_data)
+    if bbox is not None:
+        return bbox
+    return _extract_roi_bbox_from_report_html(metrics_dir)
+
+
+def _roi_mask_xyz(shape_xyz: Tuple[int, int, int], bbox_xyz: Optional[Tuple[int, int, int, int, int, int]]) -> np.ndarray:
+    sx, sy, sz = [int(v) for v in shape_xyz]
+    roi = np.ones((sx, sy, sz), dtype=bool)
+    if bbox_xyz is None:
+        return roi
+    clipped = _clip_bbox_xyz(bbox_xyz, shape_xyz)
+    if clipped is None:
+        return np.zeros((sx, sy, sz), dtype=bool)
+    x0, x1, y0, y1, z0, z1 = clipped
+    roi[:] = False
+    roi[x0:x1, y0:y1, z0:z1] = True
+    return roi
 
 
 def _common_frame_indices(a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -217,10 +386,14 @@ def _build_threeway_raw_bundle(
     denoised_label: str,
     superres_label: str,
 ) -> Dict[str, Any]:
-    dns_payload_path = _payload_path_from_metrics(dns_metrics_dir)
-    sr_payload_path = _payload_path_from_metrics(sr_metrics_dir)
+    dns_summary_path, dns_summary = _load_summary_metrics(dns_metrics_dir)
+    sr_summary_path, sr_summary = _load_summary_metrics(sr_metrics_dir)
+    dns_payload_path = _payload_path_from_summary(dns_summary_path, dns_summary)
+    sr_payload_path = _payload_path_from_summary(sr_summary_path, sr_summary)
     dns = _load_payload_npz(dns_payload_path)
     sr = _load_payload_npz(sr_payload_path)
+    dns_roi_bbox_raw = _resolve_roi_bbox_from_metrics(dns_metrics_dir, dns_summary)
+    sr_roi_bbox_raw = _resolve_roi_bbox_from_metrics(sr_metrics_dir, sr_summary)
 
     dns_gt = np.asarray(dns["gt_norm"], dtype=np.float32)
     dns_lr = np.asarray(dns["lr_norm"], dtype=np.float32)
@@ -269,11 +442,21 @@ def _build_threeway_raw_bundle(
     dns_mask = _crop_to_xyz(dns_mask, xyz)
     sr_mask = _crop_to_xyz(sr_mask, xyz)
 
+    roi_dns = _roi_mask_xyz(xyz, dns_roi_bbox_raw)
+    roi_sr = _roi_mask_xyz(xyz, sr_roi_bbox_raw)
+    roi_joint = roi_dns & roi_sr
+    dns_roi_bbox_clip = _clip_bbox_xyz(dns_roi_bbox_raw, xyz) if dns_roi_bbox_raw is not None else None
+    sr_roi_bbox_clip = _clip_bbox_xyz(sr_roi_bbox_raw, xyz) if sr_roi_bbox_raw is not None else None
+
     mask = (dns_mask > 0.5) & (sr_mask > 0.5)
+    mask &= roi_joint[None, ...]
     if int(mask.sum()) == 0:
         mask = (dns_mask > 0.5) | (sr_mask > 0.5)
+        mask &= roi_joint[None, ...]
     if int(mask.sum()) == 0:
-        raise ValueError("Unified mask is empty when building 3-way raw bundle.")
+        raise ValueError(
+            f"Unified mask is empty when building 3-way raw bundle (dns_bbox={dns_roi_bbox_raw}, sr_bbox={sr_roi_bbox_raw}, xyz={xyz})."
+        )
 
     def _to_4ch(uvw: np.ndarray) -> np.ndarray:
         mag = np.sqrt(np.maximum(0.0, np.sum(uvw.astype(np.float64) ** 2, axis=1))).astype(np.float32)
@@ -299,6 +482,13 @@ def _build_threeway_raw_bundle(
         "payload_paths": {
             "dns": str(dns_payload_path),
             "sr": str(sr_payload_path),
+        },
+        "roi_bbox": {
+            "dns_raw": None if dns_roi_bbox_raw is None else [int(v) for v in dns_roi_bbox_raw],
+            "sr_raw": None if sr_roi_bbox_raw is None else [int(v) for v in sr_roi_bbox_raw],
+            "dns_clipped_xyz": None if dns_roi_bbox_clip is None else [int(v) for v in dns_roi_bbox_clip],
+            "sr_clipped_xyz": None if sr_roi_bbox_clip is None else [int(v) for v in sr_roi_bbox_clip],
+            "common_xyz": [int(v) for v in xyz],
         },
     }
 
@@ -601,6 +791,9 @@ def _merge_table2_like(
         ae_base = abs(base_use - ref_use) if np.isfinite(base_use) and np.isfinite(ref_use) else float("nan")
         ae_den = abs(den - ref_use) if np.isfinite(den) and np.isfinite(ref_use) else float("nan")
         ae_sr = abs(sr - ref_use) if np.isfinite(sr) and np.isfinite(ref_use) else float("nan")
+        re_base = 100.0 * _relative_error(base_use, ref_use) if np.isfinite(base_use) and np.isfinite(ref_use) else float("nan")
+        re_den = 100.0 * _relative_error(den, ref_use) if np.isfinite(den) and np.isfinite(ref_use) else float("nan")
+        re_sr = 100.0 * _relative_error(sr, ref_use) if np.isfinite(sr) and np.isfinite(ref_use) else float("nan")
         merged_all.append(
             {
                 "slice_index": k[0],
@@ -612,6 +805,9 @@ def _merge_table2_like(
                 f"abs_error_{baseline_label.lower().replace(' ', '_')}": ae_base,
                 f"abs_error_{denoised_label.lower().replace(' ', '_')}": ae_den,
                 f"abs_error_{superres_label.lower().replace(' ', '_')}": ae_sr,
+                f"rel_error_pct_{baseline_label.lower().replace(' ', '_')}": re_base,
+                f"rel_error_pct_{denoised_label.lower().replace(' ', '_')}": re_den,
+                f"rel_error_pct_{superres_label.lower().replace(' ', '_')}": re_sr,
             }
         )
 
@@ -637,6 +833,9 @@ def _merge_table2_like(
         ae_base = abs(base_use - ref_use) if np.isfinite(base_use) and np.isfinite(ref_use) else float("nan")
         ae_den = abs(den - ref_use) if np.isfinite(den) and np.isfinite(ref_use) else float("nan")
         ae_sr = abs(sr - ref_use) if np.isfinite(sr) and np.isfinite(ref_use) else float("nan")
+        re_base = 100.0 * _relative_error(base_use, ref_use) if np.isfinite(base_use) and np.isfinite(ref_use) else float("nan")
+        re_den = 100.0 * _relative_error(den, ref_use) if np.isfinite(den) and np.isfinite(ref_use) else float("nan")
+        re_sr = 100.0 * _relative_error(sr, ref_use) if np.isfinite(sr) and np.isfinite(ref_use) else float("nan")
         merged_tm.append(
             {
                 "slice_index": k[0],
@@ -649,8 +848,31 @@ def _merge_table2_like(
                 f"abs_error_{baseline_label.lower().replace(' ', '_')}_mean_over_frames": ae_base,
                 f"abs_error_{denoised_label.lower().replace(' ', '_')}_mean_over_frames": ae_den,
                 f"abs_error_{superres_label.lower().replace(' ', '_')}_mean_over_frames": ae_sr,
+                f"rel_error_pct_{baseline_label.lower().replace(' ', '_')}_mean_over_frames": re_base,
+                f"rel_error_pct_{denoised_label.lower().replace(' ', '_')}_mean_over_frames": re_den,
+                f"rel_error_pct_{superres_label.lower().replace(' ', '_')}_mean_over_frames": re_sr,
             }
         )
+
+    methods = [baseline_label, denoised_label, superres_label]
+    eps_map_all = _table2_ref_eps_map(merged_all, ref_key="ref", q=5.0)
+    _augment_table2_rows_with_robust_relative(
+        rows=merged_all,
+        methods=methods,
+        eps_map=eps_map_all,
+        ref_key="ref",
+        value_suffix="",
+        metric_suffix="",
+    )
+    eps_map_tm = eps_map_all if eps_map_all else _table2_ref_eps_map(merged_tm, ref_key="ref_mean_over_frames", q=5.0)
+    _augment_table2_rows_with_robust_relative(
+        rows=merged_tm,
+        methods=methods,
+        eps_map=eps_map_tm,
+        ref_key="ref_mean_over_frames",
+        value_suffix="_mean_over_frames",
+        metric_suffix="_mean_over_frames",
+    )
 
     qc = {
         "n_intersection_rows_table2_all_slices": len(all_keys),
@@ -659,6 +881,7 @@ def _merge_table2_like(
         "baseline_abs_delta_temporal_mean_mean": _mean(baseline_delta_tm),
         "reference_abs_delta_all_slices_mean": _mean(ref_delta_all),
         "reference_abs_delta_temporal_mean_mean": _mean(ref_delta_tm),
+        "table2_ref_eps_by_variable": eps_map_all,
     }
     return merged_all, merged_tm, qc
 
@@ -696,6 +919,144 @@ def _table2_abs_error_summary(
     return out
 
 
+def _smape_ratio(val: float, ref: float, eps: float = 1e-12) -> float:
+    denom = abs(float(val)) + abs(float(ref)) + max(float(eps), 1e-12)
+    return 2.0 * abs(float(val) - float(ref)) / denom
+
+
+def _table2_ref_eps_map(rows: List[Dict[str, Any]], ref_key: str, q: float = 5.0) -> Dict[str, float]:
+    by_var: Dict[str, List[float]] = {}
+    for r in rows:
+        var = str(r.get("variable", "")).strip()
+        ref = _to_float(r.get(ref_key))
+        if not var or not np.isfinite(ref):
+            continue
+        by_var.setdefault(var, []).append(abs(ref))
+    out: Dict[str, float] = {}
+    for var, vals in by_var.items():
+        arr = _finite(vals)
+        arr = arr[arr > 0]
+        if arr.size == 0:
+            out[var] = 1e-6
+            continue
+        eps = _percentile(arr, q)
+        if not np.isfinite(eps) or eps <= 0:
+            med = _median(arr)
+            eps = 0.1 * med if np.isfinite(med) and med > 0 else 1e-6
+        out[var] = max(float(eps), 1e-6)
+    return out
+
+
+def _augment_table2_rows_with_robust_relative(
+    rows: List[Dict[str, Any]],
+    methods: List[str],
+    eps_map: Dict[str, float],
+    ref_key: str,
+    value_suffix: str,
+    metric_suffix: str,
+) -> None:
+    for r in rows:
+        var = str(r.get("variable", "")).strip()
+        ref = _to_float(r.get(ref_key))
+        eps = float(eps_map.get(var, 1e-6))
+        r[f"ref_eps{metric_suffix}"] = float(eps)
+        for m in methods:
+            mk = m.lower().replace(" ", "_")
+            v = _to_float(r.get(f"value_{mk}{value_suffix}"))
+            if np.isfinite(v) and np.isfinite(ref):
+                r[f"rel_error_eps_pct_{mk}{metric_suffix}"] = 100.0 * abs(float(v) - float(ref)) / max(abs(float(ref)), max(float(eps), 1e-12))
+                r[f"smape_pct_{mk}{metric_suffix}"] = 100.0 * _smape_ratio(v, ref, eps=eps)
+            else:
+                r[f"rel_error_eps_pct_{mk}{metric_suffix}"] = float("nan")
+                r[f"smape_pct_{mk}{metric_suffix}"] = float("nan")
+
+
+def _table2_relative_error_pct_summary(
+    merged_rows: List[Dict[str, Any]],
+    methods: List[str],
+    mean_suffix: str = "",
+    value_suffix: str = "",
+    ref_key: str = "ref",
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    by_var: Dict[str, Dict[str, List[float]]] = {}
+    by_var_eps: Dict[str, Dict[str, List[float]]] = {}
+    by_var_smape: Dict[str, Dict[str, List[float]]] = {}
+    by_var_abs_err: Dict[str, Dict[str, List[float]]] = {}
+    by_var_ref_abs: Dict[str, List[float]] = {}
+    by_var_ref_eps: Dict[str, List[float]] = {}
+    for r in merged_rows:
+        var = str(r.get("variable", "")).strip()
+        if not var:
+            continue
+        by_var.setdefault(var, {m: [] for m in methods})
+        by_var_eps.setdefault(var, {m: [] for m in methods})
+        by_var_smape.setdefault(var, {m: [] for m in methods})
+        by_var_abs_err.setdefault(var, {m: [] for m in methods})
+        by_var_ref_abs.setdefault(var, [])
+        by_var_ref_eps.setdefault(var, [])
+        ref_v = _to_float(r.get(ref_key))
+        if np.isfinite(ref_v):
+            by_var_ref_abs[var].append(abs(ref_v))
+        ref_eps_v = _to_float(r.get(f"ref_eps{mean_suffix}"))
+        if np.isfinite(ref_eps_v):
+            by_var_ref_eps[var].append(ref_eps_v)
+        for m in methods:
+            mk = m.lower().replace(" ", "_")
+            key_raw = f"rel_error_pct_{mk}{mean_suffix}"
+            key_eps = f"rel_error_eps_pct_{mk}{mean_suffix}"
+            key_smape = f"smape_pct_{mk}{mean_suffix}"
+            pred_key = f"value_{mk}{value_suffix}"
+            v = _to_float(r.get(key_raw))
+            if np.isfinite(v):
+                by_var[var][m].append(v)
+            ve = _to_float(r.get(key_eps))
+            if np.isfinite(ve):
+                by_var_eps[var][m].append(ve)
+            vs = _to_float(r.get(key_smape))
+            if np.isfinite(vs):
+                by_var_smape[var][m].append(vs)
+            pred_v = _to_float(r.get(pred_key))
+            if np.isfinite(pred_v) and np.isfinite(ref_v):
+                by_var_abs_err[var][m].append(abs(pred_v - ref_v))
+    for var in sorted(by_var.keys()):
+        ref_abs = np.asarray(by_var_ref_abs[var], dtype=np.float64)
+        ref_eps_arr = np.asarray(by_var_ref_eps[var], dtype=np.float64)
+        ref_eps = _median(ref_eps_arr)
+        for m in methods:
+            vals = by_var[var][m]
+            vals_eps = by_var_eps[var][m]
+            vals_smape = by_var_smape[var][m]
+            abs_err = np.asarray(by_var_abs_err[var][m], dtype=np.float64)
+            denom_raw = float(np.sum(ref_abs)) if ref_abs.size else float("nan")
+            wape = float(np.sum(abs_err) / denom_raw * 100.0) if np.isfinite(denom_raw) and denom_raw > 1e-12 else float("nan")
+            if ref_abs.size and np.isfinite(ref_eps):
+                denom_eps = float(np.sum(np.maximum(ref_abs, max(ref_eps, 1e-12))))
+                wape_eps = float(np.sum(abs_err) / denom_eps * 100.0) if denom_eps > 1e-12 else float("nan")
+            else:
+                wape_eps = float("nan")
+            out.append(
+                {
+                    "variable": var,
+                    "method": m,
+                    "n": int(len(vals)),
+                    "ref_eps": float(ref_eps) if np.isfinite(ref_eps) else float("nan"),
+                    "mean_relative_error_pct": _mean(vals),
+                    "median_relative_error_pct": _median(vals),
+                    "p95_relative_error_pct": _percentile(vals, 95.0),
+                    "mean_relative_error_eps_pct": _mean(vals_eps),
+                    "median_relative_error_eps_pct": _median(vals_eps),
+                    "p95_relative_error_eps_pct": _percentile(vals_eps, 95.0),
+                    "mean_smape_pct": _mean(vals_smape),
+                    "median_smape_pct": _median(vals_smape),
+                    "p95_smape_pct": _percentile(vals_smape, 95.0),
+                    "wape_pct": wape,
+                    "wape_eps_pct": wape_eps,
+                }
+            )
+    return out
+
+
 def _save_bar_velocity_errors(
     rows: List[Dict[str, Any]],
     out_path: Path,
@@ -726,7 +1087,7 @@ def _save_bar_velocity_errors(
                 color=method_colors[m],
                 edgecolor="#111827",
                 linewidth=0.8,
-                alpha=0.9,
+                alpha=BAR_FILL_ALPHA,
             )
         ax.set_xticks(x)
         ax.set_xticklabels([r.capitalize() for r in region_order])
@@ -772,7 +1133,7 @@ def _save_velocity_metric_single(
             color=method_colors[m],
             edgecolor="#111827",
             linewidth=0.8,
-            alpha=0.9,
+            alpha=BAR_FILL_ALPHA,
             label=m,
         )
     ax.set_xticks(x)
@@ -811,7 +1172,7 @@ def _save_flow_bar(
             color=[method_colors[m] for m in methods],
             edgecolor="#111827",
             linewidth=0.8,
-            alpha=0.9,
+            alpha=BAR_FILL_ALPHA,
         )
         ax.set_xticks(x)
         ax.set_xticklabels(methods, rotation=14)
@@ -868,6 +1229,7 @@ def _save_table2_violin_family(
     family_title: str,
     prefixes: List[str],
     temporal_mean: bool,
+    metric_kind: str = "absolute",
 ) -> None:
     if sns is None:
         return
@@ -886,8 +1248,13 @@ def _save_table2_violin_family(
     h_vals: List[str] = []
     for v in var_order:
         for m in methods:
-            key = f"abs_error_{m.lower().replace(' ', '_')}{suffix}"
-            vals = [_to_float(r.get(key)) for r in rows if str(r.get("variable", "")) == v]
+            if metric_kind == "relative":
+                key_eps = f"rel_error_eps_pct_{m.lower().replace(' ', '_')}{suffix}"
+                key_raw = f"rel_error_pct_{m.lower().replace(' ', '_')}{suffix}"
+                vals = [_to_float(r.get(key_eps, r.get(key_raw))) for r in rows if str(r.get("variable", "")) == v]
+            else:
+                key = f"abs_error_{m.lower().replace(' ', '_')}{suffix}"
+                vals = [_to_float(r.get(key)) for r in rows if str(r.get("variable", "")) == v]
             vals = _winsorize_upper(vals, VIOLIN_UPPER_PERCENTILE)
             if vals.size == 0:
                 continue
@@ -899,22 +1266,54 @@ def _save_table2_violin_family(
 
     fig_w = max(7.0, 1.35 * len(var_order) + 2.0)
     fig, ax = plt.subplots(1, 1, figsize=(fig_w, 5.6))
-    sns.violinplot(
-        x=x_vals,
-        y=y_vals,
-        hue=h_vals,
+    xx = np.asarray(x_vals, dtype=object)
+    yy = np.asarray(y_vals, dtype=np.float64)
+    hh = np.asarray(h_vals, dtype=object)
+    if yy.size > 36000:
+        rng = np.random.default_rng(321)
+        keep = rng.choice(yy.size, size=36000, replace=False)
+        xx_plot = xx[keep]
+        yy_plot = yy[keep]
+        hh_plot = hh[keep]
+    else:
+        xx_plot = xx
+        yy_plot = yy
+        hh_plot = hh
+    sns.boxplot(
+        x=xx,
+        y=yy,
+        hue=hh,
         order=[disp[v] for v in var_order],
-        cut=0,
-        inner="quartile",
         linewidth=1.0,
+        fliersize=0.0,
         palette=method_colors,
+        saturation=0.62,
         ax=ax,
         dodge=True,
     )
+    for patch in ax.patches:
+        patch.set_alpha(BOX_FILL_ALPHA)
+    sns.stripplot(
+        x=xx_plot,
+        y=yy_plot,
+        hue=hh_plot,
+        order=[disp[v] for v in var_order],
+        palette=method_colors,
+        ax=ax,
+        dodge=True,
+        jitter=0.18,
+        size=2.3,
+        alpha=0.26,
+        linewidth=0,
+    )
     tprefix = "Temporal-Mean " if temporal_mean else ""
-    ax.set_title(f"{tprefix}Absolute Error Distribution ({family_title})", pad=14)
+    metric_title = "Relative Error Boxplot [%] (eps-stabilized)" if metric_kind == "relative" else "Absolute Error Boxplot"
+    ax.set_title(f"{tprefix}{metric_title} ({family_title})", pad=14)
     ax.set_xlabel("Variable")
-    ax.set_ylabel(f"Absolute Error vs 7T (winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})")
+    if metric_kind == "relative":
+        ax.set_ylabel(f"Relative Error [%] vs 7T (eps-stabilized, winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})")
+    else:
+        ax.set_ylabel(f"Absolute Error vs 7T (winsorized at P{int(VIOLIN_UPPER_PERCENTILE)})")
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     sns.despine(ax=ax)
     leg = ax.get_legend()
@@ -931,6 +1330,64 @@ def _save_table2_violin_family(
     )
     ax.tick_params(axis="x", rotation=12)
     _save_figure(fig, out_path, top=0.90)
+
+
+def _save_table2_bar_by_variable_family(
+    rows: List[Dict[str, Any]],
+    out_path: Path,
+    methods: List[str],
+    method_colors: Dict[str, str],
+    family: str,
+    temporal_mean: bool,
+    metric_kind: str = "absolute",
+) -> None:
+    velocity_pref = ["Mean velocity [m/s]", "SD velocity [m/s]", "Skewness velocity", "Kurtosis velocity"]
+    vorticity_pref = ["Mean vorticity [1/s]", "SD vorticity [1/s]", "Skewness vorticity", "Kurtosis vorticity"]
+    pref = velocity_pref if family.lower() == "velocity" else vorticity_pref
+    vars_present = sorted(set(str(r.get("variable", "")) for r in rows))
+    var_order = [v for v in pref if v in vars_present]
+    if not var_order:
+        return
+    suffix = "_mean_over_frames" if temporal_mean else ""
+    x = np.arange(len(var_order), dtype=np.float64)
+    width = 0.24
+    fig, ax = plt.subplots(1, 1, figsize=(max(8.8, 1.0 * len(var_order) + 3.2), 5.6))
+    for i, m in enumerate(methods):
+        vals = []
+        if metric_kind == "relative":
+            key_eps = f"rel_error_eps_pct_{m.lower().replace(' ', '_')}{suffix}"
+            key_raw = f"rel_error_pct_{m.lower().replace(' ', '_')}{suffix}"
+        else:
+            key = f"abs_error_{m.lower().replace(' ', '_')}{suffix}"
+        for v in var_order:
+            if metric_kind == "relative":
+                vv = [_to_float(r.get(key_eps, r.get(key_raw))) for r in rows if str(r.get("variable", "")) == v]
+            else:
+                vv = [_to_float(r.get(key)) for r in rows if str(r.get("variable", "")) == v]
+            vals.append(_mean(vv))
+        ax.bar(
+            x + (i - 1) * width,
+            [0.0 if not np.isfinite(v) else v for v in vals],
+            width=width,
+            label=m,
+            color=method_colors[m],
+            edgecolor="#111827",
+            linewidth=0.8,
+            alpha=BAR_FILL_ALPHA,
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels([v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order], rotation=16, ha="right")
+    if metric_kind == "relative":
+        ax.set_ylabel("Mean Relative Error [%] vs 7T")
+        ax.set_title(f"{'Temporal-Mean ' if temporal_mean else ''}Relative Error by {family.title()} (eps-stabilized, Three-way)")
+    else:
+        ax.set_ylabel("Mean Absolute Error vs 7T")
+        ax.set_title(f"{'Temporal-Mean ' if temporal_mean else ''}Absolute Error by {family.title()} (Three-way)")
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    if sns is not None:
+        sns.despine(ax=ax)
+    ax.legend(handles=_legend_handles(methods, method_colors), labels=methods, frameon=False, loc="upper right", title="Method")
+    _save_figure(fig, out_path)
 
 
 def _save_temporal_mean_bar_by_variable(
@@ -957,7 +1414,7 @@ def _save_temporal_mean_bar_by_variable(
             color=method_colors[m],
             edgecolor="#111827",
             linewidth=0.8,
-            alpha=0.9,
+            alpha=BAR_FILL_ALPHA,
         )
     ax.set_xticks(x)
     ax.set_xticklabels([v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order], rotation=18, ha="right")
@@ -997,7 +1454,7 @@ def _save_temporal_mean_bar_by_variable_family(
             color=method_colors[m],
             edgecolor="#111827",
             linewidth=0.8,
-            alpha=0.9,
+            alpha=BAR_FILL_ALPHA,
         )
     ax.set_xticks(x)
     ax.set_xticklabels([v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order], rotation=16, ha="right")
@@ -1046,7 +1503,7 @@ def _save_relative_error_bars(
             color=method_colors[m],
             edgecolor="#111827",
             linewidth=0.8,
-            alpha=0.9,
+            alpha=BAR_FILL_ALPHA,
             label=m,
         )
     ax.set_xticks(x)
@@ -1099,7 +1556,7 @@ def _save_slice_abs_error_boxplot(
             )
             for box in bp["boxes"]:
                 box.set_facecolor(method_colors[m])
-                box.set_alpha(0.55)
+                box.set_alpha(BOX_FILL_ALPHA)
     ax.set_xticks(x)
     ax.set_xticklabels([v.replace(" [m/s]", "").replace(" [1/s]", "") for v in var_order], rotation=12)
     ax.set_xlabel("Hemodynamic Parameter")
@@ -1182,7 +1639,7 @@ def _save_correlation_metric_bar(
             color=method_colors[m],
             edgecolor="#111827",
             linewidth=0.8,
-            alpha=0.9,
+            alpha=BAR_FILL_ALPHA,
             label=m,
         )
     ax.set_xticks(x)
@@ -1228,7 +1685,7 @@ def _save_voxel_std_bars(
             color=colors[m],
             edgecolor="#111827",
             linewidth=0.8,
-            alpha=0.9,
+            alpha=BAR_FILL_ALPHA,
             label=m,
         )
     ax.set_xticks(x)
@@ -1408,13 +1865,20 @@ def _save_bland_altman_full(
         return np.asarray(arr4[:, cidx], dtype=np.float32)[mask]
 
     # Intraluminal speed (mag) full + singles.
+    ref_speed = _vals(ref_arr, comp_idx["mag"])
+    tests_speed = {m: _vals(phys_4ch[m], comp_idx["mag"]) for m in methods}
+    limits_speed = _bland_altman_joint_limits(ref_speed, [tests_speed[m] for m in methods], pad_ratio=0.08)
     fig, axes = plt.subplots(1, len(methods), figsize=(5.2 * len(methods), 4.8), sharey=True)
     if len(methods) == 1:
         axes = [axes]
     for i, m in enumerate(methods):
-        test = _vals(phys_4ch[m], comp_idx["mag"])
-        ref = _vals(ref_arr, comp_idx["mag"])
+        test = tests_speed[m]
+        ref = ref_speed
         st = _plot_ba_panel(axes[i], ref, test, reference_label, m, method_colors[m], seed=111 + i)
+        if limits_speed is not None:
+            (x_lo, x_hi), (y_lo, y_hi) = limits_speed
+            axes[i].set_xlim(x_lo, x_hi)
+            axes[i].set_ylim(y_lo, y_hi)
         rows.append(
             {
                 "domain": "speed_intraluminal",
@@ -1428,6 +1892,10 @@ def _save_bland_altman_full(
         )
         fig_s, ax_s = plt.subplots(1, 1, figsize=(5.2, 4.8))
         _plot_ba_panel(ax_s, ref, test, reference_label, m, method_colors[m], seed=211 + i)
+        if limits_speed is not None:
+            (x_lo, x_hi), (y_lo, y_hi) = limits_speed
+            ax_s.set_xlim(x_lo, x_hi)
+            ax_s.set_ylim(y_lo, y_hi)
         s_name = f"three_way_bland_altman_speed_intraluminal_{_method_key(m)}.png"
         _save_figure(fig_s, out_dir / s_name)
         saved_names.append(s_name)
@@ -1438,13 +1906,20 @@ def _save_bland_altman_full(
 
     # Velocity components all-frames.
     for ci_name, ci in comp_idx.items():
+        ref_comp = _vals(ref_arr, ci)
+        tests_comp = {m: _vals(phys_4ch[m], ci) for m in methods}
+        limits_comp = _bland_altman_joint_limits(ref_comp, [tests_comp[m] for m in methods], pad_ratio=0.08)
         fig_c, axes_c = plt.subplots(1, len(methods), figsize=(5.2 * len(methods), 4.8), sharey=True)
         if len(methods) == 1:
             axes_c = [axes_c]
         for i, m in enumerate(methods):
-            test = _vals(phys_4ch[m], ci)
-            ref = _vals(ref_arr, ci)
+            test = tests_comp[m]
+            ref = ref_comp
             st = _plot_ba_panel(axes_c[i], ref, test, reference_label, m, method_colors[m], seed=301 + 17 * ci + i)
+            if limits_comp is not None:
+                (x_lo, x_hi), (y_lo, y_hi) = limits_comp
+                axes_c[i].set_xlim(x_lo, x_hi)
+                axes_c[i].set_ylim(y_lo, y_hi)
             rows.append(
                 {
                     "domain": "velocity_component_all_frames",
@@ -1458,6 +1933,10 @@ def _save_bland_altman_full(
             )
             fig_s, ax_s = plt.subplots(1, 1, figsize=(5.2, 4.8))
             _plot_ba_panel(ax_s, ref, test, reference_label, m, method_colors[m], seed=401 + 19 * ci + i)
+            if limits_comp is not None:
+                (x_lo, x_hi), (y_lo, y_hi) = limits_comp
+                ax_s.set_xlim(x_lo, x_hi)
+                ax_s.set_ylim(y_lo, y_hi)
             s_name = f"three_way_bland_altman_velocity_component_{ci_name}_{_method_key(m)}.png"
             _save_figure(fig_s, out_dir / s_name)
             saved_names.append(s_name)
@@ -1490,8 +1969,8 @@ def _save_significance_plot(
     width = 0.36
     fig_w = max(12.0, 0.7 * len(labels) + 4.0)
     fig, ax = plt.subplots(1, 1, figsize=(fig_w, 5.2))
-    ax.bar(x - 0.5 * width, vals_den, width=width, color="#0072B2", edgecolor="#111827", linewidth=0.8, alpha=0.9, label=denoised_label)
-    ax.bar(x + 0.5 * width, vals_sr, width=width, color="#009E73", edgecolor="#111827", linewidth=0.8, alpha=0.9, label=superres_label)
+    ax.bar(x - 0.5 * width, vals_den, width=width, color="#0072B2", edgecolor="#111827", linewidth=0.8, alpha=BAR_FILL_ALPHA, label=denoised_label)
+    ax.bar(x + 0.5 * width, vals_sr, width=width, color="#009E73", edgecolor="#111827", linewidth=0.8, alpha=BAR_FILL_ALPHA, label=superres_label)
     ax.axhline(-np.log10(0.05), color="#111827", linestyle="--", linewidth=1.0)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=24, ha="right")
@@ -1528,7 +2007,7 @@ def _save_flow_peak_bars(
             color=[method_colors[m] for m in methods],
             edgecolor="#111827",
             linewidth=0.8,
-            alpha=0.9,
+            alpha=BAR_FILL_ALPHA,
         )
         ax.set_xticks(x)
         ax.set_xticklabels(methods, rotation=12)
@@ -1588,7 +2067,7 @@ def _save_bland_altman_summary(
                 color=method_colors[m],
                 edgecolor="#111827",
                 linewidth=0.8,
-                alpha=0.9,
+                alpha=BAR_FILL_ALPHA,
                 label=m,
             )
         ax.set_xticks(x)
@@ -1643,7 +2122,7 @@ def _write_html_report(
   <p>
     <span class="pill">DPI: {REPORT_DPI}</span>
     <span class="pill">Font: Times New Roman</span>
-    <span class="pill">Violin cap: P{int(VIOLIN_UPPER_PERCENTILE)}</span>
+    <span class="pill">Upper-tail cap: P{int(VIOLIN_UPPER_PERCENTILE)}</span>
   </p>
   <p>{color_items}</p>
 
@@ -1792,6 +2271,10 @@ def main() -> None:
         denoised_label=denoised_label,
         superres_label=superres_label,
     )
+    if raw_bundle is not None:
+        table2_qc["raw_bundle_roi_bbox"] = raw_bundle.get("roi_bbox", {})
+    elif raw_bundle_error:
+        table2_qc["raw_bundle_warning"] = raw_bundle_error
 
     _write_csv(
         metrics_dir / "mean_velocity_metrics_three_way.csv",
@@ -1967,6 +2450,16 @@ def main() -> None:
         f"abs_error_{baseline_label.lower().replace(' ', '_')}",
         f"abs_error_{denoised_label.lower().replace(' ', '_')}",
         f"abs_error_{superres_label.lower().replace(' ', '_')}",
+        f"rel_error_pct_{baseline_label.lower().replace(' ', '_')}",
+        f"rel_error_pct_{denoised_label.lower().replace(' ', '_')}",
+        f"rel_error_pct_{superres_label.lower().replace(' ', '_')}",
+        f"rel_error_eps_pct_{baseline_label.lower().replace(' ', '_')}",
+        f"rel_error_eps_pct_{denoised_label.lower().replace(' ', '_')}",
+        f"rel_error_eps_pct_{superres_label.lower().replace(' ', '_')}",
+        f"smape_pct_{baseline_label.lower().replace(' ', '_')}",
+        f"smape_pct_{denoised_label.lower().replace(' ', '_')}",
+        f"smape_pct_{superres_label.lower().replace(' ', '_')}",
+        "ref_eps",
     ]
     tm_cols = list(table2_tm[0].keys()) if table2_tm else [
         "slice_index",
@@ -1979,12 +2472,36 @@ def main() -> None:
         f"abs_error_{baseline_label.lower().replace(' ', '_')}_mean_over_frames",
         f"abs_error_{denoised_label.lower().replace(' ', '_')}_mean_over_frames",
         f"abs_error_{superres_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"rel_error_pct_{baseline_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"rel_error_pct_{denoised_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"rel_error_pct_{superres_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"rel_error_eps_pct_{baseline_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"rel_error_eps_pct_{denoised_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"rel_error_eps_pct_{superres_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"smape_pct_{baseline_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"smape_pct_{denoised_label.lower().replace(' ', '_')}_mean_over_frames",
+        f"smape_pct_{superres_label.lower().replace(' ', '_')}_mean_over_frames",
+        "ref_eps_mean_over_frames",
     ]
     _write_csv(metrics_dir / "table2_like_all_slices_three_way.csv", table2_all, all_cols)
     _write_csv(metrics_dir / "table2_like_temporal_mean_three_way.csv", table2_tm, tm_cols)
 
     summary_all = _table2_abs_error_summary(table2_all, methods=methods, mean_suffix="")
     summary_tm = _table2_abs_error_summary(table2_tm, methods=methods, mean_suffix="_mean_over_frames")
+    summary_rel_all = _table2_relative_error_pct_summary(
+        table2_all,
+        methods=methods,
+        mean_suffix="",
+        value_suffix="",
+        ref_key="ref",
+    )
+    summary_rel_tm = _table2_relative_error_pct_summary(
+        table2_tm,
+        methods=methods,
+        mean_suffix="_mean_over_frames",
+        value_suffix="_mean_over_frames",
+        ref_key="ref_mean_over_frames",
+    )
     _write_csv(
         metrics_dir / "table2_abs_error_summary_three_way.csv",
         summary_all,
@@ -1994,6 +2511,48 @@ def main() -> None:
         metrics_dir / "table2_temporal_mean_abs_error_summary_three_way.csv",
         summary_tm,
         ["variable", "method", "n", "mean_abs_error", "median_abs_error", "p95_abs_error"],
+    )
+    _write_csv(
+        metrics_dir / "table2_relative_error_pct_summary_three_way.csv",
+        summary_rel_all,
+        [
+            "variable",
+            "method",
+            "n",
+            "ref_eps",
+            "mean_relative_error_pct",
+            "median_relative_error_pct",
+            "p95_relative_error_pct",
+            "mean_relative_error_eps_pct",
+            "median_relative_error_eps_pct",
+            "p95_relative_error_eps_pct",
+            "mean_smape_pct",
+            "median_smape_pct",
+            "p95_smape_pct",
+            "wape_pct",
+            "wape_eps_pct",
+        ],
+    )
+    _write_csv(
+        metrics_dir / "table2_temporal_mean_relative_error_pct_summary_three_way.csv",
+        summary_rel_tm,
+        [
+            "variable",
+            "method",
+            "n",
+            "ref_eps",
+            "mean_relative_error_pct",
+            "median_relative_error_pct",
+            "p95_relative_error_pct",
+            "mean_relative_error_eps_pct",
+            "median_relative_error_eps_pct",
+            "p95_relative_error_eps_pct",
+            "mean_smape_pct",
+            "median_smape_pct",
+            "p95_smape_pct",
+            "wape_pct",
+            "wape_eps_pct",
+        ],
     )
 
     (metrics_dir / "merge_qc_three_way.json").write_text(json.dumps(table2_qc, indent=2), encoding="utf-8")
@@ -2148,6 +2707,60 @@ def main() -> None:
         method_colors=method_colors,
         family="vorticity",
     )
+    _save_table2_bar_by_variable_family(
+        table2_all,
+        figs_dir / "three_way_abs_error_bar_velocity.png",
+        methods=methods,
+        method_colors=method_colors,
+        family="velocity",
+        temporal_mean=False,
+        metric_kind="absolute",
+    )
+    _save_table2_bar_by_variable_family(
+        table2_all,
+        figs_dir / "three_way_abs_error_bar_vorticity.png",
+        methods=methods,
+        method_colors=method_colors,
+        family="vorticity",
+        temporal_mean=False,
+        metric_kind="absolute",
+    )
+    _save_table2_bar_by_variable_family(
+        table2_all,
+        figs_dir / "three_way_relative_error_pct_bar_velocity.png",
+        methods=methods,
+        method_colors=method_colors,
+        family="velocity",
+        temporal_mean=False,
+        metric_kind="relative",
+    )
+    _save_table2_bar_by_variable_family(
+        table2_all,
+        figs_dir / "three_way_relative_error_pct_bar_vorticity.png",
+        methods=methods,
+        method_colors=method_colors,
+        family="vorticity",
+        temporal_mean=False,
+        metric_kind="relative",
+    )
+    _save_table2_bar_by_variable_family(
+        table2_tm,
+        figs_dir / "three_way_temporal_mean_relative_error_pct_by_velocity.png",
+        methods=methods,
+        method_colors=method_colors,
+        family="velocity",
+        temporal_mean=True,
+        metric_kind="relative",
+    )
+    _save_table2_bar_by_variable_family(
+        table2_tm,
+        figs_dir / "three_way_temporal_mean_relative_error_pct_by_vorticity.png",
+        methods=methods,
+        method_colors=method_colors,
+        family="vorticity",
+        temporal_mean=True,
+        metric_kind="relative",
+    )
 
     _save_table2_violin_family(
         table2_all,
@@ -2229,6 +2842,94 @@ def main() -> None:
         prefixes=["Skewness", "Kurtosis"],
         temporal_mean=True,
     )
+    _save_table2_violin_family(
+        table2_all,
+        figs_dir / "three_way_relative_error_pct_violin_velocity_scale.png",
+        methods=methods,
+        method_colors=method_colors,
+        family_tag="velocity",
+        family_title="Velocity: Mean & SD",
+        prefixes=["Mean", "SD"],
+        temporal_mean=False,
+        metric_kind="relative",
+    )
+    _save_table2_violin_family(
+        table2_all,
+        figs_dir / "three_way_relative_error_pct_violin_velocity_shape.png",
+        methods=methods,
+        method_colors=method_colors,
+        family_tag="velocity",
+        family_title="Velocity: Skewness & Kurtosis",
+        prefixes=["Skewness", "Kurtosis"],
+        temporal_mean=False,
+        metric_kind="relative",
+    )
+    _save_table2_violin_family(
+        table2_all,
+        figs_dir / "three_way_relative_error_pct_violin_vorticity_scale.png",
+        methods=methods,
+        method_colors=method_colors,
+        family_tag="vorticity",
+        family_title="Vorticity: Mean & SD",
+        prefixes=["Mean", "SD"],
+        temporal_mean=False,
+        metric_kind="relative",
+    )
+    _save_table2_violin_family(
+        table2_all,
+        figs_dir / "three_way_relative_error_pct_violin_vorticity_shape.png",
+        methods=methods,
+        method_colors=method_colors,
+        family_tag="vorticity",
+        family_title="Vorticity: Skewness & Kurtosis",
+        prefixes=["Skewness", "Kurtosis"],
+        temporal_mean=False,
+        metric_kind="relative",
+    )
+    _save_table2_violin_family(
+        table2_tm,
+        figs_dir / "three_way_temporal_mean_relative_error_pct_violin_velocity_scale.png",
+        methods=methods,
+        method_colors=method_colors,
+        family_tag="velocity",
+        family_title="Temporal-Mean Velocity: Mean & SD",
+        prefixes=["Mean", "SD"],
+        temporal_mean=True,
+        metric_kind="relative",
+    )
+    _save_table2_violin_family(
+        table2_tm,
+        figs_dir / "three_way_temporal_mean_relative_error_pct_violin_velocity_shape.png",
+        methods=methods,
+        method_colors=method_colors,
+        family_tag="velocity",
+        family_title="Temporal-Mean Velocity: Skewness & Kurtosis",
+        prefixes=["Skewness", "Kurtosis"],
+        temporal_mean=True,
+        metric_kind="relative",
+    )
+    _save_table2_violin_family(
+        table2_tm,
+        figs_dir / "three_way_temporal_mean_relative_error_pct_violin_vorticity_scale.png",
+        methods=methods,
+        method_colors=method_colors,
+        family_tag="vorticity",
+        family_title="Temporal-Mean Vorticity: Mean & SD",
+        prefixes=["Mean", "SD"],
+        temporal_mean=True,
+        metric_kind="relative",
+    )
+    _save_table2_violin_family(
+        table2_tm,
+        figs_dir / "three_way_temporal_mean_relative_error_pct_violin_vorticity_shape.png",
+        methods=methods,
+        method_colors=method_colors,
+        family_tag="vorticity",
+        family_title="Temporal-Mean Vorticity: Skewness & Kurtosis",
+        prefixes=["Skewness", "Kurtosis"],
+        temporal_mean=True,
+        metric_kind="relative",
+    )
 
     figure_entries = [
         ("Mean Velocity Error (MAE/RMSE)", "figures/three_way/three_way_mean_velocity_mae_rmse.png"),
@@ -2252,14 +2953,28 @@ def main() -> None:
         ("Temporal-Mean Absolute Error by Variable", "figures/three_way/three_way_temporal_mean_abs_error_by_variable.png"),
         ("Temporal-Mean Absolute Error by Velocity", "figures/three_way/three_way_temporal_mean_abs_error_by_velocity.png"),
         ("Temporal-Mean Absolute Error by Vorticity", "figures/three_way/three_way_temporal_mean_abs_error_by_vorticity.png"),
-        ("Absolute Error Violin (Velocity Mean/SD)", "figures/three_way/three_way_abs_error_violin_velocity_scale.png"),
-        ("Absolute Error Violin (Velocity Skewness/Kurtosis)", "figures/three_way/three_way_abs_error_violin_velocity_shape.png"),
-        ("Absolute Error Violin (Vorticity Mean/SD)", "figures/three_way/three_way_abs_error_violin_vorticity_scale.png"),
-        ("Absolute Error Violin (Vorticity Skewness/Kurtosis)", "figures/three_way/three_way_abs_error_violin_vorticity_shape.png"),
-        ("Temporal-Mean Violin (Velocity Mean/SD)", "figures/three_way/three_way_temporal_mean_abs_error_violin_velocity_scale.png"),
-        ("Temporal-Mean Violin (Velocity Skewness/Kurtosis)", "figures/three_way/three_way_temporal_mean_abs_error_violin_velocity_shape.png"),
-        ("Temporal-Mean Violin (Vorticity Mean/SD)", "figures/three_way/three_way_temporal_mean_abs_error_violin_vorticity_scale.png"),
-        ("Temporal-Mean Violin (Vorticity Skewness/Kurtosis)", "figures/three_way/three_way_temporal_mean_abs_error_violin_vorticity_shape.png"),
+        ("Absolute Error Bar (Velocity)", "figures/three_way/three_way_abs_error_bar_velocity.png"),
+        ("Absolute Error Bar (Vorticity)", "figures/three_way/three_way_abs_error_bar_vorticity.png"),
+        ("Relative Error Bar [%] (Velocity)", "figures/three_way/three_way_relative_error_pct_bar_velocity.png"),
+        ("Relative Error Bar [%] (Vorticity)", "figures/three_way/three_way_relative_error_pct_bar_vorticity.png"),
+        ("Temporal-Mean Relative Error [%] by Velocity", "figures/three_way/three_way_temporal_mean_relative_error_pct_by_velocity.png"),
+        ("Temporal-Mean Relative Error [%] by Vorticity", "figures/three_way/three_way_temporal_mean_relative_error_pct_by_vorticity.png"),
+        ("Absolute Error Boxplot+Points (Velocity Mean/SD)", "figures/three_way/three_way_abs_error_violin_velocity_scale.png"),
+        ("Absolute Error Boxplot+Points (Velocity Skewness/Kurtosis)", "figures/three_way/three_way_abs_error_violin_velocity_shape.png"),
+        ("Absolute Error Boxplot+Points (Vorticity Mean/SD)", "figures/three_way/three_way_abs_error_violin_vorticity_scale.png"),
+        ("Absolute Error Boxplot+Points (Vorticity Skewness/Kurtosis)", "figures/three_way/three_way_abs_error_violin_vorticity_shape.png"),
+        ("Relative Error Boxplot+Points [%] (Velocity Mean/SD)", "figures/three_way/three_way_relative_error_pct_violin_velocity_scale.png"),
+        ("Relative Error Boxplot+Points [%] (Velocity Skewness/Kurtosis)", "figures/three_way/three_way_relative_error_pct_violin_velocity_shape.png"),
+        ("Relative Error Boxplot+Points [%] (Vorticity Mean/SD)", "figures/three_way/three_way_relative_error_pct_violin_vorticity_scale.png"),
+        ("Relative Error Boxplot+Points [%] (Vorticity Skewness/Kurtosis)", "figures/three_way/three_way_relative_error_pct_violin_vorticity_shape.png"),
+        ("Temporal-Mean Boxplot+Points (Velocity Mean/SD)", "figures/three_way/three_way_temporal_mean_abs_error_violin_velocity_scale.png"),
+        ("Temporal-Mean Boxplot+Points (Velocity Skewness/Kurtosis)", "figures/three_way/three_way_temporal_mean_abs_error_violin_velocity_shape.png"),
+        ("Temporal-Mean Boxplot+Points (Vorticity Mean/SD)", "figures/three_way/three_way_temporal_mean_abs_error_violin_vorticity_scale.png"),
+        ("Temporal-Mean Boxplot+Points (Vorticity Skewness/Kurtosis)", "figures/three_way/three_way_temporal_mean_abs_error_violin_vorticity_shape.png"),
+        ("Temporal-Mean Relative Error Boxplot+Points [%] (Velocity Mean/SD)", "figures/three_way/three_way_temporal_mean_relative_error_pct_violin_velocity_scale.png"),
+        ("Temporal-Mean Relative Error Boxplot+Points [%] (Velocity Skewness/Kurtosis)", "figures/three_way/three_way_temporal_mean_relative_error_pct_violin_velocity_shape.png"),
+        ("Temporal-Mean Relative Error Boxplot+Points [%] (Vorticity Mean/SD)", "figures/three_way/three_way_temporal_mean_relative_error_pct_violin_vorticity_scale.png"),
+        ("Temporal-Mean Relative Error Boxplot+Points [%] (Vorticity Skewness/Kurtosis)", "figures/three_way/three_way_temporal_mean_relative_error_pct_violin_vorticity_shape.png"),
     ]
     if raw_bundle is not None:
         figure_entries.extend(
@@ -2286,6 +3001,8 @@ def main() -> None:
         "metrics/three_way/table2_like_temporal_mean_three_way.csv",
         "metrics/three_way/table2_abs_error_summary_three_way.csv",
         "metrics/three_way/table2_temporal_mean_abs_error_summary_three_way.csv",
+        "metrics/three_way/table2_relative_error_pct_summary_three_way.csv",
+        "metrics/three_way/table2_temporal_mean_relative_error_pct_summary_three_way.csv",
         "metrics/three_way/merge_qc_three_way.json",
     ]
     if raw_bundle is not None:
@@ -2295,8 +3012,6 @@ def main() -> None:
                 "metrics/three_way/bland_altman_stats_three_way_unified_raw.csv",
             ]
         )
-    elif raw_bundle_error:
-        table2_qc["raw_bundle_warning"] = raw_bundle_error
     _write_html_report(
         out_dir,
         fig_rel_paths=figure_entries,

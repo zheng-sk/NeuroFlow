@@ -241,7 +241,11 @@ def apply_mask_to_hr_file(hr_path: str, mask_3d: np.ndarray) -> None:
     hr_data = np.asarray(hr_img.dataobj, dtype=np.float32)
     mask = _broadcast_mask(mask_3d, hr_data.shape)
     masked = (hr_data * mask).astype(np.float32)
-    out = nib.Nifti1Image(masked, hr_img.affine, hr_img.header)
+    header = hr_img.header.copy()
+    header.set_data_dtype(np.float32)
+    # Avoid dtype/scaling side effects when re-saving masked volumes.
+    header.set_slope_inter(1.0, 0.0)
+    out = nib.Nifti1Image(masked, hr_img.affine, header)
     nib.save(out, hr_path)
 
 

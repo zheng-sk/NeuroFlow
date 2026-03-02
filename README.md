@@ -73,7 +73,7 @@ Documentation index (recommended entrypoint):
 
 Task-specific guides:
 
-- Preprocessing: [`docs/PREPROCESSING_WORKFLOW.md`](docs/PREPROCESSING_WORKFLOW.md)
+- Preprocessing: [`docs/PREPROCESSING.md`](docs/PREPROCESSING.md)
 - Training: [`docs/TRAINING_WORKFLOW.md`](docs/TRAINING_WORKFLOW.md)
 - CoW segmentation: [`docs/SEGMENTATION_COW_WORKFLOW.md`](docs/SEGMENTATION_COW_WORKFLOW.md)
 - Inference: [`docs/INFERENCE_WORKFLOW.md`](docs/INFERENCE_WORKFLOW.md)

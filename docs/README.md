@@ -4,9 +4,9 @@ This folder is split by task so each workflow is easier to run and maintain.
 
 ## Documents
 
-- `docs/PREPROCESSING_WORKFLOW.md`
-  - End-to-end preprocessing from DICOM/NIfTI to training-ready paired data.
-  - Includes: DICOM->NIfTI, `calculate_mag`, temporal registration, CoW ROI crop, inter-scan registration, optional CoW segmentation.
+- `docs/PREPROCESSING.md`
+  - Canonical preprocessing guide with flowchart and phase-by-phase details.
+  - Includes scripts, libraries, risks, QC checks, and command summary.
 
 - `docs/TRAINING_WORKFLOW.md`
   - How to build training CSVs and train `4DFlowNet` from NIfTI.
@@ -25,5 +25,4 @@ This folder is split by task so each workflow is easier to run and maintain.
 
 ## Legacy docs (kept for compatibility)
 
-- `docs/PREPROCESSING_PIPELINE.md`
 - `docs/COW_SEGMENTATION.md`

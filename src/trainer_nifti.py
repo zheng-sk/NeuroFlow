@@ -114,6 +114,122 @@ def main():
         help="Rotation augmentation probability in training (ignored with --no-augmentation).",
     )
     parser.add_argument(
+        "--noise-aug-prob",
+        type=float,
+        default=0.0,
+        help="Probability of adding synthetic non-vascular noise to LR inputs during training.",
+    )
+    parser.add_argument(
+        "--noise-aug-phase-dist",
+        type=str,
+        default="student_t",
+        choices=["normal", "student_t", "laplace", "uniform", "skew_normal", "generalized_normal", "hat"],
+        help="Noise distribution for LR velocity channels.",
+    )
+    parser.add_argument(
+        "--noise-aug-phase-scale",
+        type=float,
+        default=0.04,
+        help="Base std/scale for LR velocity noise (normalized velocity domain).",
+    )
+    parser.add_argument(
+        "--noise-aug-phase-shape",
+        type=float,
+        default=3.0,
+        help="Shape parameter for phase distribution (df/beta/alpha depending on distribution).",
+    )
+    parser.add_argument(
+        "--noise-aug-mag-dist",
+        type=str,
+        default="skew_normal",
+        choices=["normal", "student_t", "laplace", "uniform", "skew_normal", "generalized_normal", "hat"],
+        help="Noise distribution for LR magnitude channels.",
+    )
+    parser.add_argument(
+        "--noise-aug-mag-scale",
+        type=float,
+        default=0.02,
+        help="Base std/scale for LR magnitude noise (normalized magnitude domain).",
+    )
+    parser.add_argument(
+        "--noise-aug-mag-shape",
+        type=float,
+        default=4.0,
+        help="Shape parameter for magnitude distribution (df/beta/alpha depending on distribution).",
+    )
+    parser.add_argument(
+        "--noise-aug-range-mult",
+        type=float,
+        default=2.0,
+        help="Range exaggeration multiplier applied to synthetic noise scale.",
+    )
+    parser.add_argument(
+        "--noise-aug-hat-mix",
+        type=float,
+        default=0.7,
+        help="For `hat` distribution: fraction of samples from uniform component [0,1].",
+    )
+    parser.add_argument(
+        "--noise-aug-apply-mag",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable synthetic noise on LR magnitude channels.",
+    )
+    parser.add_argument(
+        "--noise-aug-clip-mag",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Clip noisy LR magnitude back to [0,1]. Default keeps full exaggerated range.",
+    )
+    parser.add_argument(
+        "--noise-aug-fit-summary-csv",
+        type=str,
+        default="",
+        help=(
+            "Optional fit summary CSV from plot_nonvascular_noise_pdf_panel.py. "
+            "If provided, use best-fit family per channel (loaded once) instead of generic per-modality families."
+        ),
+    )
+    parser.add_argument(
+        "--noise-aug-exaggerated-side-expand",
+        type=float,
+        default=1.0,
+        help="Side expansion factor for synthetic noise profile (>=1).",
+    )
+    parser.add_argument(
+        "--noise-aug-exaggerated-edge-boost",
+        type=float,
+        default=0.0,
+        help="Tail boost factor for synthetic noise profile (>=0).",
+    )
+    parser.add_argument(
+        "--noise-aug-exaggerated-edge-power",
+        type=float,
+        default=1.8,
+        help="Tail boost shape power (>0).",
+    )
+    parser.add_argument(
+        "--noise-aug-level-min",
+        type=float,
+        default=0.8,
+        help="Minimum random augmentation level multiplier.",
+    )
+    parser.add_argument(
+        "--noise-aug-level-max",
+        type=float,
+        default=1.4,
+        help="Maximum random augmentation level multiplier.",
+    )
+    parser.add_argument(
+        "--noise-aug-masked-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of generated noise amplitude also applied inside vascular mask [0,1]. "
+            "0 keeps masked region untouched."
+        ),
+    )
+    parser.add_argument(
         "--tb-image-every-epochs",
         type=int,
         default=10,
@@ -270,6 +386,24 @@ def main():
         minimum_coverage=args.legacy_minimum_coverage,
         max_sampling_attempts=args.legacy_max_sampling_attempts,
         allow_empty_fallback=not args.legacy_disallow_empty_fallback,
+        noise_aug_prob=args.noise_aug_prob,
+        noise_aug_phase_dist=args.noise_aug_phase_dist,
+        noise_aug_phase_scale=args.noise_aug_phase_scale,
+        noise_aug_phase_shape=args.noise_aug_phase_shape,
+        noise_aug_mag_dist=args.noise_aug_mag_dist,
+        noise_aug_mag_scale=args.noise_aug_mag_scale,
+        noise_aug_mag_shape=args.noise_aug_mag_shape,
+        noise_aug_range_mult=args.noise_aug_range_mult,
+        noise_aug_hat_mix=args.noise_aug_hat_mix,
+        noise_aug_apply_mag=args.noise_aug_apply_mag,
+        noise_aug_clip_mag=args.noise_aug_clip_mag,
+        noise_aug_fit_summary_csv=args.noise_aug_fit_summary_csv,
+        noise_aug_exaggerated_side_expand=args.noise_aug_exaggerated_side_expand,
+        noise_aug_exaggerated_edge_boost=args.noise_aug_exaggerated_edge_boost,
+        noise_aug_exaggerated_edge_power=args.noise_aug_exaggerated_edge_power,
+        noise_aug_level_min=args.noise_aug_level_min,
+        noise_aug_level_max=args.noise_aug_level_max,
+        noise_aug_masked_fraction=args.noise_aug_masked_fraction,
         seed=args.seed,
     )
     if args.val_full_volume:
@@ -321,6 +455,7 @@ def main():
             minimum_coverage=0.0,
             max_sampling_attempts=args.legacy_max_sampling_attempts,
             allow_empty_fallback=True,
+            noise_aug_prob=0.0,
             seed=args.seed,
         )
 

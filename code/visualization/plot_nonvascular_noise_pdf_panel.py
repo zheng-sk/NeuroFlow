@@ -43,6 +43,7 @@ class Config:
     disable_clip: bool
     clip_low: float
     clip_high: float
+    magnitude_range_upper_percentile: float
     exclude_zero: bool
     zero_eps: float
 
@@ -112,6 +113,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-clip", action="store_true", help="Disable percentile clipping before histogram.")
     parser.add_argument("--clip-low", type=float, default=0.0, help="Lower percentile for clipping (ignored with --disable-clip).")
     parser.add_argument("--clip-high", type=float, default=100.0, help="Upper percentile for clipping (ignored with --disable-clip).")
+    parser.add_argument(
+        "--magnitude-range-upper-percentile",
+        type=float,
+        default=99.0,
+        help=(
+            "Upper percentile used to define the histogram range for Magnitude "
+            "(use 100.0 to use absolute max)."
+        ),
+    )
 
     parser.add_argument("--exclude-zero", action="store_true", help="Exclude near-zero values before histogramming.")
     parser.add_argument("--zero-eps", type=float, default=1e-8)
@@ -139,6 +149,84 @@ def parse_args() -> argparse.Namespace:
         "--overlay-all-fits",
         action="store_true",
         help="Overlay all fitted candidate PDFs in each subplot.",
+    )
+    parser.add_argument(
+        "--overlay-exaggerated-fit",
+        action="store_true",
+        help="Overlay exaggerated distribution derived from best fit (wider + flatter).",
+    )
+    parser.add_argument(
+        "--exaggerated-profile-mode",
+        type=str,
+        default="envelope",
+        choices=["envelope", "bestfit_hat"],
+        help=(
+            "How to build exaggerated overlay: "
+            "`envelope` (from patient PDF envelope) or `bestfit_hat` (from best-fit deformation)."
+        ),
+    )
+    parser.add_argument(
+        "--exaggerated-scale-mult",
+        type=float,
+        default=2.5,
+        help="Scale multiplier applied to best-fit spread for exaggerated overlay.",
+    )
+    parser.add_argument(
+        "--exaggerated-uniform-mix",
+        type=float,
+        default=0.35,
+        help="Mix factor in [0,1] between widened best-fit PDF and uniform PDF (hat-like flattening).",
+    )
+    parser.add_argument(
+        "--exaggerated-envelope-quantile",
+        type=float,
+        default=1.0,
+        help=(
+            "Envelope quantile in [0,1] across patient PDFs (1.0=max envelope). "
+            "Used with --exaggerated-profile-mode envelope."
+        ),
+    )
+    parser.add_argument(
+        "--exaggerated-envelope-gain",
+        type=float,
+        default=1.0,
+        help="Amplitude gain applied to envelope profile (used with envelope mode).",
+    )
+    parser.add_argument(
+        "--exaggerated-smooth-window",
+        type=int,
+        default=31,
+        help="Odd smoothing window (in x samples) for exaggerated overlay.",
+    )
+    parser.add_argument(
+        "--exaggerated-side-expand",
+        type=float,
+        default=1.25,
+        help=(
+            "Side expansion factor (>=1). >1 broadens the distribution laterally "
+            "by stretching around the center."
+        ),
+    )
+    parser.add_argument(
+        "--exaggerated-edge-boost",
+        type=float,
+        default=0.12,
+        help="Extra lift added near left/right borders (tails).",
+    )
+    parser.add_argument(
+        "--exaggerated-edge-power",
+        type=float,
+        default=2.0,
+        help="Shape of edge boost profile (>0). Higher means boost concentrated nearer borders.",
+    )
+    parser.add_argument(
+        "--exaggerated-normalize",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Normalize exaggerated overlay to integrate to 1. "
+            "Disabled by default to keep envelope-like visual profile."
+        ),
     )
     parser.add_argument(
         "--out-fit-csv",
@@ -294,7 +382,11 @@ def estimate_global_ranges(patient_ids: list[str], cfg: Config) -> dict[str, tup
                 print(f"[WARN] No valid values for {patient_id} {channel_name}. Skipping this curve.")
                 continue
             per_channel_lows[channel_name].append(float(np.min(values)))
-            per_channel_highs[channel_name].append(float(np.max(values)))
+            if channel_name == "Magnitude" and cfg.magnitude_range_upper_percentile < 100.0:
+                hi = float(np.percentile(values, cfg.magnitude_range_upper_percentile))
+            else:
+                hi = float(np.max(values))
+            per_channel_highs[channel_name].append(hi)
 
     ranges: dict[str, tuple[float, float]] = {}
     for channel_name in CHANNEL_FILES:
@@ -447,6 +539,140 @@ def _dist_from_pretty_name(pretty_name: str):
     return None
 
 
+def _build_exaggerated_pdf(
+    best_fit: FitResult,
+    x_line: np.ndarray,
+    lo: float,
+    hi: float,
+    scale_mult: float,
+    uniform_mix: float,
+    smooth_window: int,
+    side_expand: float,
+    edge_boost: float,
+    edge_power: float,
+    normalize: bool,
+) -> np.ndarray:
+    dist = _dist_from_pretty_name(best_fit.model)
+    if dist is None:
+        return np.zeros_like(x_line, dtype=np.float64)
+
+    params = list(best_fit.params)
+    if len(params) < 2:
+        return np.zeros_like(x_line, dtype=np.float64)
+
+    # scipy continuous distributions generally use (...shape, loc, scale)
+    # so scaling the last parameter widens the spread.
+    params[-1] = float(params[-1]) * max(float(scale_mult), 1e-6)
+
+    try:
+        y_wide = np.asarray(dist.pdf(x_line, *tuple(params)), dtype=np.float64)
+    except Exception:
+        return np.zeros_like(x_line, dtype=np.float64)
+    y_wide[~np.isfinite(y_wide)] = 0.0
+    y_wide = np.clip(y_wide, 0.0, None)
+
+    span = max(float(hi) - float(lo), 1e-12)
+    y_uniform = np.full_like(x_line, fill_value=1.0 / span, dtype=np.float64)
+    mix = float(np.clip(uniform_mix, 0.0, 1.0))
+    y_mix = (1.0 - mix) * y_wide + mix * y_uniform
+    y_mix = _expand_sides_and_edges(
+        y_mix,
+        x_line=x_line,
+        side_expand=side_expand,
+        edge_boost=edge_boost,
+        edge_power=edge_power,
+    )
+    y_mix = _smooth_1d(y_mix, smooth_window)
+
+    if normalize:
+        if hasattr(np, "trapezoid"):
+            area = float(np.trapezoid(y_mix, x_line))
+        else:
+            area = float(np.trapz(y_mix, x_line))
+        if area > 0.0 and np.isfinite(area):
+            y_mix = y_mix / area
+    return y_mix
+
+
+def _smooth_1d(y: np.ndarray, window: int) -> np.ndarray:
+    w = int(max(1, window))
+    if w % 2 == 0:
+        w += 1
+    if w <= 1:
+        return y
+    kernel = np.ones(w, dtype=np.float64) / float(w)
+    return np.convolve(y, kernel, mode="same")
+
+
+def _expand_sides_and_edges(
+    y: np.ndarray,
+    x_line: np.ndarray,
+    side_expand: float,
+    edge_boost: float,
+    edge_power: float,
+) -> np.ndarray:
+    y0 = np.asarray(y, dtype=np.float64)
+    span = max(float(x_line[-1]) - float(x_line[0]), 1e-12)
+    mid = 0.5 * (float(x_line[0]) + float(x_line[-1]))
+
+    s = max(float(side_expand), 1e-6)
+    if abs(s - 1.0) > 1e-9:
+        x_query = mid + (x_line - mid) / s
+        y1 = np.interp(x_query, x_line, y0, left=0.0, right=0.0)
+    else:
+        y1 = y0.copy()
+
+    b = max(float(edge_boost), 0.0)
+    if b > 0.0:
+        p = max(float(edge_power), 1e-6)
+        edge = np.abs((x_line - mid) / (0.5 * span))
+        edge = np.clip(edge, 0.0, 1.0) ** p
+        amp = max(float(np.max(y1)), 1e-12)
+        y1 = y1 + b * amp * edge
+
+    y1 = np.clip(y1, 0.0, None)
+    return y1
+
+
+def _build_exaggerated_envelope(
+    entries: list[tuple[str, np.ndarray, np.ndarray, np.ndarray]],
+    x_line: np.ndarray,
+    quantile: float,
+    gain: float,
+    smooth_window: int,
+    side_expand: float,
+    edge_boost: float,
+    edge_power: float,
+    normalize: bool,
+) -> np.ndarray:
+    curves = []
+    for _pid, centers, pdf, _counts in entries:
+        curves.append(np.interp(x_line, centers, pdf, left=0.0, right=0.0))
+    if not curves:
+        return np.zeros_like(x_line, dtype=np.float64)
+    y_stack = np.stack(curves, axis=0)
+    q = float(np.clip(quantile, 0.0, 1.0))
+    y_env = np.quantile(y_stack, q=q, axis=0)
+    y_env = np.clip(y_env, 0.0, None) * max(float(gain), 0.0)
+    y_env = _expand_sides_and_edges(
+        y_env,
+        x_line=x_line,
+        side_expand=side_expand,
+        edge_boost=edge_boost,
+        edge_power=edge_power,
+    )
+    y_env = _smooth_1d(y_env, smooth_window)
+
+    if normalize:
+        if hasattr(np, "trapezoid"):
+            area = float(np.trapezoid(y_env, x_line))
+        else:
+            area = float(np.trapz(y_env, x_line))
+        if area > 0.0 and np.isfinite(area):
+            y_env = y_env / area
+    return y_env
+
+
 def save_csv(
     out_csv: Path,
     hist_data: dict[str, list[tuple[str, np.ndarray, np.ndarray, np.ndarray]]],
@@ -470,6 +696,17 @@ def plot_panel(
     cfg: Config,
     overlay_best_fit: bool,
     overlay_all_fits: bool,
+    overlay_exaggerated_fit: bool,
+    exaggerated_profile_mode: str,
+    exaggerated_scale_mult: float,
+    exaggerated_uniform_mix: float,
+    exaggerated_envelope_quantile: float,
+    exaggerated_envelope_gain: float,
+    exaggerated_smooth_window: int,
+    exaggerated_side_expand: float,
+    exaggerated_edge_boost: float,
+    exaggerated_edge_power: float,
+    exaggerated_normalize: bool,
 ) -> None:
     fig, axes = plt.subplots(2, 2, figsize=(16, 10))
     axes = axes.ravel()
@@ -515,7 +752,7 @@ def plot_panel(
                     alpha=0.95,
                     label="_nolegend_",
                 )
-        elif overlay_best_fit and fit_results[channel_name]:
+        elif (overlay_best_fit or overlay_exaggerated_fit) and fit_results[channel_name]:
             best = fit_results[channel_name][0]
             dist = _dist_from_pretty_name(best.model)
             if dist is not None:
@@ -523,6 +760,47 @@ def plot_panel(
                 y_line = np.asarray(dist.pdf(x_line, *best.params), dtype=np.float64)
                 y_line[~np.isfinite(y_line)] = 0.0
                 ax.plot(x_line, y_line, "k--", linewidth=2.0, alpha=0.95, label="_nolegend_")
+
+        if overlay_exaggerated_fit and fit_results[channel_name]:
+            lo = float(entries[0][1][0])
+            hi = float(entries[0][1][-1])
+            x_line = np.linspace(lo, hi, 800)
+            if exaggerated_profile_mode == "envelope":
+                y_ex = _build_exaggerated_envelope(
+                    entries=entries,
+                    x_line=x_line,
+                    quantile=exaggerated_envelope_quantile,
+                    gain=exaggerated_envelope_gain,
+                    smooth_window=exaggerated_smooth_window,
+                    side_expand=exaggerated_side_expand,
+                    edge_boost=exaggerated_edge_boost,
+                    edge_power=exaggerated_edge_power,
+                    normalize=exaggerated_normalize,
+                )
+            else:
+                best = fit_results[channel_name][0]
+                y_ex = _build_exaggerated_pdf(
+                    best_fit=best,
+                    x_line=x_line,
+                    lo=lo,
+                    hi=hi,
+                    scale_mult=exaggerated_scale_mult,
+                    uniform_mix=exaggerated_uniform_mix,
+                    smooth_window=exaggerated_smooth_window,
+                    side_expand=exaggerated_side_expand,
+                    edge_boost=exaggerated_edge_boost,
+                    edge_power=exaggerated_edge_power,
+                    normalize=exaggerated_normalize,
+                )
+            ax.plot(
+                x_line,
+                y_ex,
+                color="#d62728",
+                linestyle="-.",
+                linewidth=2.2,
+                alpha=0.98,
+                label="_nolegend_",
+            )
 
         title = f"{channel_name}: non-vascular noise PDF"
         if best_label is not None:
@@ -540,8 +818,13 @@ def plot_panel(
     subtitle = (
         f"time_mode={cfg.time_mode}, frame_index={cfg.frame_index}, bins={cfg.bins}, "
         f"clip={'disabled' if cfg.disable_clip else f'[{cfg.clip_low},{cfg.clip_high}]'}, "
-        f"use_analysis_mask={cfg.use_analysis_mask}"
+        f"mag_range_hi_p={cfg.magnitude_range_upper_percentile}, use_analysis_mask={cfg.use_analysis_mask}"
     )
+    if overlay_exaggerated_fit:
+        subtitle += (
+            f", exaggerated(mode={exaggerated_profile_mode}, side_expand={exaggerated_side_expand:.3g}, "
+            f"edge_boost={exaggerated_edge_boost:.3g}, normalize={exaggerated_normalize})"
+        )
     fig.suptitle("Global non-vascular noise distributions (all patients)\n" + subtitle, fontsize=12)
     plt.tight_layout(rect=[0.0, 0.0, 0.86, 0.95])
 
@@ -572,16 +855,35 @@ def main() -> None:
         disable_clip=bool(args.disable_clip),
         clip_low=float(args.clip_low),
         clip_high=float(args.clip_high),
+        magnitude_range_upper_percentile=float(args.magnitude_range_upper_percentile),
         exclude_zero=bool(args.exclude_zero),
         zero_eps=float(args.zero_eps),
     )
 
     if (not cfg.disable_clip) and cfg.clip_high <= cfg.clip_low:
         raise ValueError("clip_high must be greater than clip_low.")
+    if not (0.0 < cfg.magnitude_range_upper_percentile <= 100.0):
+        raise ValueError("magnitude_range_upper_percentile must be in (0, 100].")
     if args.fit_max_samples < 0:
         raise ValueError("fit_max_samples must be >= 0 (0 means use all samples)")
     if 0 < args.fit_max_samples < 100:
         raise ValueError("fit_max_samples must be 0 or >= 100")
+    if args.exaggerated_scale_mult <= 0:
+        raise ValueError("exaggerated_scale_mult must be > 0.")
+    if not (0.0 <= args.exaggerated_uniform_mix <= 1.0):
+        raise ValueError("exaggerated_uniform_mix must be in [0, 1].")
+    if not (0.0 <= args.exaggerated_envelope_quantile <= 1.0):
+        raise ValueError("exaggerated_envelope_quantile must be in [0, 1].")
+    if args.exaggerated_smooth_window < 1:
+        raise ValueError("exaggerated_smooth_window must be >= 1.")
+    if args.exaggerated_side_expand < 1.0:
+        raise ValueError("exaggerated_side_expand must be >= 1.0.")
+    if args.exaggerated_edge_boost < 0.0:
+        raise ValueError("exaggerated_edge_boost must be >= 0.")
+    if args.exaggerated_edge_power <= 0.0:
+        raise ValueError("exaggerated_edge_power must be > 0.")
+    if args.exaggerated_profile_mode not in {"envelope", "bestfit_hat"}:
+        raise ValueError("exaggerated_profile_mode must be one of: envelope, bestfit_hat.")
 
     patient_ids = list_patient_ids(cfg.images_root, cfg.masks_root)
     print(f"Patients found: {len(patient_ids)} -> {patient_ids}")
@@ -615,6 +917,17 @@ def main() -> None:
         cfg=cfg,
         overlay_best_fit=bool(args.overlay_best_fit),
         overlay_all_fits=bool(args.overlay_all_fits),
+        overlay_exaggerated_fit=bool(args.overlay_exaggerated_fit),
+        exaggerated_profile_mode=str(args.exaggerated_profile_mode),
+        exaggerated_scale_mult=float(args.exaggerated_scale_mult),
+        exaggerated_uniform_mix=float(args.exaggerated_uniform_mix),
+        exaggerated_envelope_quantile=float(args.exaggerated_envelope_quantile),
+        exaggerated_envelope_gain=float(args.exaggerated_envelope_gain),
+        exaggerated_smooth_window=int(args.exaggerated_smooth_window),
+        exaggerated_side_expand=float(args.exaggerated_side_expand),
+        exaggerated_edge_boost=float(args.exaggerated_edge_boost),
+        exaggerated_edge_power=float(args.exaggerated_edge_power),
+        exaggerated_normalize=bool(args.exaggerated_normalize),
     )
 
     if out_csv is not None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import shutil
 import time
 from pathlib import Path
 
@@ -155,6 +156,8 @@ def process_case(
     compute_pcmra: bool,
     apply_n4: bool,
     n4_shrink_factor: int,
+    save_raw_uint16_copy: bool,
+    raw_uint16_sources: dict[str, Path] | None,
 ) -> bool:
     print(f"\n--- Processing case: {case_id} ---")
     start = time.time()
@@ -250,9 +253,37 @@ def process_case(
     if compute_pcmra and pcmra is not None:
         save_nifti_like(pcmra, vx_img, output_dir / "input_pcmra_raw.nii.gz")
 
+    if save_raw_uint16_copy and raw_uint16_sources:
+        copy_map = {
+            "vx": "Vx_raw_uint16.nii.gz",
+            "vy": "Vy_raw_uint16.nii.gz",
+            "vz": "Vz_raw_uint16.nii.gz",
+            "mag": "input_mag_raw_uint16.nii.gz",
+        }
+        copied = 0
+        for key, out_name in copy_map.items():
+            src = raw_uint16_sources.get(key)
+            if src is None or (not src.exists()):
+                print(f"  [raw_uint16] Missing source for {key}: {src}")
+                continue
+            try:
+                shutil.copy2(src, output_dir / out_name)
+                copied += 1
+            except Exception as exc:
+                print(f"  [raw_uint16] Failed copying {src} -> {out_name}: {exc}")
+        print(f"  [raw_uint16] Copied {copied}/{len(copy_map)} sidecar files.")
+
     elapsed = time.time() - start
     print(f"Completed in {elapsed:.2f}s")
     return True
+
+
+def remap_to_raw_uint16_root(source_path: Path, data_root: Path, raw_root: Path) -> Path:
+    try:
+        rel = source_path.resolve().relative_to(data_root.resolve())
+        return raw_root / rel
+    except Exception:
+        return raw_root / source_path.name
 
 
 def parse_args() -> argparse.Namespace:
@@ -300,6 +331,21 @@ def parse_args() -> argparse.Namespace:
         help="Apply N4 bias-field correction to magnitude before PC-MRA",
     )
     parser.add_argument("--n4-shrink-factor", type=int, default=4, help="N4 shrink factor")
+    parser.add_argument(
+        "--save-raw-uint16-copy",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Copy raw uint16 sidecars (if available) into each processed case output folder.",
+    )
+    parser.add_argument(
+        "--raw-uint16-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional root containing raw uint16 NIfTI files mirrored from --data-root "
+            "(for example data/nifti_patients_raw_uint16)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -337,12 +383,34 @@ def main() -> None:
         print(f"Progress [{index}/{total}]")
         case_id = row[CSV_COLUMNS["case_id"]].strip()
 
+        vx_src = resolve_path(args.data_root, row[CSV_COLUMNS["vx"]])
+        vy_src = resolve_path(args.data_root, row[CSV_COLUMNS["vy"]])
+        vz_src = resolve_path(args.data_root, row[CSV_COLUMNS["vz"]])
+        mag_src = resolve_path(args.data_root, row[CSV_COLUMNS["magnitude"]])
+
         out_dir = output_root / case_id
+        raw_sources = None
+        if args.save_raw_uint16_copy:
+            if args.raw_uint16_root is not None:
+                raw_sources = {
+                    "vx": remap_to_raw_uint16_root(vx_src, args.data_root, args.raw_uint16_root),
+                    "vy": remap_to_raw_uint16_root(vy_src, args.data_root, args.raw_uint16_root),
+                    "vz": remap_to_raw_uint16_root(vz_src, args.data_root, args.raw_uint16_root),
+                    "mag": remap_to_raw_uint16_root(mag_src, args.data_root, args.raw_uint16_root),
+                }
+            else:
+                # Fallback: copy from the same paths if they are already uint16 artifacts.
+                raw_sources = {
+                    "vx": vx_src,
+                    "vy": vy_src,
+                    "vz": vz_src,
+                    "mag": mag_src,
+                }
         ok = process_case(
-            vx_path=resolve_path(args.data_root, row[CSV_COLUMNS["vx"]]),
-            vy_path=resolve_path(args.data_root, row[CSV_COLUMNS["vy"]]),
-            vz_path=resolve_path(args.data_root, row[CSV_COLUMNS["vz"]]),
-            mag_path=resolve_path(args.data_root, row[CSV_COLUMNS["magnitude"]]),
+            vx_path=vx_src,
+            vy_path=vy_src,
+            vz_path=vz_src,
+            mag_path=mag_src,
             output_dir=out_dir,
             case_id=case_id,
             venc_u=venc_u,
@@ -353,6 +421,8 @@ def main() -> None:
             compute_pcmra=args.compute_pcmra,
             apply_n4=args.apply_n4,
             n4_shrink_factor=args.n4_shrink_factor,
+            save_raw_uint16_copy=args.save_raw_uint16_copy,
+            raw_uint16_sources=raw_sources,
         )
 
         if ok:

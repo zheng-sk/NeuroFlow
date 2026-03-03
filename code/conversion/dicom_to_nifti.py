@@ -206,6 +206,15 @@ def force_qsform(img: nib.Nifti1Image, code: int = 1) -> nib.Nifti1Image:
     return nib.Nifti1Image(img.get_fdata(dtype=np.float32), img.affine, hdr)
 
 
+def force_qsform_keep_dtype(img: nib.Nifti1Image, code: int = 1) -> nib.Nifti1Image:
+    data = np.asanyarray(img.dataobj)
+    hdr = img.header.copy()
+    hdr.set_data_dtype(data.dtype)
+    hdr.set_qform(img.affine, code=code)
+    hdr.set_sform(img.affine, code=code)
+    return nib.Nifti1Image(data, img.affine, hdr)
+
+
 # --------------------------
 # Controlled reorientation
 # --------------------------
@@ -324,6 +333,8 @@ def read_dicom_series_4d_build_nifti(
     series_name_for_phase_logic: str,
     canonicalize: bool = True,
     phase_flips_only: bool = False,
+    raw_uint16_out_nii_gz: str | None = None,
+    write_final_output: bool = True,
     verbose: bool = True,
 ) -> bool:
     """
@@ -526,6 +537,19 @@ def read_dicom_series_4d_build_nifti(
     # Compensate translation for the in-plane axis-1 flip above.
     aff_lps[0:3, 3] = aff_lps[0:3, 3] - aff_lps[0:3, 1] * float(rows - 1)
     aff_ras = lps_to_ras_affine(aff_lps)
+
+    # Optional traceability artifact: raw unsigned values as uint16 in RAS geometry.
+    if raw_uint16_out_nii_gz:
+        raw_u16 = np.clip(vol, 0, 65535).astype(np.uint16, copy=False)
+        raw_img = nib.Nifti1Image(raw_u16, aff_ras)
+        raw_img = force_qsform_keep_dtype(raw_img, code=1)
+        os.makedirs(os.path.dirname(raw_uint16_out_nii_gz), exist_ok=True)
+        nib.save(raw_img, raw_uint16_out_nii_gz)
+        if verbose:
+            print(f"      -> Saved RAW uint16 copy: {raw_uint16_out_nii_gz} | shape={raw_img.shape}")
+
+    if not write_final_output:
+        return True
 
     # 7) Component values: LPS->RAS flips sign for Vx/Vy
     vol_out = vol.astype(np.float32)  # allow negatives without overflow if input was unsigned
@@ -997,6 +1021,8 @@ def process_with_fallback(
     phase_flips_only: bool = False,
     stack_dcm2niix_2d: bool = False,
     uid_repair_for_dcm2niix: bool = True,
+    save_raw_uint16: bool = False,
+    raw_output_root: str | None = None,
 ):
     print("--- Processing: dcm2niix + direct-read fallback (RAS + phase-safe) ---")
 
@@ -1013,6 +1039,12 @@ def process_with_fallback(
         patient_dicom_dir = os.path.join(input_root, patient_id)
         patient_nifti_dir = os.path.join(output_root, patient_id)
         os.makedirs(patient_nifti_dir, exist_ok=True)
+        patient_raw_dir = None
+        if save_raw_uint16:
+            if raw_output_root is None:
+                raw_output_root = output_root.rstrip("/\\") + "_raw_uint16"
+            patient_raw_dir = os.path.join(raw_output_root, patient_id)
+            os.makedirs(patient_raw_dir, exist_ok=True)
 
         series_dirs = [s for s in sorted(os.listdir(patient_dicom_dir))
                   if os.path.isdir(os.path.join(patient_dicom_dir, s)) and "Unknown" not in s]
@@ -1020,6 +1052,9 @@ def process_with_fallback(
         for si, series_name in enumerate(series_dirs, start=1):
             dicom_series_path = os.path.join(patient_dicom_dir, series_name)
             nifti_final_path = os.path.join(patient_nifti_dir, f"{series_name}.nii.gz")
+            raw_uint16_final_path = (
+                os.path.join(patient_raw_dir, f"{series_name}.nii.gz") if patient_raw_dir is not None else None
+            )
 
             dicoms = [f for f in os.listdir(dicom_series_path) if f.upper().endswith((".IMA", ".DCM"))]
             num_dicoms = len(dicoms)
@@ -1059,6 +1094,17 @@ def process_with_fallback(
                         canonicalize=canonicalize,
                         phase_flips_only=phase_flips_only,
                     )
+                    if raw_uint16_final_path is not None:
+                        _ = read_dicom_series_4d_build_nifti(
+                            dicom_series_path,
+                            nifti_final_path,
+                            series_name_for_phase_logic=series_name,
+                            canonicalize=False,
+                            phase_flips_only=False,
+                            raw_uint16_out_nii_gz=raw_uint16_final_path,
+                            write_final_output=False,
+                            verbose=False,
+                        )
                     use_direct_read = False
                 else:
                     if len(generated) > 1:
@@ -1098,6 +1144,17 @@ def process_with_fallback(
                                             canonicalize=canonicalize,
                                             phase_flips_only=phase_flips_only,
                                         )
+                                        if raw_uint16_final_path is not None:
+                                            _ = read_dicom_series_4d_build_nifti(
+                                                dicom_series_path,
+                                                nifti_final_path,
+                                                series_name_for_phase_logic=series_name,
+                                                canonicalize=False,
+                                                phase_flips_only=False,
+                                                raw_uint16_out_nii_gz=raw_uint16_final_path,
+                                                write_final_output=False,
+                                                verbose=False,
+                                            )
                                         use_direct_read = False
                                         repaired_used = True
                                     else:
@@ -1115,6 +1172,8 @@ def process_with_fallback(
                                 series_name_for_phase_logic=series_name,
                                 canonicalize=canonicalize,
                                 phase_flips_only=phase_flips_only,
+                                raw_uint16_out_nii_gz=raw_uint16_final_path,
+                                write_final_output=True,
                                 verbose=True,
                             )
                             if stacked_ok:
@@ -1148,6 +1207,8 @@ def process_with_fallback(
                     series_name_for_phase_logic=series_name,
                     canonicalize=canonicalize,
                     phase_flips_only=phase_flips_only,
+                    raw_uint16_out_nii_gz=raw_uint16_final_path,
+                    write_final_output=True,
                     verbose=True,
                 )
                 if not ok:
@@ -1200,6 +1261,16 @@ def main() -> None:
         help="Disable temporary DICOM UID normalization before retrying dcm2niix when it outputs many single-slice files.",
     )
     parser.add_argument(
+        "--save-raw-uint16",
+        action="store_true",
+        help="Also save a raw uint16 NIfTI copy per series in a parallel output tree.",
+    )
+    parser.add_argument(
+        "--raw-output-root",
+        default=None,
+        help="Destination root for raw uint16 copies (default: <output-root>_raw_uint16).",
+    )
+    parser.add_argument(
         "--no-stack-dcm2niix-2d",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -1214,6 +1285,8 @@ def main() -> None:
         phase_flips_only=args.phase_flips_only,
         stack_dcm2niix_2d=(args.stack_dcm2niix_2d and not args.no_stack_dcm2niix_2d),
         uid_repair_for_dcm2niix=(not args.no_uid_repair_for_dcm2niix),
+        save_raw_uint16=args.save_raw_uint16,
+        raw_output_root=args.raw_output_root,
     )
 
 

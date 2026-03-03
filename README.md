@@ -247,6 +247,38 @@ The NIfTI training/validation dataloader in `src/Network/NiftiPatchDataset.py` a
    - Returns tensors in the same tuple order expected by `TrainerController`:
      - `u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, venc, mask`
 
+### Synthetic noise augmentation theory (NIfTI training)
+
+Synthetic noise is added in `_AddNonvascularNoiseAugd` (`src/Network/NiftiPatchDataset.py`) after normalization and patch extraction.
+
+1. Sample from a probability family  
+   - Draw a base random variable from the selected PDF:
+     - `z ~ p(z)` where `p` can be `normal`, `student_t`, `skew_normal`, `generalized_normal`, `hat`, etc.
+   - If `--noise-aug-fit-summary-csv` is provided, the best-fit family per channel is loaded once from CSV and reused during training.
+
+2. Apply shape exaggeration (optional)  
+   - `z1 = z * side_expand`
+   - `z2 = z1 + sign(z1) * edge_boost * |z1|^(edge_power)`
+   - `z_tilde = clip(z2, -35, 35)`
+   - This widens sides and/or boosts tails before final amplitude scaling.
+
+3. Apply amplitude scaling  
+   - A random level is sampled each call: `level ~ Uniform(level_min, level_max)`
+   - Effective scale:
+     - `scale_eff = scale * range_mult * level`
+   - Final additive noise:
+     - `n = z_tilde * scale_eff`
+
+4. Apply spatial weighting with mask  
+   - `x_noisy = x + w * n`
+   - `w = 1` in non-vascular voxels.
+   - In vascular voxels, `w = noise_aug_masked_fraction` (default `0.0`, i.e., untouched).
+
+Interpretation:
+- The PDF controls the noise *shape* (Gaussian-like, heavy tails, plateau-like, skewed, etc.).
+- `scale`, `range_mult`, and `level` control the noise *amplitude*.
+- Increasing amplitude terms increases the amount of injected noise.
+
 ### Legacy-mode knobs (what they replicate)
 
 - `--legacy-minimum-coverage`  
@@ -290,6 +322,7 @@ Training (`trainer_nifti.py`):
 | `val-samples-per-volume` | Patch samples per validation volume per epoch | 16 |
 | `legacy-minimum-coverage` | Optional minimum mask coverage per sampled train patch | 0.0 |
 | `legacy-max-sampling-attempts` | Max retries to find a patch matching coverage | 100 |
+| `noise-aug-masked-fraction` | Fraction of synthetic noise amplitude also applied inside vascular mask (`0..1`) | 0.0 |
 | `legacy-invert-uv-sign-on-raw` | Legacy-only extra U/V sign inversion after RAW->m/s conversion | off |
 
 Prediction (`code/predict_nifti.py`):

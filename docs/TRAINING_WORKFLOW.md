@@ -282,6 +282,36 @@ python trainer_nifti.py \
   --mag-loss-weight 1.0
 ```
 
+Train with fitted + exaggerated noise augmentation (plateau-like profile):
+
+```bash
+cd src
+python trainer_nifti.py \
+  --train-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
+  --val-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
+  --patch-size 16 \
+  --res-increase 2 \
+  --batch-size 4 \
+  --epochs 60 \
+  --mask-threshold 0.5 \
+  --noise-aug-prob 1.0 \
+  --noise-aug-fit-summary-csv ../output/noise_pdf/nonvascular_noise_fit_summary.csv \
+  --noise-aug-exaggerated-side-expand 1.8 \
+  --noise-aug-exaggerated-edge-boost 0.30 \
+  --noise-aug-exaggerated-edge-power 1.5 \
+  --noise-aug-phase-scale 0.06 \
+  --noise-aug-mag-scale 0.04 \
+  --noise-aug-range-mult 1.5 \
+  --noise-aug-level-min 1.0 \
+  --noise-aug-level-max 2.2 \
+  --noise-aug-apply-mag \
+  --no-noise-aug-clip-mag
+```
+
+Notes:
+- This command uses best-fit families from the fit-summary CSV (for example, Magnitude `SkewNormal`, Phase `GeneralizedNormal`) and then exaggerates them.
+- Update `--noise-aug-fit-summary-csv` to the exact CSV you want to use for the current experiment.
+
 Performance-oriented options:
 
 - cache loaded NIfTI cases in memory (MONAI `CacheDataset`):

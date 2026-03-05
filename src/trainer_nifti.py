@@ -6,6 +6,7 @@ import torch
 
 from Network.NiftiPatchDataset import create_nifti_full_volume_dataloader, create_nifti_patch_dataloader
 from Network.TrainerController import TrainerController
+from Network.model_factory import available_model_variants, normalize_model_variant
 
 
 def main():
@@ -18,6 +19,16 @@ def main():
     parser.add_argument("--epochs", type=int, default=60, help="Number of epochs.")
     parser.add_argument("--initial-learning-rate", type=float, default=2e-4, help="Initial learning rate.")
     parser.add_argument("--network-name", type=str, default="4DFlowNet_nifti", help="Run/model name.")
+    parser.add_argument(
+        "--model-variant",
+        type=str,
+        default="original",
+        help=(
+            "Model architecture variant. "
+            f"Available: {', '.join(available_model_variants())}. "
+            "Aliases: phase1/fase1, phase2/fase2."
+        ),
+    )
     parser.add_argument("--low-resblock", type=int, default=8, help="Number of low-res residual blocks.")
     parser.add_argument("--hi-resblock", type=int, default=4, help="Number of high-res residual blocks.")
     parser.add_argument("--train-samples-per-volume", type=int, default=64, help="Random patch samples per train volume per epoch.")
@@ -358,6 +369,10 @@ def main():
     parser.add_argument("--restore-dir", type=str, default="", help="Checkpoint directory to restore from.")
     parser.add_argument("--restore-file", type=str, default="", help="Checkpoint filename (.pt).")
     args = parser.parse_args()
+    args.model_variant = normalize_model_variant(args.model_variant)
+    if args.model_variant not in set(available_model_variants()):
+        valid = ", ".join(available_model_variants())
+        raise ValueError(f"Invalid --model-variant={args.model_variant!r}. Valid options: {valid}")
 
     if args.seed is not None:
         seed = int(args.seed)
@@ -500,6 +515,7 @@ def main():
         network_name=args.network_name,
         low_resblock=args.low_resblock,
         hi_resblock=args.hi_resblock,
+        model_variant=args.model_variant,
         predict_mag=args.predict_mag,
         mag_loss_weight=args.mag_loss_weight,
         non_fluid_loss_weight=args.non_fluid_loss_weight,

@@ -152,9 +152,10 @@ def load_sr_model(
     hi_resblock: int,
     device: torch.device,
     predict_mag: Optional[bool] = None,
+    model_variant: Optional[str] = None,
 ):
     _add_src_to_path()
-    from Network.SR4DFlowNet import SR4DFlowNet
+    from Network.model_factory import build_sr_model, normalize_model_variant
 
     checkpoint = torch.load(model_path, map_location=device)
     if predict_mag is None and isinstance(checkpoint, dict) and "predict_mag" in checkpoint:
@@ -162,7 +163,13 @@ def load_sr_model(
     if predict_mag is None:
         predict_mag = False
 
-    model = SR4DFlowNet(
+    checkpoint_variant = "original"
+    if isinstance(checkpoint, dict) and "model_variant" in checkpoint:
+        checkpoint_variant = str(checkpoint["model_variant"])
+    resolved_variant = normalize_model_variant(model_variant or checkpoint_variant)
+
+    model = build_sr_model(
+        model_variant=resolved_variant,
         res_increase=res_increase,
         low_resblock=low_resblock,
         hi_resblock=hi_resblock,
@@ -174,6 +181,7 @@ def load_sr_model(
     else:
         model.load_state_dict(checkpoint)
     model.eval()
+    setattr(model, "model_variant", resolved_variant)
     return model, bool(predict_mag)
 
 

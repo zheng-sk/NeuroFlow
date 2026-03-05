@@ -45,6 +45,15 @@ def main() -> None:
     parser.add_argument("--case-csv", required=True, help="CSV with paired LR/HR NIfTI paths.")
     parser.add_argument("--case-index", type=int, default=0, help="Case index in CSV.")
     parser.add_argument("--model-path", required=True, help="Checkpoint path (.pt).")
+    parser.add_argument(
+        "--model-variant",
+        type=str,
+        default=None,
+        help=(
+            "Optional model architecture variant override (e.g., original, phase1_attention, phase2_attention). "
+            "If omitted, use checkpoint metadata when available."
+        ),
+    )
 
     parser.add_argument("--out-dir", required=True, help="Output directory.")
     parser.add_argument("--output-prefix", default="pred", help="Output NIfTI prefix name.")
@@ -151,6 +160,7 @@ def main() -> None:
         hi_resblock=int(args.hi_resblock),
         device=device,
         predict_mag=args.predict_mag,
+        model_variant=args.model_variant,
     )
 
     if not predict_mag_flag:
@@ -160,6 +170,7 @@ def main() -> None:
         )
 
     print(f"Device: {device}")
+    print(f"Model variant: {getattr(model, 'model_variant', 'original')}")
     print(f"Selected case: {case_idx}/{len(cases)-1}")
     print(f"Frame selection mode: {frame_mode}")
     print(f"Frames: {frame_indices}")
@@ -203,6 +214,7 @@ def main() -> None:
         "frame_indices": [int(x) for x in frame_indices],
         "frame_selection_mode": frame_mode,
         "model_path": str(Path(args.model_path).resolve()),
+        "model_variant": str(getattr(model, "model_variant", "original")),
         "predict_mag": bool(predict_mag_flag),
         "raw_phase_input": bool(args.raw_phase_input),
         "legacy_invert_uv_sign_on_raw": bool(args.legacy_invert_uv_sign_on_raw),

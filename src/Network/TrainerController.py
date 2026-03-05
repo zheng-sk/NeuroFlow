@@ -14,7 +14,7 @@ from monai.inferers import sliding_window_inference
 from torch.utils.tensorboard import SummaryWriter
 
 from . import h5util, loss_utils, utility
-from .SR4DFlowNet import SR4DFlowNet
+from .model_factory import build_sr_model, normalize_model_variant
 
 
 class TrainerController:
@@ -28,6 +28,7 @@ class TrainerController:
         network_name="4DFlowNet",
         low_resblock=8,
         hi_resblock=4,
+        model_variant="original",
         predict_mag=False,
         mag_loss_weight=1.0,
         non_fluid_loss_weight=0.1,
@@ -71,6 +72,7 @@ class TrainerController:
         self.QUICKSAVE_ENABLED = quicksave_enable
         self.predict_mag = bool(predict_mag)
         self.mag_loss_weight = float(mag_loss_weight)
+        self.model_variant = normalize_model_variant(model_variant)
         self.tb_image_every_n_epochs = max(int(tb_image_every_n_epochs), 0)
         self.tb_image_axis = int(tb_image_axis)
         self.tb_image_batch_index = max(int(tb_image_batch_index), 0)
@@ -93,7 +95,8 @@ class TrainerController:
 
         # Network
         self.network_name = network_name
-        self.model = SR4DFlowNet(
+        self.model = build_sr_model(
+            model_variant=self.model_variant,
             res_increase=res_increase,
             low_resblock=low_resblock,
             hi_resblock=hi_resblock,
@@ -123,6 +126,7 @@ class TrainerController:
         print(f"Outside TV weight: {self.outside_tv_weight}")
         print(f"Accuracy metric: {self.accuracy_metric}")
         print(f"Predict magnitude head: {self.predict_mag}")
+        print(f"Model variant: {self.model_variant}")
         if self.predict_mag:
             print(f"Magnitude loss weight: {self.mag_loss_weight}")
         if self.tb_image_every_n_epochs > 0:
@@ -237,6 +241,7 @@ class TrainerController:
                     "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
                     "learning_rate": self.learning_rate,
                     "network_name": self.network_name,
+                    "model_variant": self.model_variant,
                     "predict_mag": self.predict_mag,
                     "mag_loss_weight": self.mag_loss_weight,
                     "non_fluid_loss_weight": self.non_fluid_weight,
@@ -513,6 +518,7 @@ class TrainerController:
         self.logfile = f"{self.model_dir}/loss.csv"
 
         utility.log_to_file(self.logfile, f"Network: {self.network_name}\n")
+        utility.log_to_file(self.logfile, f"Model variant: {self.model_variant}\n")
         utility.log_to_file(self.logfile, f"Initial learning rate: {self.learning_rate}\n")
         utility.log_to_file(self.logfile, f"Accuracy metric: {self.accuracy_metric}\n")
         utility.log_to_file(
@@ -793,6 +799,7 @@ class TrainerController:
             "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
             "learning_rate": self.optimizer.param_groups[0]["lr"],
             "network_name": self.network_name,
+            "model_variant": self.model_variant,
             "predict_mag": self.predict_mag,
             "mag_loss_weight": self.mag_loss_weight,
             "non_fluid_loss_weight": self.non_fluid_weight,
@@ -808,6 +815,13 @@ class TrainerController:
         checkpoint = torch.load(model_weights_path, map_location=self.device)
 
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            checkpoint_variant = checkpoint.get("model_variant", "original")
+            checkpoint_variant = normalize_model_variant(checkpoint_variant)
+            if checkpoint_variant != self.model_variant:
+                print(
+                    f"Warning: checkpoint model_variant={checkpoint_variant!r} "
+                    f"differs from current model_variant={self.model_variant!r}."
+                )
             self.model.load_state_dict(checkpoint["model_state_dict"])
             if "optimizer_state_dict" in checkpoint:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

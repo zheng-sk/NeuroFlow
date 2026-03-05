@@ -30,6 +30,8 @@ class TrainerController:
         hi_resblock=4,
         predict_mag=False,
         mag_loss_weight=1.0,
+        non_fluid_loss_weight=0.1,
+        outside_tv_weight=1e-5,
         tb_image_every_n_epochs=10,
         tb_image_axis=2,
         tb_image_batch_index=0,
@@ -53,7 +55,8 @@ class TrainerController:
         Setup model, loss functions and optimizer here.
         """
         self.div_weight = 0  # Weighting for divergence loss
-        self.non_fluid_weight = 1  # Weighting for non fluid region
+        self.non_fluid_weight = max(float(non_fluid_loss_weight), 0.0)  # Weighting for non fluid region
+        self.outside_tv_weight = max(float(outside_tv_weight), 0.0)
 
         # General params
         self.patch_size = patch_size
@@ -116,6 +119,8 @@ class TrainerController:
         self.accuracy_metric = "val_loss"
 
         print(f"Divergence loss2 * {self.div_weight}")
+        print(f"Non-fluid loss weight: {self.non_fluid_weight}")
+        print(f"Outside TV weight: {self.outside_tv_weight}")
         print(f"Accuracy metric: {self.accuracy_metric}")
         print(f"Predict magnitude head: {self.predict_mag}")
         if self.predict_mag:
@@ -234,6 +239,8 @@ class TrainerController:
                     "network_name": self.network_name,
                     "predict_mag": self.predict_mag,
                     "mag_loss_weight": self.mag_loss_weight,
+                    "non_fluid_loss_weight": self.non_fluid_weight,
+                    "outside_tv_weight": self.outside_tv_weight,
                 },
                 checkpoint_path,
             )
@@ -249,7 +256,7 @@ class TrainerController:
         u_pred, v_pred, w_pred = y_pred[:, 0], y_pred[:, 1], y_pred[:, 2]
 
         vel_mse_vox = self.calculate_mse(u, v, w, u_pred, v_pred, w_pred)
-        vel_mse = self._masked_region_mse(vel_mse_vox, mask)
+        vel_mse = self._masked_region_mse(vel_mse_vox, mask, non_fluid_weight=self.non_fluid_weight)
 
         mag_mse = torch.zeros_like(vel_mse)
         if self.predict_mag:
@@ -261,10 +268,11 @@ class TrainerController:
             mag_true = y_true[:, 3]
             mag_pred = y_pred[:, 3]
             mag_mse_vox = (mag_pred - mag_true) ** 2
-            mag_mse = self._masked_region_mse(mag_mse_vox, mask)
+            mag_mse = self._masked_region_mse(mag_mse_vox, mask, non_fluid_weight=self.non_fluid_weight)
 
         divergence_loss = torch.zeros_like(vel_mse)
-        total_loss = vel_mse + (self.mag_loss_weight * mag_mse) + divergence_loss
+        outside_tv = self._outside_tv_penalty(y_pred, mask)
+        total_loss = vel_mse + (self.mag_loss_weight * mag_mse) + divergence_loss + (self.outside_tv_weight * outside_tv)
         return total_loss, vel_mse, divergence_loss, mag_mse
 
     def accuracy_function(self, y_true, y_pred, mask):
@@ -291,7 +299,7 @@ class TrainerController:
         return (u_pred - u) ** 2 + (v_pred - v) ** 2 + (w_pred - w) ** 2
 
     @staticmethod
-    def _masked_region_mse(voxel_error, mask):
+    def _masked_region_mse(voxel_error, mask, non_fluid_weight: float = 1.0):
         non_fluid_mask = (mask < 0.5).float()
         epsilon = 1.0  # minimum 1 pixel
 
@@ -301,7 +309,40 @@ class TrainerController:
         non_fluid_mse = voxel_error * non_fluid_mask
         non_fluid_mse = non_fluid_mse.sum(dim=(1, 2, 3)) / (non_fluid_mask.sum(dim=(1, 2, 3)) + epsilon)
 
-        return fluid_mse + non_fluid_mse
+        return fluid_mse + (float(non_fluid_weight) * non_fluid_mse)
+
+    @staticmethod
+    def _outside_tv_penalty(pred, mask):
+        # pred: [B, C, X, Y, Z], mask: [B, X, Y, Z]
+        outside = (mask < 0.5).float()
+        if pred.ndim != 5 or outside.ndim != 4:
+            return torch.zeros((pred.shape[0],), dtype=pred.dtype, device=pred.device)
+
+        penalties = []
+        epsilon = 1.0
+
+        if pred.shape[2] > 1:
+            dx = torch.abs(pred[:, :, 1:, :, :] - pred[:, :, :-1, :, :])
+            wx = (outside[:, 1:, :, :] * outside[:, :-1, :, :]).unsqueeze(1)
+            num = (dx * wx).sum(dim=(1, 2, 3, 4))
+            den = (wx.sum(dim=(1, 2, 3, 4)) * pred.shape[1]) + epsilon
+            penalties.append(num / den)
+        if pred.shape[3] > 1:
+            dy = torch.abs(pred[:, :, :, 1:, :] - pred[:, :, :, :-1, :])
+            wy = (outside[:, :, 1:, :] * outside[:, :, :-1, :]).unsqueeze(1)
+            num = (dy * wy).sum(dim=(1, 2, 3, 4))
+            den = (wy.sum(dim=(1, 2, 3, 4)) * pred.shape[1]) + epsilon
+            penalties.append(num / den)
+        if pred.shape[4] > 1:
+            dz = torch.abs(pred[:, :, :, :, 1:] - pred[:, :, :, :, :-1])
+            wz = (outside[:, :, :, 1:] * outside[:, :, :, :-1]).unsqueeze(1)
+            num = (dz * wz).sum(dim=(1, 2, 3, 4))
+            den = (wz.sum(dim=(1, 2, 3, 4)) * pred.shape[1]) + epsilon
+            penalties.append(num / den)
+
+        if not penalties:
+            return torch.zeros((pred.shape[0],), dtype=pred.dtype, device=pred.device)
+        return torch.stack(penalties, dim=0).mean(dim=0)
 
     @staticmethod
     def _extract_slice_2d(vol_3d, axis, index):
@@ -480,6 +521,8 @@ class TrainerController:
             f"(weight={self.accuracy_mag_weight})\n",
         )
         utility.log_to_file(self.logfile, f"Divergence weight: {self.div_weight}\n")
+        utility.log_to_file(self.logfile, f"Non-fluid loss weight: {self.non_fluid_weight}\n")
+        utility.log_to_file(self.logfile, f"Outside TV weight: {self.outside_tv_weight}\n")
         utility.log_to_file(
             self.logfile,
             f"LR scheduler: {self.lr_scheduler_name} "
@@ -752,6 +795,8 @@ class TrainerController:
             "network_name": self.network_name,
             "predict_mag": self.predict_mag,
             "mag_loss_weight": self.mag_loss_weight,
+            "non_fluid_loss_weight": self.non_fluid_weight,
+            "outside_tv_weight": self.outside_tv_weight,
         }
         torch.save(checkpoint, f"{self.model_path}-best.pt")
 

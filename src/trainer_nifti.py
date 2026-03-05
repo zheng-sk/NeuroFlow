@@ -48,6 +48,18 @@ def main():
         help="Weight applied to magnitude MSE term when --predict-mag is enabled.",
     )
     parser.add_argument(
+        "--non-fluid-loss-weight",
+        type=float,
+        default=0.1,
+        help="Weight for loss outside vascular mask (lower values prioritize intraluminal ROI).",
+    )
+    parser.add_argument(
+        "--outside-tv-weight",
+        type=float,
+        default=1e-5,
+        help="Weight of anti-texture TV penalty outside vascular mask.",
+    )
+    parser.add_argument(
         "--raw-phase-input",
         dest="raw_phase_input",
         action="store_true",
@@ -230,6 +242,24 @@ def main():
         ),
     )
     parser.add_argument(
+        "--noise-aug-keep-original-prob",
+        type=float,
+        default=0.2,
+        help=(
+            "Within active noise augmentation, probability of leaving LR input unchanged "
+            "(no synthetic background corruption)."
+        ),
+    )
+    parser.add_argument(
+        "--noise-aug-zero-outside-prob",
+        type=float,
+        default=0.2,
+        help=(
+            "Within active noise augmentation, probability of setting LR values outside mask to zero. "
+            "Additive-noise mode uses the remaining probability."
+        ),
+    )
+    parser.add_argument(
         "--tb-image-every-epochs",
         type=int,
         default=10,
@@ -404,6 +434,8 @@ def main():
         noise_aug_level_min=args.noise_aug_level_min,
         noise_aug_level_max=args.noise_aug_level_max,
         noise_aug_masked_fraction=args.noise_aug_masked_fraction,
+        noise_aug_keep_original_prob=args.noise_aug_keep_original_prob,
+        noise_aug_zero_outside_prob=args.noise_aug_zero_outside_prob,
         seed=args.seed,
     )
     if args.val_full_volume:
@@ -470,6 +502,8 @@ def main():
         hi_resblock=args.hi_resblock,
         predict_mag=args.predict_mag,
         mag_loss_weight=args.mag_loss_weight,
+        non_fluid_loss_weight=args.non_fluid_loss_weight,
+        outside_tv_weight=args.outside_tv_weight,
         tb_image_every_n_epochs=args.tb_image_every_epochs,
         tb_image_axis=args.tb_image_axis,
         tb_image_batch_index=args.tb_image_batch_index,

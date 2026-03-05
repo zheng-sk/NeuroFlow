@@ -89,6 +89,33 @@ def _load_payload(path: str) -> Dict[str, np.ndarray]:
     return {k: z[k] for k in z.files}
 
 
+def _resolve_temporal_pick_indices(
+    requested: Optional[Sequence[int]],
+    frame_source_indices: np.ndarray,
+    t_count: int,
+) -> np.ndarray:
+    if not requested:
+        return np.arange(int(t_count), dtype=np.int64)
+
+    values = [int(v) for v in requested]
+    if not values:
+        return np.arange(int(t_count), dtype=np.int64)
+
+    src_to_pos = {int(src): i for i, src in enumerate(np.asarray(frame_source_indices, dtype=np.int64).tolist())}
+    if all(v in src_to_pos for v in values):
+        return np.asarray([src_to_pos[v] for v in values], dtype=np.int64)
+
+    out: List[int] = []
+    for v in values:
+        if v < 0 or v >= int(t_count):
+            raise ValueError(
+                f"Requested frame index {v} is out of payload range [0, {int(t_count) - 1}] "
+                f"and not found in frame_source_indices={np.asarray(frame_source_indices).tolist()}."
+            )
+        out.append(int(v))
+    return np.asarray(out, dtype=np.int64)
+
+
 def _safe_skew(x: np.ndarray) -> float:
     if x.size < 3:
         return float("nan")
@@ -3412,6 +3439,17 @@ def main() -> None:
         choices=["axis", "centerline"],
         help="Flow integration mode: axis-based slices (legacy) or centerline-based orthogonal planes.",
     )
+    parser.add_argument(
+        "--frame-index",
+        type=int,
+        nargs="*",
+        default=None,
+        help=(
+            "Optional frame indices to include in report metrics/plots. "
+            "If payload contains frame_source_indices, values are matched against source indices; "
+            "otherwise interpreted as payload temporal positions."
+        ),
+    )
     parser.add_argument("--selected-frame", type=int, default=0, help="Frame index (within payload) used for visual panel")
     parser.add_argument("--max-display-slices", type=int, default=8, help="Max slices per visual panel")
     parser.add_argument("--panel-cols", type=int, default=4, help="Number of columns per visual panel block")
@@ -3632,6 +3670,26 @@ def main() -> None:
         raise ValueError(
             f"Baseline venc length ({venc_baseline.shape[0]}) does not match temporal length ({t_count})."
         )
+
+    temporal_pick = _resolve_temporal_pick_indices(
+        requested=args.frame_index,
+        frame_source_indices=frame_source_indices,
+        t_count=t_count,
+    )
+    if temporal_pick.size <= 0:
+        raise ValueError("Frame selection resolved to an empty set.")
+    all_idx = np.arange(t_count, dtype=np.int64)
+    if temporal_pick.size != all_idx.size or not np.array_equal(temporal_pick, all_idx):
+        pred_norm = pred_norm[temporal_pick]
+        gt_norm = gt_norm[temporal_pick]
+        mask = mask[temporal_pick]
+        venc = venc[temporal_pick]
+        lr_norm_inference = lr_norm_inference[temporal_pick]
+        lr_norm = lr_norm[temporal_pick]
+        venc_baseline = venc_baseline[temporal_pick]
+        frame_source_indices = frame_source_indices[temporal_pick]
+        t_count = int(pred_norm.shape[0])
+
     fidx = int(np.clip(args.selected_frame, 0, t_count - 1))
 
     # Denormalize to physical units for velocity-related metrics

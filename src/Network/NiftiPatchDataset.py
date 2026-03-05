@@ -491,6 +491,8 @@ class _AddNonvascularNoiseAugd(RandomizableTransform):
         level_min: float = 0.8,
         level_max: float = 1.4,
         masked_fraction: float = 0.0,
+        keep_original_prob: float = 0.0,
+        zero_outside_prob: float = 0.0,
     ):
         super().__init__(prob=float(prob))
         self.phase_dist = self._normalize_dist_name(phase_dist)
@@ -510,6 +512,13 @@ class _AddNonvascularNoiseAugd(RandomizableTransform):
         self.level_min = float(level_min)
         self.level_max = float(level_max)
         self.masked_fraction = float(np.clip(masked_fraction, 0.0, 1.0))
+        self.keep_original_prob = float(np.clip(keep_original_prob, 0.0, 1.0))
+        self.zero_outside_prob = float(np.clip(zero_outside_prob, 0.0, 1.0))
+        if (self.keep_original_prob + self.zero_outside_prob) > 1.0:
+            raise ValueError(
+                "keep_original_prob + zero_outside_prob must be <= 1.0 "
+                f"(got {self.keep_original_prob + self.zero_outside_prob:.4f})."
+            )
         self._channel_fit_config = self._load_channel_fit_config(self.fit_summary_csv)
 
     @classmethod
@@ -751,6 +760,20 @@ class _AddNonvascularNoiseAugd(RandomizableTransform):
         if float(noise_weight.sum()) <= 0.0:
             return d
 
+        mode_draw = float(self.R.uniform())
+        if mode_draw < self.keep_original_prob:
+            return d
+        if mode_draw < (self.keep_original_prob + self.zero_outside_prob):
+            outside = (mask_lr < 0.5).astype(np.float32)
+            keep = 1.0 - outside
+            if "lr_vel" in d and d["lr_vel"] is not None:
+                vel = np.asarray(d["lr_vel"], dtype=np.float32)
+                d["lr_vel"] = (vel * keep[None, ...]).astype(np.float32)
+            if self.apply_to_magnitude and "lr_mag" in d and d["lr_mag"] is not None:
+                mag = np.asarray(d["lr_mag"], dtype=np.float32)
+                d["lr_mag"] = (mag * keep[None, ...]).astype(np.float32)
+            return d
+
         if "lr_vel" in d and d["lr_vel"] is not None:
             vel = np.asarray(d["lr_vel"], dtype=np.float32)
             vel_noise = np.zeros_like(vel, dtype=np.float32)
@@ -954,6 +977,8 @@ class NiftiPatchDataset(Dataset):
         noise_aug_level_min: float = 0.8,
         noise_aug_level_max: float = 1.4,
         noise_aug_masked_fraction: float = 0.0,
+        noise_aug_keep_original_prob: float = 0.0,
+        noise_aug_zero_outside_prob: float = 0.0,
     ):
         self.cases = list(cases)
         self.samples_per_volume = int(samples_per_volume)
@@ -1027,6 +1052,8 @@ class NiftiPatchDataset(Dataset):
                     level_min=float(noise_aug_level_min),
                     level_max=float(noise_aug_level_max),
                     masked_fraction=float(noise_aug_masked_fraction),
+                    keep_original_prob=float(noise_aug_keep_original_prob),
+                    zero_outside_prob=float(noise_aug_zero_outside_prob),
                 )
             )
         self.post_transforms = Compose(post_transforms)
@@ -1234,6 +1261,8 @@ def create_nifti_patch_dataloader(
     noise_aug_level_min: float = 0.8,
     noise_aug_level_max: float = 1.4,
     noise_aug_masked_fraction: float = 0.0,
+    noise_aug_keep_original_prob: float = 0.0,
+    noise_aug_zero_outside_prob: float = 0.0,
     seed: Optional[int] = None,
 ):
     cases = load_nifti_case_table(csv_path, include_hr_mag=include_hr_mag)
@@ -1278,6 +1307,8 @@ def create_nifti_patch_dataloader(
         noise_aug_level_min=noise_aug_level_min,
         noise_aug_level_max=noise_aug_level_max,
         noise_aug_masked_fraction=noise_aug_masked_fraction,
+        noise_aug_keep_original_prob=noise_aug_keep_original_prob,
+        noise_aug_zero_outside_prob=noise_aug_zero_outside_prob,
     )
     print(f"NIfTI dataset {csv_path}: {len(cases)} volume(s), {len(dataset)} patch samples")
     generator = None

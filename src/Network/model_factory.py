@@ -4,6 +4,8 @@ from typing import List
 def available_model_variants() -> List[str]:
     return [
         "original",
+        "residual_skip",
+        "pre_res_attention",
         "phase1_attention",
         "phase2_attention",
         "phase3_transformer_cross_attention",
@@ -16,6 +18,15 @@ def normalize_model_variant(model_variant: str) -> str:
         "sr4dflownet": "original",
         "base": "original",
         "baseline": "original",
+        "baseline_residual_skip": "residual_skip",
+        "velocity_residual_skip": "residual_skip",
+        "denoise_residual_skip": "residual_skip",
+        "identity_skip": "residual_skip",
+        "local_attention": "pre_res_attention",
+        "single_local_attention": "pre_res_attention",
+        "pre_res_local_attention": "pre_res_attention",
+        "preres_attention": "pre_res_attention",
+        "attention_before_residuals": "pre_res_attention",
         "phase1": "phase1_attention",
         "fase1": "phase1_attention",
         "phase2": "phase2_attention",
@@ -44,6 +55,28 @@ def build_sr_model(
         from .SR4DFlowNet import SR4DFlowNet
 
         return SR4DFlowNet(
+            res_increase=res_increase,
+            low_resblock=low_resblock,
+            hi_resblock=hi_resblock,
+            channel_nr=channel_nr,
+            predict_mag=predict_mag,
+        )
+
+    if variant == "residual_skip":
+        from .SR4DFlowNetResidualSkip import SR4DFlowNetResidualSkip
+
+        return SR4DFlowNetResidualSkip(
+            res_increase=res_increase,
+            low_resblock=low_resblock,
+            hi_resblock=hi_resblock,
+            channel_nr=channel_nr,
+            predict_mag=predict_mag,
+        )
+
+    if variant == "pre_res_attention":
+        from .SR4DFlowNetPreResAttention import SR4DFlowNetPreResAttention
+
+        return SR4DFlowNetPreResAttention(
             res_increase=res_increase,
             low_resblock=low_resblock,
             hi_resblock=hi_resblock,

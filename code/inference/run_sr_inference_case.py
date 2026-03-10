@@ -50,7 +50,8 @@ def main() -> None:
         type=str,
         default=None,
         help=(
-            "Optional model architecture variant override (e.g., original, phase1_attention, phase2_attention). "
+            "Optional model architecture variant override "
+            "(e.g., original, residual_skip, pre_res_attention, phase1_attention, phase2_attention). "
             "If omitted, use checkpoint metadata when available."
         ),
     )

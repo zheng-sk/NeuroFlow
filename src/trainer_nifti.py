@@ -26,7 +26,8 @@ def main():
         help=(
             "Model architecture variant. "
             f"Available: {', '.join(available_model_variants())}. "
-            "Aliases: residual_skip, identity_skip, local_attention, attention_before_upsample, phase1/fase1, phase2/fase2."
+            "Aliases: residual_skip, identity_skip, local_attention, attention_before_upsample, "
+            "phase1/fase1, phase2/fase2, jit/jit3d."
         ),
     )
     parser.add_argument("--low-resblock", type=int, default=8, help="Number of low-res residual blocks.")

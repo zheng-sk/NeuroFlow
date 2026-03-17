@@ -62,6 +62,9 @@ class TrainerController:
         # General params
         self.patch_size = patch_size
         self.res_increase = res_increase
+        self.low_resblock = int(low_resblock)
+        self.hi_resblock = int(hi_resblock)
+        self.channel_nr = 64
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.network_src_dir = os.path.dirname(os.path.abspath(__file__))
@@ -100,7 +103,7 @@ class TrainerController:
             res_increase=res_increase,
             low_resblock=low_resblock,
             hi_resblock=hi_resblock,
-            channel_nr=64,
+            channel_nr=self.channel_nr,
             predict_mag=self.predict_mag,
         ).to(self.device)
 
@@ -242,6 +245,10 @@ class TrainerController:
                     "learning_rate": self.learning_rate,
                     "network_name": self.network_name,
                     "model_variant": self.model_variant,
+                    "res_increase": self.res_increase,
+                    "low_resblock": self.low_resblock,
+                    "hi_resblock": self.hi_resblock,
+                    "channel_nr": self.channel_nr,
                     "predict_mag": self.predict_mag,
                     "mag_loss_weight": self.mag_loss_weight,
                     "non_fluid_loss_weight": self.non_fluid_weight,
@@ -800,6 +807,10 @@ class TrainerController:
             "learning_rate": self.optimizer.param_groups[0]["lr"],
             "network_name": self.network_name,
             "model_variant": self.model_variant,
+            "res_increase": self.res_increase,
+            "low_resblock": self.low_resblock,
+            "hi_resblock": self.hi_resblock,
+            "channel_nr": self.channel_nr,
             "predict_mag": self.predict_mag,
             "mag_loss_weight": self.mag_loss_weight,
             "non_fluid_loss_weight": self.non_fluid_weight,

@@ -10,6 +10,7 @@ def available_model_variants() -> List[str]:
         "phase1_attention",
         "phase2_attention",
         "phase3_transformer_cross_attention",
+        "jit_sr_3d",
     ]
 
 
@@ -41,6 +42,10 @@ def normalize_model_variant(model_variant: str) -> str:
         "fase3": "phase3_transformer_cross_attention",
         "transformer_cross_attention": "phase3_transformer_cross_attention",
         "cross_attention_transformer": "phase3_transformer_cross_attention",
+        "jit": "jit_sr_3d",
+        "jit3d": "jit_sr_3d",
+        "jit_sr": "jit_sr_3d",
+        "transformer_sr_3d": "jit_sr_3d",
     }
     return aliases.get(key, key)
 
@@ -125,6 +130,17 @@ def build_sr_model(
         from .SR4DFlowNetPhase3TransformerCrossAttention import SR4DFlowNetPhase3TransformerCrossAttention
 
         return SR4DFlowNetPhase3TransformerCrossAttention(
+            res_increase=res_increase,
+            low_resblock=low_resblock,
+            hi_resblock=hi_resblock,
+            channel_nr=channel_nr,
+            predict_mag=predict_mag,
+        )
+
+    if variant == "jit_sr_3d":
+        from .JiTSR3D import JiTSR3D
+
+        return JiTSR3D(
             res_increase=res_increase,
             low_resblock=low_resblock,
             hi_resblock=hi_resblock,

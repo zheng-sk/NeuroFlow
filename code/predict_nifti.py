@@ -12,7 +12,7 @@ from monai.transforms import ScaleIntensity
 # Add src to python path so we can import modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from Network.SR4DFlowNet import SR4DFlowNet
+from Network.model_factory import build_sr_model, normalize_model_variant
 
 
 def load_nifti(path: str) -> Tuple[np.ndarray, nib.Nifti1Image]:
@@ -33,17 +33,37 @@ def ensure_time_first(data: np.ndarray, time_axis: int):
     return data
 
 
-def load_model(model_path, res_increase, low_resblock, hi_resblock, device, predict_mag: Optional[bool] = None):
+def load_model(
+    model_path,
+    res_increase,
+    low_resblock,
+    hi_resblock,
+    device,
+    predict_mag: Optional[bool] = None,
+    model_variant: Optional[str] = None,
+    channel_nr: int = 64,
+):
     checkpoint = torch.load(model_path, map_location=device)
-    if predict_mag is None and isinstance(checkpoint, dict) and "predict_mag" in checkpoint:
-        predict_mag = bool(checkpoint["predict_mag"])
+    if isinstance(checkpoint, dict):
+        if predict_mag is None and "predict_mag" in checkpoint:
+            predict_mag = bool(checkpoint["predict_mag"])
+        if model_variant in (None, ""):
+            model_variant = checkpoint.get("model_variant", "original")
+        res_increase = int(checkpoint.get("res_increase", res_increase))
+        low_resblock = int(checkpoint.get("low_resblock", low_resblock))
+        hi_resblock = int(checkpoint.get("hi_resblock", hi_resblock))
+        channel_nr = int(checkpoint.get("channel_nr", channel_nr))
+
     if predict_mag is None:
         predict_mag = False
+    model_variant = normalize_model_variant(model_variant or "original")
 
-    model = SR4DFlowNet(
-        res_increase,
+    model = build_sr_model(
+        model_variant=model_variant,
+        res_increase=res_increase,
         low_resblock=low_resblock,
         hi_resblock=hi_resblock,
+        channel_nr=channel_nr,
         predict_mag=predict_mag,
     ).to(device)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
@@ -51,7 +71,7 @@ def load_model(model_path, res_increase, low_resblock, hi_resblock, device, pred
     else:
         model.load_state_dict(checkpoint)
     model.eval()
-    return model, bool(predict_mag)
+    return model, bool(predict_mag), model_variant, res_increase
 
 
 def adjust_affine_for_upsample(affine: np.ndarray, res_increase: int):
@@ -282,6 +302,12 @@ def main():
     parser.add_argument("--low-resblock", type=int, default=8, help="Number of low-res residual blocks.")
     parser.add_argument("--hi-resblock", type=int, default=4, help="Number of high-res residual blocks.")
     parser.add_argument(
+        "--model-variant",
+        type=str,
+        default="",
+        help="Optional model variant override. If empty, uses checkpoint metadata when available.",
+    )
+    parser.add_argument(
         "--predict-mag",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -354,14 +380,16 @@ def main():
         w = raw_to_velocity(w, venc=venc, raw_center=args.raw_center, raw_scale=args.raw_scale, invert_sign=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, predict_mag = load_model(
+    model, predict_mag, model_variant, checkpoint_res_increase = load_model(
         args.model_path,
         args.res_increase,
         args.low_resblock,
         args.hi_resblock,
         device,
         predict_mag=args.predict_mag,
+        model_variant=args.model_variant,
     )
+    args.res_increase = int(checkpoint_res_increase)
 
     def predictor_fn(x):
         u_t, v_t, w_t, um_t, vm_t, wm_t = torch.chunk(x, 6, dim=1)
@@ -453,7 +481,7 @@ def main():
     if mag_out is not None:
         print(" ", mag_path)
     print(" ", uvw_path)
-    print(f"Model predict_mag={predict_mag}, output_channels={pred_stack.shape[1]}")
+    print(f"Model variant={model_variant}, predict_mag={predict_mag}, output_channels={pred_stack.shape[1]}")
 
 
 if __name__ == "__main__":

@@ -13,3 +13,4 @@ pytorch_venv/
 .venv*
 *.venv*
 output/
+deliverables/

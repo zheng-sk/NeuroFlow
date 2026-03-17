@@ -6,6 +6,7 @@ def available_model_variants() -> List[str]:
         "original",
         "residual_skip",
         "pre_res_attention",
+        "pre_upsample_attention",
         "phase1_attention",
         "phase2_attention",
         "phase3_transformer_cross_attention",
@@ -23,6 +24,9 @@ def normalize_model_variant(model_variant: str) -> str:
         "denoise_residual_skip": "residual_skip",
         "identity_skip": "residual_skip",
         "local_attention": "pre_res_attention",
+        "local_attention_before_upsample": "pre_upsample_attention",
+        "attention_before_upsample": "pre_upsample_attention",
+        "preupsample_attention": "pre_upsample_attention",
         "single_local_attention": "pre_res_attention",
         "pre_res_local_attention": "pre_res_attention",
         "preres_attention": "pre_res_attention",
@@ -77,6 +81,17 @@ def build_sr_model(
         from .SR4DFlowNetPreResAttention import SR4DFlowNetPreResAttention
 
         return SR4DFlowNetPreResAttention(
+            res_increase=res_increase,
+            low_resblock=low_resblock,
+            hi_resblock=hi_resblock,
+            channel_nr=channel_nr,
+            predict_mag=predict_mag,
+        )
+
+    if variant == "pre_upsample_attention":
+        from .SR4DFlowNetPreUpsampleAttention import SR4DFlowNetPreUpsampleAttention
+
+        return SR4DFlowNetPreUpsampleAttention(
             res_increase=res_increase,
             low_resblock=low_resblock,
             hi_resblock=hi_resblock,

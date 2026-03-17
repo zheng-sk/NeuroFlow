@@ -248,10 +248,10 @@ def main():
     parser.add_argument("--u", type=str, required=True, help="Input LR velocity U NIfTI (3D/4D).")
     parser.add_argument("--v", type=str, required=True, help="Input LR velocity V NIfTI (3D/4D).")
     parser.add_argument("--w", type=str, required=True, help="Input LR velocity W NIfTI (3D/4D).")
-    parser.add_argument("--mag-u", type=str, default="", help="Input LR magnitude U NIfTI.")
-    parser.add_argument("--mag-v", type=str, default="", help="Input LR magnitude V NIfTI.")
-    parser.add_argument("--mag-w", type=str, default="", help="Input LR magnitude W NIfTI.")
-    parser.add_argument("--mag", type=str, default="", help="Single LR magnitude NIfTI used for all components.")
+    parser.add_argument("--mag-u", type=str, default="", help="Input LR magnitude NIfTI. If used alone, it is shared across components.")
+    parser.add_argument("--mag-v", type=str, default="", help="Optional extra LR magnitude NIfTI. Defaults to the shared magnitude.")
+    parser.add_argument("--mag-w", type=str, default="", help="Optional extra LR magnitude NIfTI. Defaults to the shared magnitude.")
+    parser.add_argument("--mag", type=str, default="", help="Single LR magnitude NIfTI shared across components (recommended).")
     parser.add_argument("--model-path", type=str, required=True, help="Checkpoint path (.pt).")
     parser.add_argument("--output-prefix", type=str, required=True, help="Output prefix (without _u/_v/_w suffix).")
     parser.add_argument("--patch-size", type=int, default=16, help="LR inference patch size.")
@@ -349,8 +349,17 @@ def main():
         if mag_w is None:
             mag_w = mag_all
 
+    shared_mag = mag_u if mag_u is not None else mag_v if mag_v is not None else mag_w
+    if shared_mag is not None:
+        if mag_u is None:
+            mag_u = shared_mag
+        if mag_v is None:
+            mag_v = shared_mag
+        if mag_w is None:
+            mag_w = shared_mag
+
     if mag_u is None or mag_v is None or mag_w is None:
-        raise ValueError("Magnitude is required. Provide --mag or --mag-u/--mag-v/--mag-w")
+        raise ValueError("Magnitude is required. Provide --mag or one of --mag-u/--mag-v/--mag-w")
     if mag_u.shape != u.shape or mag_v.shape != u.shape or mag_w.shape != u.shape:
         raise ValueError("Magnitude and velocity shapes must match")
 

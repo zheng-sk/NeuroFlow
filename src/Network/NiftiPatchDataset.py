@@ -57,11 +57,14 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
     Load case descriptors from CSV.
 
     Required columns:
-        lr_u, lr_v, lr_w, lr_mag_u, lr_mag_v, lr_mag_w, hr_u, hr_v, hr_w
+        lr_u, lr_v, lr_w, hr_u, hr_v, hr_w
+        and one magnitude source from:
+        lr_mag, lr_mag_u, lr_mag_v, lr_mag_w
     Optional columns:
         hr_mag, mask, venc, venc_u, venc_v, venc_w, time_start, time_end, time_index
     """
-    required = ["lr_u", "lr_v", "lr_w", "lr_mag_u", "lr_mag_v", "lr_mag_w", "hr_u", "hr_v", "hr_w"]
+    required = ["lr_u", "lr_v", "lr_w", "hr_u", "hr_v", "hr_w"]
+    mag_keys = ["lr_mag_u", "lr_mag_v", "lr_mag_w"]
     optional = ["hr_mag", "mask", "venc", "venc_u", "venc_v", "venc_w", "time_start", "time_end", "time_index"]
 
     base_dir = os.path.dirname(os.path.abspath(csv_path))
@@ -69,17 +72,32 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
     with open(csv_path, "r", newline="") as f:
         reader = csv.DictReader(f)
         for idx, row in enumerate(reader):
-            missing = [k for k in required if not row.get(k, "").strip()]
+            missing = [k for k in required if not str(row.get(k, "") or "").strip()]
             if missing:
                 raise ValueError(f"Row {idx} in {csv_path} missing required columns/values: {missing}")
 
+            shared_mag_value = ""
+            for key in ("lr_mag", "lr_mag_u", "lr_mag_v", "lr_mag_w"):
+                raw_value = str(row.get(key, "") or "").strip()
+                if raw_value:
+                    shared_mag_value = raw_value
+                    break
+            if not shared_mag_value:
+                raise ValueError(
+                    f"Row {idx} in {csv_path} is missing LR magnitude input. "
+                    "Provide `lr_mag` or at least one of `lr_mag_u/lr_mag_v/lr_mag_w`."
+                )
+            shared_mag_path = _resolve_path(shared_mag_value, base_dir)
+
             case = {}
-            for key in required + optional:
-                value = row.get(key, "")
+            for key in required + mag_keys + optional:
+                value = row.get(key, "") or ""
                 if key in ("venc", "venc_u", "venc_v", "venc_w"):
                     case[key] = float(value) if str(value).strip() else 0.0
                 elif key in ("time_start", "time_end", "time_index"):
                     case[key] = int(value) if str(value).strip() else -1
+                elif key in mag_keys:
+                    case[key] = _resolve_path(value, base_dir) if str(value).strip() else shared_mag_path
                 elif key == "hr_mag":
                     if str(value).strip():
                         case[key] = _resolve_path(value, base_dir)

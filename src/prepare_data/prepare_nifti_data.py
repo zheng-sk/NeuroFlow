@@ -115,8 +115,17 @@ def main():
         if mag_w_data is None:
             mag_w_data = mag_data
 
+    shared_mag_data = mag_u_data if mag_u_data is not None else mag_v_data if mag_v_data is not None else mag_w_data
+    if shared_mag_data is not None:
+        if mag_u_data is None:
+            mag_u_data = shared_mag_data
+        if mag_v_data is None:
+            mag_v_data = shared_mag_data
+        if mag_w_data is None:
+            mag_w_data = shared_mag_data
+
     if mag_u_data is None or mag_v_data is None or mag_w_data is None:
-        raise ValueError("Magnitude data missing. Provide --mag or --mag-u/--mag-v/--mag-w")
+        raise ValueError("Magnitude data missing. Provide --mag or one of --mag-u/--mag-v/--mag-w")
 
     if mag_u_data.shape != u_data.shape or mag_v_data.shape != u_data.shape or mag_w_data.shape != u_data.shape:
         raise ValueError("Magnitude shapes do not match velocity shapes")

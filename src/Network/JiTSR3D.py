@@ -289,9 +289,9 @@ class JiTSR3D(nn.Module):
         hr_input = self._upsample_to_hr(lr_input)
 
         phase = hr_input[:, 0:3]
-        mag_components = hr_input[:, 3:6]
         speed = self._vector_norm(phase)
-        mag = self._vector_norm(mag_components)
+        # Default semantics: one shared magnitude channel, repeated for compatibility.
+        mag = hr_input[:, 3:4]
         pcmr = mag * speed
         model_input = torch.cat((phase, pcmr, mag, speed), dim=1)
 

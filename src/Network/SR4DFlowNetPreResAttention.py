@@ -67,7 +67,7 @@ class SR4DFlowNetPreResAttention(nn.Module):
 
     def forward(self, u, v, w, u_mag, v_mag, w_mag):
         speed = torch.sqrt(u**2 + v**2 + w**2)
-        mag = torch.sqrt(u_mag**2 + v_mag**2 + w_mag**2)
+        mag = u_mag
         pcmr = mag * speed
 
         phase = torch.cat([u, v, w], dim=1)

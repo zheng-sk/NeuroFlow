@@ -1,0 +1,82 @@
+% ============================================================
+%  Table 1 — SR4DFlowNet Architectural Variants
+%  Required packages: booktabs, multirow, xcolor (or colortbl),
+%                     makecell, array
+%  Usage: \input{table1}  or paste inline in your document.
+% ============================================================
+
+\begin{table}[ht]
+\centering
+\caption{Summary of evaluated SR4DFlowNet architectural variants and their attention components.
+Tick marks (\checkmark) indicate the presence of a module; dashes (---) indicate its absence.
+\textit{Placement} refers to the stage of the network where attention is inserted.
+All variants share the same dual-stream backbone ($N_{LR}=8$, $N_{HR}=4$, 64 channels)
+and the same training protocol.}
+\label{tab:variants}
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{
+    l
+    c
+    c
+    c
+    c
+    c
+    l
+}
+\toprule
+\multirow{2}{*}{\textbf{Variant}} &
+\multirow{2}{*}{\makecell{\textbf{Velocity}\\\textbf{skip}}} &
+\multirow{2}{*}{\makecell{\textbf{CBAM}\\\textbf{(local)}}} &
+\multirow{2}{*}{\makecell{\textbf{Cross-gated}\\\textbf{fusion}}} &
+\multirow{2}{*}{\makecell{\textbf{Token-mixing}\\\textbf{attention}}} &
+\multirow{2}{*}{\makecell{\textbf{Bidirectional}\\\textbf{cross-attention}}} &
+\multirow{2}{*}{\textbf{Placement of attention}} \\
+\\
+\midrule
+
+\texttt{original}
+  & ---        & ---        & ---        & ---        & ---
+  & Baseline; no attention \\
+
+\texttt{residual\_skip}
+  & \checkmark & ---        & ---        & ---        & ---
+  & Velocity identity skip ($r{=}1$) or upsample skip ($r{=}2$) \\
+
+\texttt{pre\_res\_attention}
+  & ---        & \checkmark & ---        & ---        & ---
+  & Single CBAM after stream fusion, before LR residual stack \\
+
+\texttt{pre\_upsample\_attention}
+  & ---        & \checkmark & ---        & ---        & ---
+  & Single CBAM after LR residual stack, before upsampling \\
+
+\texttt{phase1\_attention}
+  & ---        & \checkmark & ---        & ---        & ---
+  & CBAM in each branch, at fusion, and inside LR \& HR residual blocks \\
+
+\texttt{phase2\_attention}
+  & ---        & \checkmark & \checkmark & \checkmark & ---
+  & Phase~1 + cross-gating at fusion + token-mixing before/after upsample \\
+
+\texttt{phase3\_transformer}
+  & ---        & \checkmark & ---        & \checkmark & \checkmark
+  & Phase~1 + bidirectional cross-attention at fusion + token-mixing in LR \& HR stages \\
+
+\texttt{jit\_sr\_3d}
+  & ---        & ---        & ---        & \checkmark & ---
+  & Sinusoidal positional embeddings; token-mixing in fused feature space \\
+
+\bottomrule
+\end{tabular}
+
+\smallskip
+\noindent
+\footnotesize
+\textbf{CBAM}: Convolutional Block Attention Module (sequential channel $\to$ spatial gates) \cite{woo2018cbam}.
+\textbf{Cross-gated fusion}: lightweight 1$\times$1 conv gates that modulate each stream with the other stream's features \cite{woo2018cbam}.
+\textbf{Token-mixing attention}: multi-head self-attention on adaptively pooled $P^3$ tokens, context reprojected to voxel grid via trilinear interpolation \cite{vaswani2017attention}.
+\textbf{Bidirectional cross-attention}: phase stream attends to PC stream and vice versa over pooled tokens \cite{vaswani2017attention}.
+\textbf{JiT-SR-3D}: Joint-in-time SR network with sinusoidal positional encoding and a single token-mixing context block on the concatenated dual-stream features.
+
+\end{table}

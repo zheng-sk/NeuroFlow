@@ -156,6 +156,41 @@ def _build_monai_case_dataset(cases: List[Dict], load_transform, use_cache: bool
     return _create_cache_dataset()
 
 
+def _nearest_resize_mask(mask: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    sx, sy, sz = mask.shape
+    tx, ty, tz = target_shape
+    ix = np.clip(np.round(np.linspace(0, sx - 1, tx)).astype(np.int64), 0, sx - 1)
+    iy = np.clip(np.round(np.linspace(0, sy - 1, ty)).astype(np.int64), 0, sy - 1)
+    iz = np.clip(np.round(np.linspace(0, sz - 1, tz)).astype(np.int64), 0, sz - 1)
+    return mask[np.ix_(ix, iy, iz)]
+
+
+def _align_mask_to_target(mask: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    if tuple(mask.shape) == tuple(target_shape):
+        return mask.astype(np.float32)
+
+    sx, sy, sz = mask.shape
+    tx, ty, tz = target_shape
+    fx = sx // tx if tx > 0 else 0
+    fy = sy // ty if ty > 0 else 0
+    fz = sz // tz if tz > 0 else 0
+
+    # Common LR/HR case: exact integer factors (e.g., 32->16 with factor=2).
+    # Use max-pooling on vessel mask to conservatively preserve vessel support.
+    if (
+        fx > 0
+        and fy > 0
+        and fz > 0
+        and sx == tx * fx
+        and sy == ty * fy
+        and sz == tz * fz
+    ):
+        pooled = mask.reshape(tx, fx, ty, fy, tz, fz).max(axis=(1, 3, 5))
+        return pooled.astype(np.float32)
+
+    return _nearest_resize_mask(mask, target_shape).astype(np.float32)
+
+
 class _StackNormalizeFieldsd(RandomizableTransform):
     def __init__(
         self,
@@ -717,42 +752,6 @@ class _AddNonvascularNoiseAugd(RandomizableTransform):
         eff_scale = float(scale) * max(float(self.range_multiplier), 0.0) * max(level, 0.0)
         return (z * eff_scale).astype(np.float32)
 
-    @staticmethod
-    def _nearest_resize_mask(mask: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
-        sx, sy, sz = mask.shape
-        tx, ty, tz = target_shape
-        ix = np.clip(np.round(np.linspace(0, sx - 1, tx)).astype(np.int64), 0, sx - 1)
-        iy = np.clip(np.round(np.linspace(0, sy - 1, ty)).astype(np.int64), 0, sy - 1)
-        iz = np.clip(np.round(np.linspace(0, sz - 1, tz)).astype(np.int64), 0, sz - 1)
-        return mask[np.ix_(ix, iy, iz)]
-
-    @classmethod
-    def _align_mask_to_target(cls, mask: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
-        if tuple(mask.shape) == tuple(target_shape):
-            return mask.astype(np.float32)
-
-        sx, sy, sz = mask.shape
-        tx, ty, tz = target_shape
-        fx = sx // tx if tx > 0 else 0
-        fy = sy // ty if ty > 0 else 0
-        fz = sz // tz if tz > 0 else 0
-
-        # Common LR/HR case: exact integer factors (e.g., 32->16 with factor=2).
-        # Use max-pooling on vessel mask to conservatively avoid adding noise near vessels.
-        if (
-            fx > 0
-            and fy > 0
-            and fz > 0
-            and sx == tx * fx
-            and sy == ty * fy
-            and sz == tz * fz
-        ):
-            pooled = mask.reshape(tx, fx, ty, fy, tz, fz).max(axis=(1, 3, 5))
-            return pooled.astype(np.float32)
-
-        # Fallback for non-integer mismatches.
-        return cls._nearest_resize_mask(mask, target_shape).astype(np.float32)
-
     def __call__(self, data):
         d = dict(data)
         # Compatibility across MONAI versions where randomize may require `data`.
@@ -771,7 +770,7 @@ class _AddNonvascularNoiseAugd(RandomizableTransform):
         if target_shape is None:
             return d
 
-        mask_lr = self._align_mask_to_target(mask, target_shape)
+        mask_lr = _align_mask_to_target(mask, target_shape)
         nonvascular = (mask_lr < 0.5).astype(np.float32)
         vascular = 1.0 - nonvascular
         noise_weight = nonvascular + self.masked_fraction * vascular
@@ -821,6 +820,31 @@ class _AddNonvascularNoiseAugd(RandomizableTransform):
             if self.clip_magnitude:
                 mag = np.clip(mag, 0.0, 1.0)
             d["lr_mag"] = mag.astype(np.float32)
+        return d
+
+
+class _ApplyMaskToLRInputd(RandomizableTransform):
+    def __init__(self, apply_to_magnitude: bool = True):
+        super().__init__(prob=1.0)
+        self.apply_to_magnitude = bool(apply_to_magnitude)
+
+    def __call__(self, data):
+        d = dict(data)
+        if "mask" not in d or d["mask"] is None:
+            return d
+        if "lr_vel" not in d or d["lr_vel"] is None:
+            return d
+
+        mask = np.asarray(d["mask"], dtype=np.float32)
+        target_shape = tuple(np.asarray(d["lr_vel"]).shape[1:4])
+        mask_lr = _align_mask_to_target(mask, target_shape)
+
+        vel = np.asarray(d["lr_vel"], dtype=np.float32)
+        d["lr_vel"] = (vel * mask_lr[None, ...]).astype(np.float32)
+
+        if self.apply_to_magnitude and "lr_mag" in d and d["lr_mag"] is not None:
+            mag = np.asarray(d["lr_mag"], dtype=np.float32)
+            d["lr_mag"] = (mag * mask_lr[None, ...]).astype(np.float32)
         return d
 
 
@@ -997,6 +1021,8 @@ class NiftiPatchDataset(Dataset):
         noise_aug_masked_fraction: float = 0.0,
         noise_aug_keep_original_prob: float = 0.0,
         noise_aug_zero_outside_prob: float = 0.0,
+        apply_mask_to_lr_inputs: bool = False,
+        apply_mask_to_lr_magnitude: bool = True,
     ):
         self.cases = list(cases)
         self.samples_per_volume = int(samples_per_volume)
@@ -1074,6 +1100,8 @@ class NiftiPatchDataset(Dataset):
                     zero_outside_prob=float(noise_aug_zero_outside_prob),
                 )
             )
+        if apply_mask_to_lr_inputs:
+            post_transforms.append(_ApplyMaskToLRInputd(apply_to_magnitude=apply_mask_to_lr_magnitude))
         self.post_transforms = Compose(post_transforms)
 
         case_inputs = [self._prepare_case_dict(case_idx) for case_idx in range(len(self.cases))]
@@ -1149,6 +1177,8 @@ class NiftiFullVolumeDataset(Dataset):
         raw_center: float = 2048.0,
         raw_scale: float = 2048.0,
         time_axis: int = -1,
+        apply_mask_to_lr_inputs: bool = False,
+        apply_mask_to_lr_magnitude: bool = True,
     ):
         self.cases = list(cases)
         self.include_hr_mag = bool(include_hr_mag)
@@ -1164,22 +1194,23 @@ class NiftiFullVolumeDataset(Dataset):
                 EnsureChannelFirstd(keys=load_keys, channel_dim="no_channel", allow_missing_keys=True),
             ]
         )
-        self.post_transforms = Compose(
-            [
-                _StackNormalizeFieldsd(
-                    mag_scale=mag_scale,
-                    mag_norm_mode=mag_norm_mode,
-                    mask_threshold=mask_threshold,
-                    include_hr_mag=self.include_hr_mag,
-                    raw_phase_input=raw_phase_input,
-                    invert_uv_sign_on_raw=invert_uv_sign_on_raw,
-                    raw_center=raw_center,
-                    raw_scale=raw_scale,
-                    random_time_frame=bool(random_time_frame),
-                    time_axis=time_axis,
-                )
-            ]
-        )
+        post_transforms = [
+            _StackNormalizeFieldsd(
+                mag_scale=mag_scale,
+                mag_norm_mode=mag_norm_mode,
+                mask_threshold=mask_threshold,
+                include_hr_mag=self.include_hr_mag,
+                raw_phase_input=raw_phase_input,
+                invert_uv_sign_on_raw=invert_uv_sign_on_raw,
+                raw_center=raw_center,
+                raw_scale=raw_scale,
+                random_time_frame=bool(random_time_frame),
+                time_axis=time_axis,
+            )
+        ]
+        if apply_mask_to_lr_inputs:
+            post_transforms.append(_ApplyMaskToLRInputd(apply_to_magnitude=apply_mask_to_lr_magnitude))
+        self.post_transforms = Compose(post_transforms)
 
         case_inputs = [self._prepare_case_dict(case_idx) for case_idx in range(len(self.cases))]
         if self.cache_dataset:
@@ -1281,6 +1312,8 @@ def create_nifti_patch_dataloader(
     noise_aug_masked_fraction: float = 0.0,
     noise_aug_keep_original_prob: float = 0.0,
     noise_aug_zero_outside_prob: float = 0.0,
+    apply_mask_to_lr_inputs: bool = False,
+    apply_mask_to_lr_magnitude: bool = True,
     seed: Optional[int] = None,
 ):
     cases = load_nifti_case_table(csv_path, include_hr_mag=include_hr_mag)
@@ -1327,6 +1360,8 @@ def create_nifti_patch_dataloader(
         noise_aug_masked_fraction=noise_aug_masked_fraction,
         noise_aug_keep_original_prob=noise_aug_keep_original_prob,
         noise_aug_zero_outside_prob=noise_aug_zero_outside_prob,
+        apply_mask_to_lr_inputs=apply_mask_to_lr_inputs,
+        apply_mask_to_lr_magnitude=apply_mask_to_lr_magnitude,
     )
     print(f"NIfTI dataset {csv_path}: {len(cases)} volume(s), {len(dataset)} patch samples")
     generator = None
@@ -1372,6 +1407,8 @@ def create_nifti_full_volume_dataloader(
     raw_center: float = 2048.0,
     raw_scale: float = 2048.0,
     time_axis: int = -1,
+    apply_mask_to_lr_inputs: bool = False,
+    apply_mask_to_lr_magnitude: bool = True,
     seed: Optional[int] = None,
 ):
     cases = load_nifti_case_table(csv_path, include_hr_mag=include_hr_mag)
@@ -1389,6 +1426,8 @@ def create_nifti_full_volume_dataloader(
         raw_center=raw_center,
         raw_scale=raw_scale,
         time_axis=time_axis,
+        apply_mask_to_lr_inputs=apply_mask_to_lr_inputs,
+        apply_mask_to_lr_magnitude=apply_mask_to_lr_magnitude,
     )
     print(f"NIfTI full-volume dataset {csv_path}: {len(cases)} volume(s)")
     generator = None

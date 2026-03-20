@@ -49,6 +49,17 @@ def main():
     )
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold.")
     parser.add_argument(
+        "--apply-mask-to-lr-inputs",
+        action="store_true",
+        help="Multiply LR velocity inputs by the aligned vessel mask before training/validation.",
+    )
+    parser.add_argument(
+        "--apply-mask-to-lr-magnitude",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When --apply-mask-to-lr-inputs is enabled, also mask LR magnitude channels.",
+    )
+    parser.add_argument(
         "--predict-mag",
         action="store_true",
         help="Enable 4th output channel to predict HR magnitude (requires `hr_mag` in CSV).",
@@ -452,6 +463,8 @@ def main():
         noise_aug_masked_fraction=args.noise_aug_masked_fraction,
         noise_aug_keep_original_prob=args.noise_aug_keep_original_prob,
         noise_aug_zero_outside_prob=args.noise_aug_zero_outside_prob,
+        apply_mask_to_lr_inputs=args.apply_mask_to_lr_inputs,
+        apply_mask_to_lr_magnitude=args.apply_mask_to_lr_magnitude,
         seed=args.seed,
     )
     if args.val_full_volume:
@@ -474,6 +487,8 @@ def main():
             raw_center=args.raw_center,
             raw_scale=args.raw_scale,
             time_axis=args.time_axis,
+            apply_mask_to_lr_inputs=args.apply_mask_to_lr_inputs,
+            apply_mask_to_lr_magnitude=args.apply_mask_to_lr_magnitude,
             seed=args.seed,
         )
     else:
@@ -504,6 +519,8 @@ def main():
             max_sampling_attempts=args.legacy_max_sampling_attempts,
             allow_empty_fallback=True,
             noise_aug_prob=0.0,
+            apply_mask_to_lr_inputs=args.apply_mask_to_lr_inputs,
+            apply_mask_to_lr_magnitude=args.apply_mask_to_lr_magnitude,
             seed=args.seed,
         )
 

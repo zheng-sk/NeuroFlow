@@ -292,6 +292,8 @@ def _prepare_frame(
     mag_scale: float,
     mag_norm_mode: str,
     mask_threshold: float,
+    apply_mask_to_lr_inputs: bool,
+    apply_mask_to_lr_magnitude: bool,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     lr_u = volumes["lr_u"][frame_idx].astype(np.float32)
     lr_v = volumes["lr_v"][frame_idx].astype(np.float32)
@@ -359,6 +361,11 @@ def _prepare_frame(
     ).astype(np.float32)
     hr_mag_norm = normalize_magnitude_volume(hr_mag, mag_norm_mode, mag_scale)[None, ...]
 
+    if apply_mask_to_lr_inputs:
+        lr_vel_norm = (lr_vel_norm * mask_bin[None, ...]).astype(np.float32)
+        if apply_mask_to_lr_magnitude:
+            lr_mag_norm = (lr_mag_norm * mask_bin[None, ...]).astype(np.float32)
+
     lr_input_norm = np.concatenate([lr_vel_norm, lr_mag_norm], axis=0).astype(np.float32)
     gt_4ch_norm = np.concatenate([hr_vel_norm, hr_mag_norm], axis=0).astype(np.float32)
     return lr_input_norm, gt_4ch_norm, mask_bin, venc_scalar
@@ -380,6 +387,8 @@ def run_case_inference(
     mag_norm_mode: str,
     mask_threshold: float,
     time_axis: int,
+    apply_mask_to_lr_inputs: bool = False,
+    apply_mask_to_lr_magnitude: bool = True,
 ) -> Dict[str, Any]:
     volumes = _read_case_volumes(case=case, time_axis=time_axis)
 
@@ -401,6 +410,8 @@ def run_case_inference(
             mag_scale=mag_scale,
             mag_norm_mode=mag_norm_mode,
             mask_threshold=mask_threshold,
+            apply_mask_to_lr_inputs=apply_mask_to_lr_inputs,
+            apply_mask_to_lr_magnitude=apply_mask_to_lr_magnitude,
         )
 
         pred_norm = _predict_with_sliding_window(

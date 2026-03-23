@@ -121,6 +121,18 @@ def main() -> None:
         help="Magnitude normalization mode. monai_minmax applies MONAI ScaleIntensity to [0,1] per frame.",
     )
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold.")
+    parser.add_argument(
+        "--apply-mask-to-lr-inputs",
+        action="store_true",
+        help="Apply the CSV/reference mask to LR inputs before inference, matching masked-input training.",
+    )
+    parser.add_argument(
+        "--apply-mask-to-lr-magnitude",
+        dest="apply_mask_to_lr_magnitude",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When --apply-mask-to-lr-inputs is enabled, also mask LR magnitude channels.",
+    )
 
     args = parser.parse_args()
 
@@ -192,6 +204,8 @@ def main() -> None:
         mag_norm_mode=str(args.mag_norm_mode),
         mask_threshold=float(args.mask_threshold),
         time_axis=int(args.time_axis),
+        apply_mask_to_lr_inputs=bool(args.apply_mask_to_lr_inputs),
+        apply_mask_to_lr_magnitude=bool(args.apply_mask_to_lr_magnitude),
     )
 
     output_prefix = str((nifti_dir / args.output_prefix).resolve())
@@ -224,6 +238,8 @@ def main() -> None:
         "mag_scale": float(args.mag_scale),
         "mag_norm_mode": str(args.mag_norm_mode),
         "mask_threshold": float(args.mask_threshold),
+        "apply_mask_to_lr_inputs": bool(args.apply_mask_to_lr_inputs),
+        "apply_mask_to_lr_magnitude": bool(args.apply_mask_to_lr_magnitude),
         "patch_size": int(args.patch_size),
         "sw_batch_size": int(args.sw_batch_size),
         "overlap": float(args.overlap),

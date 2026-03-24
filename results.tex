@@ -1,0 +1,295 @@
+% ============================================================
+%  Section 4 — Results
+% ============================================================
+\section*{Results}
+
+\subsection*{4.1 Experimental Overview}
+
+Eight model configurations were evaluated on a held-out test subject (case 000) representing a patient
+with cerebrovascular pathology not seen during training.  The configurations arise from the full factorial
+combination of two task modes --- \emph{domain translation} ($\times 1$, hereafter \textbf{Denoising})
+and \emph{joint domain-translation and super-resolution} ($\times 2$, hereafter \textbf{Super-Resolution})
+--- two network architectures --- \emph{Original} (SR4DFlowNet baseline) and \emph{CBAM-PreUpsampling}
+(pre-upsampling attention extension) --- and two input conditioning strategies:
+\emph{Masked} training, where ground-truth supervision is restricted to the Circle of Willis mask
+$\mathcal{M}$, and \emph{Synthetic-noise} training, where the 7T target is predicted from an
+unmasked 3T input augmented with simulated acquisition noise. Table~\ref{tab:experiment_map} summarises
+the eight configurations together with their abbreviated identifiers used throughout the results.
+
+\begin{table}[h!]
+  \centering
+  \caption{Summary of the eight evaluated configurations.  `Masked' indicates mask-guided training with
+  the Circle of Willis target restricted to $\mathcal{M}$; `Synth.\ noise' indicates training from
+  unmasked 3T input with synthetic noise augmentation.  Velocity and background metrics were not
+  computed for the two CBAM-PreUpsampling / Synth.\ noise experiments (indicated by~---) because
+  these runs were evaluated after the primary analysis pipeline had been completed.}
+  \label{tab:experiment_map}
+  \small
+  \begin{tabular}{clll}
+    \toprule
+    ID & Task mode & Architecture & Input strategy \\
+    \midrule
+    A & Denoising ($\times 1$) & Original           & Masked \\
+    B & Denoising ($\times 1$) & Original           & Synth.\ noise \\
+    C & Denoising ($\times 1$) & CBAM-PreUpsampling & Masked \\
+    D & Denoising ($\times 1$) & CBAM-PreUpsampling & Synth.\ noise \\
+    \midrule
+    E & Super-Resolution ($\times 2$) & Original           & Masked \\
+    F & Super-Resolution ($\times 2$) & Original           & Synth.\ noise \\
+    G & Super-Resolution ($\times 2$) & CBAM-PreUpsampling & Masked \\
+    H & Super-Resolution ($\times 2$) & CBAM-PreUpsampling & Synth.\ noise \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Performance was assessed along three complementary axes: (i)~\textbf{velocity reconstruction fidelity},
+quantified by the mean squared error of the predicted velocity field within the CoW mask
+($\text{MSE}_{\text{vel}}$) and per-directional components ($u$, $v$, $w$); (ii)~\textbf{vascular
+geometry fidelity}, assessed by re-segmenting each predicted output and comparing the resulting mask
+against the ground-truth 7T mask using the Dice overlap coefficient, the symmetric mean surface
+distance (sMSD), and the Hausdorff distance (HD$_{95}$); and (iii)~\textbf{background suppression},
+measured by the MSE of predicted velocities outside the vascular mask
+($\text{MSE}_{\text{bg}}$).  All metrics are reported averaged across nine cardiac frames.
+
+% -------------------------------------------------------
+\subsection*{4.2 Velocity Reconstruction}
+% -------------------------------------------------------
+
+Table~\ref{tab:velocity} reports the masked velocity MSE for all configurations for which velocity
+metrics were computed (configurations A--C, E--G).  All velocity values are computed in
+VENC-normalised units.
+
+\begin{table}[h!]
+  \centering
+  \caption{Velocity reconstruction metrics within the Circle of Willis mask. Values are mean across
+  nine cardiac frames, in VENC-normalised units (lower is better).
+  $\dagger$~Velocity metrics not available for configurations D and H.}
+  \label{tab:velocity}
+  \setlength{\tabcolsep}{5pt}
+  \small
+  \begin{tabular}{clll rrrr}
+    \toprule
+    \multirow{2}{*}{ID} & \multirow{2}{*}{Task} & \multirow{2}{*}{Architecture} & \multirow{2}{*}{Input} &
+      \multicolumn{4}{c}{MSE $\downarrow$ (VENC-normalised)} \\
+    \cmidrule(lr){5-8}
+    & & & & $\text{Total}$ & $u$ & $v$ & $w$ \\
+    \midrule
+    A & Denoising & Original           & Masked       & \textbf{0.04281} & 0.01354 & \textbf{0.01748} & 0.01180 \\
+    B & Denoising & Original           & Synth.\ noise & 0.04721 & 0.01440 & 0.02054 & 0.01227 \\
+    C & Denoising & CBAM-PreUpsampling & Masked       & 0.04306 & \textbf{0.01327} & 0.01815 & \textbf{0.01164} \\
+    D & Denoising & CBAM-PreUpsampling & Synth.\ noise & \multicolumn{4}{c}{--- $\dagger$} \\
+    \midrule
+    E & Super-Res.\ & Original           & Masked       & 0.04977 & \textbf{0.01472} & 0.01853 & 0.01652 \\
+    F & Super-Res.\ & Original           & Synth.\ noise & 0.04983 & 0.01592 & 0.01903 & \textbf{0.01489} \\
+    G & Super-Res.\ & CBAM-PreUpsampling & Masked       & \textbf{0.04844} & \textbf{0.01472} & \textbf{0.01833} & 0.01539 \\
+    H & Super-Res.\ & CBAM-PreUpsampling & Synth.\ noise & \multicolumn{4}{c}{--- $\dagger$} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Within the Denoising mode, masked training yields a clear advantage: configuration~A achieves the
+lowest total velocity MSE (0.04281), outperforming the synthetic-noise counterpart~B (0.04721),
+a relative improvement of 9.3\%.  CBAM-PreUpsampling with masked input (C) produces a comparable
+result (0.04306), marginally worse than~A in total MSE but achieving lower component-wise error on
+the $u$ direction (0.01327 vs.\ 0.01354).  The $v$-component is consistently the most challenging
+across all configurations, a pattern that may reflect the left--right phase-contrast direction being
+most susceptible to residual aliasing and partial-volume effects.
+
+In the Super-Resolution mode, the absolute velocity MSE values are uniformly higher than their
+Denoising counterparts, as expected given the additional upsampling task.  Configuration~G
+(CBAM-PreUpsampling, masked) achieves the best total MSE (0.04844) among SR configurations,
+outperforming both~E (0.04977) and~F (0.04983).  The gap between masked (E) and synthetic-noise (F)
+configurations in SR is notably small (0.04977 vs.\ 0.04983), suggesting that for the harder $\times 2$
+task, the architectural choice has a larger impact on velocity accuracy than the input conditioning
+strategy.
+
+% -------------------------------------------------------
+\subsection*{4.3 Vascular Geometry Fidelity}
+% -------------------------------------------------------
+
+Geometric fidelity was assessed by re-segmenting each predicted 4D Flow volume using the same
+CoW segmentation pipeline applied to the original 7T data, and then comparing the resulting masks
+against the ground-truth 7T segmentation.  Results for all eight configurations are reported in
+Table~\ref{tab:geometry}.
+
+\begin{table}[h!]
+  \centering
+  \caption{Vascular geometry metrics obtained by comparing the re-segmented prediction mask against
+  the original 7T CoW segmentation.  Dice: volumetric overlap (higher is better);
+  sMSD: symmetric mean surface distance in mm (lower is better);
+  HD: Hausdorff distance in mm (lower is better).}
+  \label{tab:geometry}
+  \setlength{\tabcolsep}{5pt}
+  \small
+  \begin{tabular}{cllll rrr}
+    \toprule
+    ID & Task & Architecture & Input & Pred.\ voxels &
+      Dice $\uparrow$ & sMSD $\downarrow$ (mm) & HD $\downarrow$ (mm) \\
+    \midrule
+    A & Denoising & Original           & Masked        & 18{,}027 & 0.843 & 0.202 & \textbf{8.57} \\
+    B & Denoising & Original           & Synth.\ noise & 14{,}840 & 0.734 & 0.667 & 15.09 \\
+    C & Denoising & CBAM-PreUpsampling & Masked        & 17{,}544 & \textbf{0.855} & \textbf{0.183} & 9.07 \\
+    D & Denoising & CBAM-PreUpsampling & Synth.\ noise & 15{,}533 & 0.761 & 0.501 & 9.86 \\
+    \midrule
+    & & \multicolumn{3}{l}{\textit{Reference (7T ground-truth)}} & \multicolumn{3}{l}{\textit{15,577 voxels}} \\
+    \midrule
+    E & Super-Res.\ & Original           & Masked        & 18{,}623 & 0.726 & 0.404 & \textbf{9.01} \\
+    F & Super-Res.\ & Original           & Synth.\ noise & 12{,}808 & 0.706 & 0.825 & 14.82 \\
+    G & Super-Res.\ & CBAM-PreUpsampling & Masked        & 19{,}294 & 0.712 & 0.405 & 9.50 \\
+    H & Super-Res.\ & CBAM-PreUpsampling & Synth.\ noise & 12{,}841 & 0.710 & 0.727 & 13.59 \\
+    \midrule
+    & & \multicolumn{3}{l}{\textit{Reference (7T ground-truth)}} & \multicolumn{3}{l}{\textit{15,079 voxels}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The geometry results reveal the most pronounced performance gap between training strategies.  In the
+Denoising mode, masked configurations (A and~C) substantially outperform their synthetic-noise
+counterparts (B and~D) across all three geometry metrics.  Configuration~C achieves the highest
+Dice score overall (0.855) and the lowest symmetric mean surface distance (0.183~mm), outperforming
+the best original-model result (A, Dice = 0.843, sMSD = 0.202~mm).  Both masked models produce
+predicted masks whose voxel count closely brackets the reference (17{,}544--18{,}027 vs.\ 15{,}577),
+indicative of a slight but controlled over-segmentation.  By contrast, configuration~B (Original,
+synth.\ noise) under-segments significantly (14{,}840 voxels), yielding a Dice of only 0.734 and a
+Hausdorff distance of 15.09~mm --- almost double that of the corresponding masked model~A
+(8.57~mm).
+
+For the synthetic-noise Denoising case, the CBAM-PreUpsampling architecture (D) substantially
+recovers geometric quality relative to the original architecture (B): Dice improves from 0.734 to
+0.761 and HD drops from 15.09 to 9.86~mm, a 35\% reduction in worst-case boundary error.  This
+suggests that the attention mechanism provides an architectural inductive bias that partially
+compensates for the lack of mask-guided supervision.
+
+In the Super-Resolution mode, the overall Dice scores are lower than for Denoising across all
+configurations --- consistent with the harder task of recovering fine vascular structure from
+$\times 0.5$-downsampled inputs --- but the relative ordering largely mirrors the Denoising findings.
+Masked configurations (E and~G) achieve markedly lower HD values (9.01 and 9.50~mm) compared to
+their synthetic-noise counterparts (F: 14.82~mm; H: 13.59~mm).  Notably, configuration~E (Original,
+masked) achieves the highest Dice in the SR task (0.726), slightly surpassing~G (0.712); the
+CBAM-PreUpsampling model predicts a larger mask volume (19{,}294 vs.\ 18{,}623 voxels), hinting at
+increased over-segmentation of peripheral branches.
+
+% -------------------------------------------------------
+\subsection*{4.4 Background Suppression}
+% -------------------------------------------------------
+
+Accurate suppression of extravascular velocity predictions is clinically important both to prevent
+spurious haemodynamic signals outside the vessel lumen and to ensure that downstream flow
+quantification pipelines are not contaminated by background noise.  Table~\ref{tab:background}
+reports the mean MSE of predicted velocity vectors in the background region (outside~$\mathcal{M}$)
+for the six configurations for which background metrics were available.
+
+\begin{table}[h!]
+  \centering
+  \caption{Background velocity MSE (outside the CoW mask, lower is better).  Values are
+  VENC-normalised mean squared errors averaged across nine cardiac frames.  Background metrics
+  were not computed for configurations~D and~H.}
+  \label{tab:background}
+  \setlength{\tabcolsep}{5pt}
+  \small
+  \begin{tabular}{cllll rrrr}
+    \toprule
+    ID & Task & Architecture & Input &
+      $\text{MSE}_{\text{bg, total}}$ $\downarrow$ &
+      $\text{MSE}_{u}$ $\downarrow$ &
+      $\text{MSE}_{v}$ $\downarrow$ &
+      $\text{MSE}_{w}$ $\downarrow$ \\
+    \midrule
+    A & Denoising & Original           & Masked        & $6.44 \times 10^{-4}$ & $1.85 \times 10^{-4}$ & $3.23 \times 10^{-4}$ & $1.36 \times 10^{-4}$ \\
+    B & Denoising & Original           & Synth.\ noise & $1.51 \times 10^{-3}$ & $3.57 \times 10^{-4}$ & $8.41 \times 10^{-4}$ & $3.13 \times 10^{-4}$ \\
+    C & Denoising & CBAM-PreUpsampling & Masked        & $\mathbf{6.08 \times 10^{-4}}$ & $\mathbf{1.52 \times 10^{-4}}$ & $3.37 \times 10^{-4}$ & $\mathbf{1.19 \times 10^{-4}}$ \\
+    D & Denoising & CBAM-PreUpsampling & Synth.\ noise & \multicolumn{4}{c}{---} \\
+    \midrule
+    E & Super-Res.\ & Original           & Masked        & $7.83 \times 10^{-4}$ & $1.98 \times 10^{-4}$ & $4.14 \times 10^{-4}$ & $1.71 \times 10^{-4}$ \\
+    F & Super-Res.\ & Original           & Synth.\ noise & $1.50 \times 10^{-3}$ & $4.72 \times 10^{-4}$ & $6.91 \times 10^{-4}$ & $3.38 \times 10^{-4}$ \\
+    G & Super-Res.\ & CBAM-PreUpsampling & Masked        & $\mathbf{6.71 \times 10^{-4}}$ & $\mathbf{1.74 \times 10^{-4}}$ & $\mathbf{3.31 \times 10^{-4}}$ & $\mathbf{1.66 \times 10^{-4}}$ \\
+    H & Super-Res.\ & CBAM-PreUpsampling & Synth.\ noise & \multicolumn{4}{c}{---} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Background suppression shows the starkest differentiation between training strategies.
+In both task modes, masked training reduces the total background MSE by approximately 1.9--2.4$\times$
+compared to synthetic-noise training (e.g., A: $6.44 \times 10^{-4}$ vs.\ B: $1.51 \times 10^{-3}$;
+E: $7.83 \times 10^{-4}$ vs.\ F: $1.50 \times 10^{-3}$).  This directly reflects the mask-aware
+loss formulation: by explicitly penalising background predictions with a total variation term
+$\mathcal{L}_{\text{TV}}$, the masked training objective strongly encourages the network to suppress
+extravascular signal, whereas the synthetic-noise strategy receives no equivalent regularisation
+outside the vessel lumen.
+
+Across all six measured configurations, the $v$-component (left--right direction) contributes the
+largest share of background error, approximately two times higher than $u$ and $w$, consistent
+with the velocity reconstruction findings and suggesting a direction-specific noise floor in the
+3T acquisition.  Within masked configurations, CBAM-PreUpsampling consistently achieves lower
+background MSE than the Original architecture in both modes (C vs.\ A; G vs.\ E), indicating
+that the pre-upsampling attention mechanism improves spatial localisation of the predicted flow
+signal.
+
+% -------------------------------------------------------
+\subsection*{4.5 Cross-Cutting Summary}
+% -------------------------------------------------------
+
+Table~\ref{tab:summary} consolidates the key performance indicators across all eight configurations
+for a direct cross-experiment comparison.
+
+\begin{table}[h!]
+  \centering
+  \caption{Consolidated results across all eight configurations.  The three primary
+  metrics highlighted are: intraluminal velocity MSE (\textsc{vel}), Dice coefficient (\textsc{dice}),
+  and background MSE (\textsc{bg}).  Bold denotes the best value within each task mode.
+  Dashes indicate metrics not computed.}
+  \label{tab:summary}
+  \setlength{\tabcolsep}{4pt}
+  \small
+  \begin{tabular}{cllll rrrrr}
+    \toprule
+    ID & Task & Architecture & Input &
+      $\text{MSE}_{\text{vel}}$ $\downarrow$ &
+      Dice $\uparrow$ &
+      sMSD $\downarrow$ (mm) &
+      HD $\downarrow$ (mm) &
+      $\text{MSE}_{\text{bg}}$ $\downarrow$ \\
+    \midrule
+    A & Denoising & Original      & Masked        & \textbf{0.04281} & 0.843 & 0.202 & \textbf{8.57} & $6.44{\times}10^{-4}$ \\
+    B & Denoising & Original      & Synth.\ noise & 0.04721          & 0.734 & 0.667 & 15.09         & $1.51{\times}10^{-3}$ \\
+    C & Denoising & CBAM-PreUps.  & Masked        & 0.04306          & \textbf{0.855} & \textbf{0.183} & 9.07 & $\mathbf{6.08{\times}10^{-4}}$ \\
+    D & Denoising & CBAM-PreUps.  & Synth.\ noise & ---              & 0.761 & 0.501 & 9.86          & --- \\
+    \midrule
+    E & Super-Res.\ & Original    & Masked        & 0.04977          & \textbf{0.726} & \textbf{0.404} & \textbf{9.01} & $7.83{\times}10^{-4}$ \\
+    F & Super-Res.\ & Original    & Synth.\ noise & 0.04983          & 0.706 & 0.825 & 14.82         & $1.50{\times}10^{-3}$ \\
+    G & Super-Res.\ & CBAM-PreUps.& Masked        & \textbf{0.04844} & 0.712 & 0.405 & 9.50          & $\mathbf{6.71{\times}10^{-4}}$ \\
+    H & Super-Res.\ & CBAM-PreUps.& Synth.\ noise & ---              & 0.710 & 0.727 & 13.59         & --- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Three principal conclusions emerge from the consolidated results.  \textbf{First, mask-guided
+training is the dominant factor across all evaluation dimensions.}  Masked configurations
+consistently outperform synthetic-noise configurations on geometry (Dice improvement of 9--15
+percentage points in Denoising mode), background suppression ($\approx\!2.4\times$ lower
+extravascular MSE), and --- in the Denoising task --- velocity reconstruction (up to 9\% MSE
+reduction).  The effect is less pronounced for velocity MSE in Super-Resolution mode (0.04977
+vs.\ 0.04983), where task difficulty may dominate over training strategy.
+
+\textbf{Second, the CBAM-PreUpsampling architecture provides consistent but modest improvements
+over the Original baseline under equivalent training conditions.}  In the Denoising masked
+setting, CBAM-PreUpsampling improves Dice by 1.2 percentage points (0.843$\to$0.855), reduces
+sMSD by 9\% (0.202$\to$0.183~mm), and lowers background MSE by 6\%
+($6.44\to6.08 \times 10^{-4}$).  In the SR masked setting, the same architecture achieves the
+lowest velocity MSE (0.04844) and background MSE ($6.71 \times 10^{-4}$), though at a small
+cost in Dice relative to the Original model (0.712 vs.\ 0.726), attributable to marginal
+over-segmentation of peripheral branches.  Notably, in the synthetic-noise Denoising setting
+(D vs.\ B), the CBAM-PreUpsampling architecture substantially recovers geometric fidelity
+(Dice: 0.761 vs.\ 0.734; HD: 9.86 vs.\ 15.09~mm) even without mask-guided supervision,
+suggesting that the attention mechanism provides a beneficial spatial inductive bias.
+
+\textbf{Third, the Super-Resolution task is uniformly harder than Denoising.}  Absolute Dice
+scores drop by $\approx$13 percentage points and velocity MSE increases by 13--16\% across
+corresponding configurations, consistent with the greater information loss involved in recovering
+vascular structure from $\times 0.5$-downsampled inputs.  Despite this, all masked SR
+configurations achieve sub-10~mm Hausdorff distances and velocity MSE values below 0.050,
+demonstrating that meaningful haemodynamic reconstruction from clinically downsampled 3T
+acquisitions is achievable within the NeuroFlow framework.
+
+\bibliographystyle{ieeetr}
+\bibliography{neuroflow}

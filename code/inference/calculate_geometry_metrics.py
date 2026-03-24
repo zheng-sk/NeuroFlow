@@ -18,8 +18,8 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Compute geometry metrics between a predicted CoW segmentation and the "
-            "reference 7T mask. If needed, the reference mask is resampled onto the "
-            "predicted-mask grid with nearest-neighbour interpolation."
+            "reference 7T mask. If needed, masks are aligned by front-cropping, "
+            "following the same convention used in other repo metrics."
         )
     )
     p.add_argument("--pred-mask", required=True, help="Path to predicted CoW mask, e.g. cow_seg_final.nii.gz")
@@ -91,30 +91,35 @@ def _load_mask_image(path: Path) -> nib.Nifti1Image:
     return img
 
 
-def _resample_ref_to_pred(
+def _align_masks_by_front_crop(
+    pred: np.ndarray,
+    ref: np.ndarray,
     pred_img: nib.Nifti1Image,
     ref_img: nib.Nifti1Image,
-) -> tuple[nib.Nifti1Image, dict[str, Any]]:
-    pred_shape = tuple(int(v) for v in pred_img.shape[:3])
-    ref_shape = tuple(int(v) for v in ref_img.shape[:3])
-    same_shape = pred_shape == ref_shape
-    same_affine = np.allclose(pred_img.affine, ref_img.affine, atol=1e-4)
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    pred_xyz = tuple(int(v) for v in pred.shape[:3])
+    ref_xyz = tuple(int(v) for v in ref.shape[:3])
+    target_xyz = (
+        min(pred_xyz[0], ref_xyz[0]),
+        min(pred_xyz[1], ref_xyz[1]),
+        min(pred_xyz[2], ref_xyz[2]),
+    )
+    if min(target_xyz) <= 0:
+        raise ValueError(f"Invalid shapes for front-crop alignment: pred={pred_xyz}, ref={ref_xyz}")
 
-    resampled = False
-    aligned_ref = ref_img
-    if not (same_shape and same_affine):
-        aligned_ref = nibproc.resample_from_to(ref_img, (pred_img.shape[:3], pred_img.affine), order=0)
-        resampled = True
+    pred_aligned = pred[: target_xyz[0], : target_xyz[1], : target_xyz[2]]
+    ref_aligned = ref[: target_xyz[0], : target_xyz[1], : target_xyz[2]]
 
     info = {
-        "pred_xyz_original": list(pred_shape),
-        "ref_xyz_original": list(ref_shape),
-        "aligned_xyz": [int(v) for v in aligned_ref.shape[:3]],
-        "ref_resampled_to_pred_grid": bool(resampled),
-        "pred_spacing_mm": [float(v) for v in pred_img.header.get_zooms()[:3]],
-        "ref_spacing_mm_original": [float(v) for v in ref_img.header.get_zooms()[:3]],
+        "pred_xyz_original": list(pred_xyz),
+        "ref_xyz_original": list(ref_xyz),
+        "aligned_xyz": list(target_xyz),
+        "front_cropped": bool(pred_xyz != target_xyz or ref_xyz != target_xyz),
+        "same_affine_within_tol": bool(np.allclose(pred_img.affine, ref_img.affine, atol=1e-4)),
+        "pred_spacing_mm_original": [float(v) for v in pred_img.header.get_zooms()[:3]],
+        "ref_spacing_mm": [float(v) for v in ref_img.header.get_zooms()[:3]],
     }
-    return aligned_ref, info
+    return pred_aligned, ref_aligned, info
 
 
 def _dice_score(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
@@ -193,18 +198,15 @@ def main() -> None:
 
     pred_img = _load_mask_image(pred_mask_path)
     ref_img = _load_mask_image(ref_mask_path)
-    ref_img_aligned, align_info = _resample_ref_to_pred(pred_img, ref_img)
 
-    pred = (np.asarray(pred_img.dataobj, dtype=np.float32) >= float(args.mask_threshold)).astype(np.uint8)
-    ref = (np.asarray(ref_img_aligned.dataobj, dtype=np.float32) >= float(args.mask_threshold)).astype(np.uint8)
-
-    if pred.shape != ref.shape:
-        raise ValueError(f"Shape mismatch after reference alignment: pred={pred.shape} vs ref={ref.shape}")
+    pred_raw = (np.asarray(pred_img.dataobj, dtype=np.float32) >= float(args.mask_threshold)).astype(np.uint8)
+    ref_raw = (np.asarray(ref_img.dataobj, dtype=np.float32) >= float(args.mask_threshold)).astype(np.uint8)
+    pred, ref, align_info = _align_masks_by_front_crop(pred_raw, ref_raw, pred_img, ref_img)
 
     pred_voxels = int(pred.sum())
     ref_voxels = int(ref.sum())
     intersection_voxels = int(np.logical_and(pred > 0, ref > 0).sum())
-    spacing_mm = tuple(float(v) for v in pred_img.header.get_zooms()[:3])
+    spacing_mm = tuple(float(v) for v in ref_img.header.get_zooms()[:3])
 
     dice = _dice_score(pred, ref)
     surface = _surface_distance_metrics(pred, ref, spacing_mm)
@@ -238,7 +240,7 @@ def main() -> None:
         "hausdorff_distance_mm": _summary_stats_single(float(surface["hausdorff_distance_mm"])),
         "range_note": (
             "Geometry metrics are computed between the re-segmented prediction mask and the original 7T mask. "
-            "If needed, the 7T mask is resampled onto the prediction-segmentation grid with nearest-neighbour interpolation."
+            "If needed, masks are aligned by front-cropping to the common spatial extent."
         ),
     }
 

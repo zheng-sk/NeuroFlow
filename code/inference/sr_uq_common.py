@@ -117,6 +117,39 @@ def normalize_magnitude_volume(arr: np.ndarray, mode: str, mag_scale: float) -> 
     raise ValueError(f"Unsupported mag_norm_mode={mode!r}. Use 'monai_minmax' or 'divisor'.")
 
 
+def _nearest_resize_mask(mask: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    sx, sy, sz = mask.shape
+    tx, ty, tz = target_shape
+    ix = np.clip(np.round(np.linspace(0, sx - 1, tx)).astype(np.int64), 0, sx - 1)
+    iy = np.clip(np.round(np.linspace(0, sy - 1, ty)).astype(np.int64), 0, sy - 1)
+    iz = np.clip(np.round(np.linspace(0, sz - 1, tz)).astype(np.int64), 0, sz - 1)
+    return mask[np.ix_(ix, iy, iz)]
+
+
+def _align_mask_to_target(mask: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    if tuple(mask.shape) == tuple(target_shape):
+        return mask.astype(np.float32)
+
+    sx, sy, sz = mask.shape
+    tx, ty, tz = target_shape
+    fx = sx // tx if tx > 0 else 0
+    fy = sy // ty if ty > 0 else 0
+    fz = sz // tz if tz > 0 else 0
+
+    if (
+        fx > 0
+        and fy > 0
+        and fz > 0
+        and sx == tx * fx
+        and sy == ty * fy
+        and sz == tz * fz
+    ):
+        pooled = mask.reshape(tx, fx, ty, fy, tz, fz).max(axis=(1, 3, 5))
+        return pooled.astype(np.float32)
+
+    return _nearest_resize_mask(mask, target_shape).astype(np.float32)
+
+
 def choose_frame_indices(case: Dict[str, Any], t_count: int, explicit_indices: Optional[List[int]] = None) -> List[int]:
     if explicit_indices:
         out: List[int] = []
@@ -362,9 +395,10 @@ def _prepare_frame(
     hr_mag_norm = normalize_magnitude_volume(hr_mag, mag_norm_mode, mag_scale)[None, ...]
 
     if apply_mask_to_lr_inputs:
-        lr_vel_norm = (lr_vel_norm * mask_bin[None, ...]).astype(np.float32)
+        mask_lr = _align_mask_to_target(mask_bin, tuple(int(v) for v in lr_vel_norm.shape[1:4]))
+        lr_vel_norm = (lr_vel_norm * mask_lr[None, ...]).astype(np.float32)
         if apply_mask_to_lr_magnitude:
-            lr_mag_norm = (lr_mag_norm * mask_bin[None, ...]).astype(np.float32)
+            lr_mag_norm = (lr_mag_norm * mask_lr[None, ...]).astype(np.float32)
 
     lr_input_norm = np.concatenate([lr_vel_norm, lr_mag_norm], axis=0).astype(np.float32)
     gt_4ch_norm = np.concatenate([hr_vel_norm, hr_mag_norm], axis=0).astype(np.float32)

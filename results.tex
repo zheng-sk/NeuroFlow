@@ -13,10 +13,17 @@ the network translates clinical 3T acquisitions into the contrast and noise char
 \textbf{SR}), the network simultaneously denoises and upsamples by a factor of two, reconstructing
 7T-equivalent volumes from $\times 0.5$-downsampled 3T inputs.  The two architectures are the
 \textbf{Original} SR4DFlowNet baseline and the \textbf{CBAM-PreUpsampling} extension, which
-inserts a convolutional block attention module before the final upsampling stage.  The two input
-strategies are \textbf{Masked} training, in which ground-truth supervision is restricted to the
-Circle of Willis mask $\mathcal{M}$, and \textbf{Synthetic-noise} training, in which an unmasked
-3T input augmented with simulated acquisition noise is used.
+inserts a convolutional block attention module before the final upsampling stage.  Both strategies share the same composite loss function
+$\mathcal{L} = \mathcal{L}_\text{vel} + \lambda_M\mathcal{L}_\text{mag} +
+\lambda_\text{TV}\mathcal{L}_\text{TV}$; they differ exclusively in what is fed to the network.
+In the \textbf{Masked} strategy, the 3T input volume is element-wise multiplied by the binary
+CoW mask $\mathcal{M}$ before being passed to the network, so all background voxels are zeroed
+in the input.  In the \textbf{Synthetic-noise} strategy, the full, unmasked 3T volume is used
+directly, augmented with simulated acquisition noise to increase training variability.  The
+masked strategy therefore provides the network with an implicit spatial prior --- the input
+itself encodes where vessels are --- at the cost of requiring a pre-computed CoW segmentation at
+inference time.  The synthetic-noise strategy makes no such assumption and is applicable to any
+raw 3T acquisition without preprocessing.
 
 Table~\ref{tab:experiment_map} maps each identifier to its configuration.  All geometry metrics
 are computed against a common 7T reference segmentation of 15{,}577 voxels at 0.5\,mm isotropic
@@ -222,13 +229,17 @@ configurations.
   \end{tabular}
 \end{table}
 
-Background suppression is almost entirely determined by the training strategy.  Masked
+Background suppression is almost entirely determined by the input conditioning strategy.  Masked
 configurations reduce extravascular MSE by approximately 2.0--2.7$\times$ relative to their
 synthetic-noise counterparts: A vs.\ B ($\times 2.35$), C vs.\ D ($\times 2.65$), E vs.\ F
-($\times 1.92$), and G vs.\ H ($\times 2.12$).  This reflects the explicit mask-aware loss
-formulation, which penalises background predictions through the total variation term
-$\mathcal{L}_\text{TV}$; the synthetic-noise strategy provides no equivalent regularisation
-outside $\mathcal{M}$.
+($\times 1.92$), and G vs.\ H ($\times 2.12$).  Because both strategies share the same loss,
+this gap cannot be attributed to differences in the loss function.  Rather, it reflects the
+direct consequence of input conditioning: when the background is zeroed in the input, the
+network has no signal to propagate through those voxels during training and naturally learns to
+predict near-zero in extravascular regions.  For synthetic-noise models, the input carries real
+background signal throughout the volume, so the $\mathcal{L}_\text{TV}$ regulariser must
+actively suppress predictions that the network has been given non-zero information to make ---
+an inherently harder task.
 
 Within masked configurations, CBAM-PreUpsampling achieves lower background MSE than the Original
 in both modes (C vs.\ A; G vs.\ E), suggesting that the attention mechanism improves spatial
@@ -290,13 +301,18 @@ configurations for direct cross-experiment comparison.
 
 Three principal conclusions emerge from the consolidated results.
 
-\textbf{Mask-guided training is the dominant factor for geometric fidelity and background
-suppression.}  Across both task modes, masked configurations consistently achieve lower HD
-(by 5--6\,mm relative to synthetic-noise counterparts using the same architecture) and lower
-background MSE (by 1.9--2.7$\times$), while Dice scores improve by 9--11\,pp in Denoising and
-up to 2\,pp in SR.  These gains are direct consequences of the mask-restricted loss and the
-$\mathcal{L}_\text{TV}$ background penalty.  Notably, the Hausdorff distance is the metric most
-sensitive to the training strategy: Original-architecture synthetic-noise training produces worst-case boundary errors above
+\textbf{Masked input conditioning is the dominant factor for geometric fidelity and background
+suppression, but this advantage carries an inference-time prerequisite.}  Across both task
+modes, masked configurations consistently achieve lower HD (by 5--6\,mm relative to
+synthetic-noise counterparts using the same architecture) and lower background MSE (by
+1.9--2.7$\times$), while Dice scores improve by 9--11\,pp in Denoising and up to 2\,pp in SR.
+Since both strategies share the same loss function, these gains stem from the zeroed input: the
+network learns a strong prior that background regions should produce near-zero predictions, and
+the spatial layout of vessels is implicitly encoded in the masked input at training and inference
+time.  This comes at a practical cost --- masked-input models require a pre-computed CoW
+segmentation at inference, which is typically unavailable in a purely clinical 3T workflow.
+Notably, the Hausdorff distance is the metric most sensitive to the input strategy:
+Original-architecture synthetic-noise training produces worst-case boundary errors above
 14\,mm (B: 15.09, F: 14.82), while CBAM synthetic-noise training reduces HD to 13.59\,mm (H)
 and even to 9.86\,mm (D), approaching the masked-training range; all masked models remain below
 10\,mm regardless of architecture.
@@ -311,18 +327,22 @@ of explicit mask guidance.  In SR, the architecture effect on velocity is the do
 CBAM reduces $\text{MSE}_\text{vel}$ by 2.7--3.0\% in both input conditions, and G achieves the
 lowest background MSE for SR ($6.71{\times}10^{-4}$).
 
-\textbf{Input strategy and architecture interact differently across task modes.}  For Denoising,
-masked training provides a clear, consistent velocity advantage (9.3\% for Original; 2.1\% for
-CBAM).  For SR, this advantage effectively vanishes for the CBAM architecture: the velocity MSE
-difference between G (masked) and H (synth.\ noise) is only 0.2\%, with~H (0.04833) marginally
-outperforming~G (0.04844) on total and per-component $v$ and $w$ errors.  This suggests that
-the pre-upsampling attention mechanism can substitute for mask-guided supervision in preserving
-intraluminal velocity accuracy when the task complexity is high, at the cost of worse geometric
-fidelity (HD: 13.59 vs.\ 9.50\,mm) and background suppression ($1.42$ vs.\
-$0.67 {\times}10^{-3}$).  The implication for practical deployment is that the choice of
-training strategy remains critical for applications requiring accurate vessel boundary recovery
-or clean extravascular predictions, even when velocity reconstruction accuracy alone might
-suggest that the simpler synthetic-noise pipeline is sufficient.
+\textbf{Input strategy and architecture interact differently across task modes, with important
+implications for mask-free clinical deployment.}  For Denoising, zeroing the input background
+provides a clear, consistent velocity advantage (9.3\% reduction for Original; 2.1\% for CBAM).
+For SR, this advantage effectively vanishes for the CBAM architecture: configurations~G (masked)
+and~H (synthetic noise) differ in velocity MSE by only 0.2\%, with~H (0.04833) marginally
+outperforming~G (0.04844) on total, $v$, and $w$ components.  This implies that the
+pre-upsampling attention mechanism enables the network to achieve competitive intraluminal
+velocity accuracy from a raw, unmasked input --- without requiring any vascular segmentation at
+inference time --- when the task complexity is high enough (SR) to activate the full benefit of
+the attention module.  The trade-off is worse geometric fidelity (HD: 13.59 vs.\ 9.50\,mm) and
+higher background noise ($1.42$ vs.\ $0.67{\times}10^{-3}$), both of which are consequences of
+the absence of the zeroed-background input prior.  For applications where a CoW mask is readily
+available, masked-input CBAM (G) offers the best balance of velocity accuracy and background
+suppression.  For fully mask-free pipelines, CBAM with synthetic-noise augmentation (H) is the
+recommended configuration, as it achieves velocity accuracy within 0.2\% of its masked
+counterpart while operating on unprocessed 3T inputs.
 
 \label{sec:velocity}
 

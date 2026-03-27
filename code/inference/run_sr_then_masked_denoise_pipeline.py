@@ -84,7 +84,7 @@ def _apply_mask_to_nifti(input_path: Path, mask_3d: np.ndarray, out_path: Path) 
     nib.save(nib.Nifti1Image(masked.astype(np.float32), img.affine, img.header), str(out_path))
 
 
-def _write_single_case_csv(case: Dict[str, Any], masked_dir: Path, out_csv: Path) -> None:
+def _write_single_case_csv(case: Dict[str, Any], masked_dir: Path, mask_path: Path, out_csv: Path) -> None:
     row = {
         "lr_u": str((masked_dir / "pred_u_masked.nii.gz").resolve()),
         "lr_v": str((masked_dir / "pred_v_masked.nii.gz").resolve()),
@@ -96,7 +96,7 @@ def _write_single_case_csv(case: Dict[str, Any], masked_dir: Path, out_csv: Path
         "hr_v": str(case["hr_v"]),
         "hr_w": str(case["hr_w"]),
         "hr_mag": str(case.get("hr_mag", "")),
-        "mask": str((masked_dir.parent / "cow_seg_final.nii.gz").resolve()),
+        "mask": str(mask_path.resolve()),
         "venc": float(case.get("venc", 0.0)),
         "venc_u": float(case.get("venc_u", 0.0)),
         "venc_v": float(case.get("venc_v", 0.0)),
@@ -249,7 +249,7 @@ def main() -> None:
 
     # Build one-row CSV for stage-2 denoising.
     stage2_case_csv = stage1_dir / "denoising_input_case.csv"
-    _write_single_case_csv(case, masked_inputs_dir, stage2_case_csv)
+    _write_single_case_csv(case, masked_inputs_dir, final_stage1_mask, stage2_case_csv)
 
     # Stage 2: denoising over masked SR output.
     _run(

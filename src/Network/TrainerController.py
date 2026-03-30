@@ -50,6 +50,10 @@ class TrainerController:
         val_sw_patch_size=16,
         val_sw_batch_size=2,
         val_sw_overlap=0.25,
+        cascade_stage1_checkpoint="",
+        cascade_stage2_checkpoint="",
+        cascade_freeze_stage1=False,
+        cascade_freeze_stage2=False,
     ):
         """
         TrainerController constructor.
@@ -105,8 +109,11 @@ class TrainerController:
             hi_resblock=hi_resblock,
             channel_nr=self.channel_nr,
             predict_mag=self.predict_mag,
+            cascade_stage1_checkpoint=cascade_stage1_checkpoint,
+            cascade_stage2_checkpoint=cascade_stage2_checkpoint,
+            cascade_freeze_stage1=cascade_freeze_stage1,
+            cascade_freeze_stage2=cascade_freeze_stage2,
         ).to(self.device)
-
         self.metric_keys = [
             "train_loss",
             "val_loss",
@@ -597,10 +604,41 @@ class TrainerController:
         del venc
 
         self.optimizer.zero_grad(set_to_none=True)
-        predictions = self.model(u, v, w, u_mag, v_mag, w_mag)
+        predictions = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
         loss = self.calculate_and_update_metrics(hires, predictions, mask, "train")
         loss.backward()
         self.optimizer.step()
+
+    def _forward_model(self, u, v, w, u_mag, v_mag, w_mag, mask=None):
+        if getattr(self.model, "requires_mask_input", False):
+            return self.model(u, v, w, u_mag, v_mag, w_mag, mask=mask)
+        return self.model(u, v, w, u_mag, v_mag, w_mag)
+
+    @staticmethod
+    def _align_mask_to_lr_shape(mask, lr_shape):
+        if mask is None:
+            return None
+        if tuple(mask.shape[-3:]) == tuple(lr_shape):
+            return mask
+
+        mx, my, mz = [int(v) for v in mask.shape[-3:]]
+        tx, ty, tz = [int(v) for v in lr_shape]
+        fx = mx // tx if tx > 0 else 0
+        fy = my // ty if ty > 0 else 0
+        fz = mz // tz if tz > 0 else 0
+
+        if (
+            fx > 0
+            and fy > 0
+            and fz > 0
+            and mx == tx * fx
+            and my == ty * fy
+            and mz == tz * fz
+        ):
+            pooled = mask.unfold(1, fx, fx).unfold(2, fy, fy).unfold(3, fz, fz)
+            return pooled.amax(dim=(-1, -2, -3))
+
+        return F.interpolate(mask[:, None], size=tuple(lr_shape), mode="nearest")[:, 0]
 
     @torch.no_grad()
     def test_step(self, data_pairs, return_visuals=False):
@@ -610,9 +648,25 @@ class TrainerController:
 
         if self.val_full_volume:
             lr_input = torch.cat((u, v, w, u_mag, v_mag, w_mag), dim=1)
+            lr_mask = self._align_mask_to_lr_shape(mask, lr_input.shape[-3:])
+            if lr_mask is not None:
+                lr_mask = lr_mask.to(lr_input.dtype)
+            if getattr(self.model, "requires_mask_input", False):
+                lr_input = torch.cat((lr_input, lr_mask[:, None]), dim=1)
 
             def _predictor(x):
-                return self.model(x[:, 0:1], x[:, 1:2], x[:, 2:3], x[:, 3:4], x[:, 4:5], x[:, 5:6])
+                mask_patch = x[:, 6:7] if x.shape[1] > 6 else None
+                if mask_patch is not None:
+                    mask_patch = mask_patch[:, 0]
+                return self._forward_model(
+                    x[:, 0:1],
+                    x[:, 1:2],
+                    x[:, 2:3],
+                    x[:, 3:4],
+                    x[:, 4:5],
+                    x[:, 5:6],
+                    mask_patch,
+                )
 
             predictions = sliding_window_inference(
                 inputs=lr_input,
@@ -622,7 +676,7 @@ class TrainerController:
                 overlap=self.val_sw_overlap,
             )
         else:
-            predictions = self.model(u, v, w, u_mag, v_mag, w_mag)
+            predictions = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
 
         hires, predictions, mask = self._align_spatial_shapes(hires, predictions, mask)
         self.calculate_and_update_metrics(hires, predictions, mask, "val")
@@ -886,7 +940,7 @@ class TrainerController:
         self.model.eval()
         for data_pairs in testset:
             u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr = self._prepare_batch(data_pairs)
-            preds = self.model(u, v, w, u_mag, v_mag, w_mag)
+            preds = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
 
             loss_val, mse, divloss, _mag_mse = self.loss_function(hires, preds, mask)
             rel_loss = self.accuracy_function(hires, preds, mask)

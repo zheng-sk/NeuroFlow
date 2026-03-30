@@ -380,6 +380,28 @@ def main():
     parser.add_argument("--restore", action="store_true", help="Restore training from an existing checkpoint.")
     parser.add_argument("--restore-dir", type=str, default="", help="Checkpoint directory to restore from.")
     parser.add_argument("--restore-file", type=str, default="", help="Checkpoint filename (.pt).")
+    parser.add_argument(
+        "--cascade-stage1-checkpoint",
+        type=str,
+        default="",
+        help="Optional checkpoint to initialize stage-1 SR subnetwork for cascade_sr_dn_masked.",
+    )
+    parser.add_argument(
+        "--cascade-stage2-checkpoint",
+        type=str,
+        default="",
+        help="Optional checkpoint to initialize stage-2 denoising subnetwork for cascade_sr_dn_masked.",
+    )
+    parser.add_argument(
+        "--cascade-freeze-stage1",
+        action="store_true",
+        help="Freeze stage-1 SR subnetwork parameters in cascade_sr_dn_masked.",
+    )
+    parser.add_argument(
+        "--cascade-freeze-stage2",
+        action="store_true",
+        help="Freeze stage-2 denoising subnetwork parameters in cascade_sr_dn_masked.",
+    )
     args = parser.parse_args()
     args.model_variant = normalize_model_variant(args.model_variant)
     if args.model_variant not in set(available_model_variants()):
@@ -555,6 +577,10 @@ def main():
         val_sw_patch_size=args.val_sw_patch_size if args.val_sw_patch_size is not None else args.patch_size,
         val_sw_batch_size=args.val_sw_batch_size,
         val_sw_overlap=args.val_sw_overlap,
+        cascade_stage1_checkpoint=args.cascade_stage1_checkpoint,
+        cascade_stage2_checkpoint=args.cascade_stage2_checkpoint,
+        cascade_freeze_stage1=args.cascade_freeze_stage1,
+        cascade_freeze_stage2=args.cascade_freeze_stage2,
     )
     network.init_model_dir()
 

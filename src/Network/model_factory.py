@@ -7,6 +7,7 @@ def available_model_variants() -> List[str]:
         "residual_skip",
         "pre_res_attention",
         "pre_upsample_attention",
+        "cascade_sr_dn_masked",
         "phase1_attention",
         "phase2_attention",
         "phase3_transformer_cross_attention",
@@ -28,6 +29,10 @@ def normalize_model_variant(model_variant: str) -> str:
         "local_attention_before_upsample": "pre_upsample_attention",
         "attention_before_upsample": "pre_upsample_attention",
         "preupsample_attention": "pre_upsample_attention",
+        "cascade": "cascade_sr_dn_masked",
+        "cascade_e2e": "cascade_sr_dn_masked",
+        "two_stage_cascade": "cascade_sr_dn_masked",
+        "cascade_sr_dn": "cascade_sr_dn_masked",
         "single_local_attention": "pre_res_attention",
         "pre_res_local_attention": "pre_res_attention",
         "preres_attention": "pre_res_attention",
@@ -57,6 +62,10 @@ def build_sr_model(
     hi_resblock: int,
     channel_nr: int = 64,
     predict_mag: bool = False,
+    cascade_stage1_checkpoint: str = "",
+    cascade_stage2_checkpoint: str = "",
+    cascade_freeze_stage1: bool = False,
+    cascade_freeze_stage2: bool = False,
 ):
     variant = normalize_model_variant(model_variant)
 
@@ -102,6 +111,21 @@ def build_sr_model(
             hi_resblock=hi_resblock,
             channel_nr=channel_nr,
             predict_mag=predict_mag,
+        )
+
+    if variant == "cascade_sr_dn_masked":
+        from .EndToEndCascadeSRDenoise import EndToEndCascadeSRDenoise
+
+        return EndToEndCascadeSRDenoise(
+            res_increase=res_increase,
+            low_resblock=low_resblock,
+            hi_resblock=hi_resblock,
+            channel_nr=channel_nr,
+            predict_mag=predict_mag,
+            stage1_checkpoint=cascade_stage1_checkpoint,
+            stage2_checkpoint=cascade_stage2_checkpoint,
+            freeze_stage1=cascade_freeze_stage1,
+            freeze_stage2=cascade_freeze_stage2,
         )
 
     if variant == "phase1_attention":

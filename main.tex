@@ -1,0 +1,973 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{tikz-cd}
+\usepackage{multicol}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{makecell}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{1\baselineskip}
+
+\begin{document}
+
+\section*{Introduction}
+
+Cerebrovascular disease represents one of the leading causes of death and long-term disability worldwide. In 2021, stroke alone accounted for an estimated 93.8 million prevalent cases and 7.3 million deaths, constituting over 10\% of global mortality \cite{wso2025,gbd2021stroke}. Beyond acute cerebrovascular events, a spectrum of chronic intracranial pathologies --- including unruptured intracranial aneurysms, arteriovenous malformations, and stenoocclusive disease --- carries substantial risk of catastrophic neurological outcomes. A critical, and still incompletely resolved, challenge in the management of these conditions is the reliable, non-invasive quantification of intracranial hemodynamics. Blood flow velocity, wall shear stress (WSS), and pressure distributions within the cerebral vasculature are increasingly recognised as key biomechanical determinants of lesion formation, growth, and rupture risk, yet they remain inaccessible to conventional clinical imaging \cite{wahlin2022,cebral2019wss}.
+
+Four-dimensional Flow MRI (4D Flow MRI) has emerged as the principal non-invasive modality for comprehensive, time-resolved haemodynamic assessment of the cerebral circulation \cite{markl2012,dyverfeldt2015}. By encoding three-directional velocity information across the entire cerebrovascular tree within a single acquisition, 4D Flow MRI enables simultaneous evaluation of arterial and venous flow, net flow quantification, retrospective vessel-of-interest analysis, and the derivation of advanced haemodynamic metrics including WSS and oscillatory shear index \cite{bock2010,stienen2020wss}. Consequently, 4D Flow MRI is increasingly applied to a broad range of cerebrovascular conditions, from the haemodynamic characterisation of intracranial aneurysms and carotid bifurcation disease to the investigation of cerebral autoregulation impairment and flow alterations in neurodegenerative conditions \cite{wahlin2022,sun2020cfd}.
+
+Despite its clinical promise, the practical utility of 4D Flow MRI at standard clinical field strengths (1.5T and 3T) is significantly constrained by its inherently limited signal-to-noise ratio (SNR), spatial resolution, and velocity-to-noise ratio (VNR). These limitations are particularly pronounced in the intracranial circulation, where vessel diameters are small, flow velocities are comparatively low, and accurate haemodynamic quantification demands sub-millimetre spatial resolution \cite{markl2012,dyverfeldt2015}. The partial-volume effect introduced by low spatial resolution systematically biases velocity and WSS estimates, underestimating peak flow velocities and distorting the spatial topology of the velocity field \cite{sun2020cfd}. Furthermore, the extended acquisition times required for whole-brain 4D Flow coverage at 3T compound physiological noise contributions and limit clinical feasibility in acutely ill patients.
+
+Ultra-high-field MRI at 7 Tesla (7T) addresses many of these fundamental limitations. The approximately linear increase in SNR with field strength, combined with improved susceptibility contrast, yields substantially enhanced spatial resolution and vascular conspicuity compared to 3T \cite{kara2022_7t,smra2024}. In the context of 4D Flow MRI, these gains translate directly into higher VNR, reduced partial-volume contamination, and the ability to resolve smaller intracranial vessels --- enabling, for the first time, haemodynamic characterisation at the level of perforator arteries and the distal cortical circulation. Recent work has demonstrated that 7T 4D Flow MRI can achieve repeatable, quantitatively accurate intracranial flow measurements within clinically acceptable acquisition times \cite{mccormick2020_7t4dflow}. However, the limited global availability of 7T systems, the associated infrastructure and safety requirements, and the challenges of integrating investigational ultra-high-field acquisitions into routine clinical workflows place severe constraints on the direct clinical translation of 7T 4D Flow MRI.
+
+This gap between the quality achievable at 7T and the practicality of routine 3T acquisition motivates a computational approach: training deep neural networks to learn the mapping from 3T 4D Flow MRI data to their 7T counterparts, thereby enabling virtual 7T quality from widely available clinical hardware. Deep learning has demonstrated remarkable success in MRI super-resolution and enhancement tasks, learning to recover fine structural detail from low-resolution or low-SNR inputs \cite{duffy2022sr,wang2024srrt}. However, existing super-resolution approaches for 4D Flow MRI are typically trained and validated on synthetic downsampling pipelines that do not capture the complex inter-scanner differences arising from distinct hardware, reconstruction algorithms, and k-space sampling patterns between field strengths \cite{ferdian2020,elahmar2023}. We address this by formulating two complementary learning tasks: a same-resolution domain translation task ($\times$1) that maps registered 3T acquisitions to their masked 7T counterparts, and a combined domain-translation and super-resolution task ($\times$2) in which spatially downsampled ($\times$0.5 trilinear zoom) 3T volumes are used as inputs and the full-resolution masked 7T volumes as targets. In both cases the ground truth is defined exclusively within the Circle of Willis mask $\mathcal{M}$, focusing supervision on the haemodynamically relevant intraluminal region. Bridging the real-world domain gap between 3T and 7T 4D Flow MRI requires paired, in-vivo acquisitions --- a prerequisite that has not previously been systematically addressed in the context of cerebrovascular 4D Flow.
+
+Domain adaptation and cross-scanner generalisation are active areas of research in medical image analysis. Differences in MRI scanner platforms introduce systematic biases in image contrast, noise characteristics, and artefact patterns that degrade the performance of models trained on one domain when applied to another \cite{glocker2023domain,perone2019transductive}. In the specific context of multi-field-strength image synthesis, deep learning approaches have demonstrated the feasibility of learning 7T-like tissue contrast and spatial detail from 3T structural MRI \cite{qu2020synth7t,cui2024synth7t}, but no comparable work has addressed the fundamentally more complex case of quantitative, vector-valued 4D Flow MRI, where the network must predict physically consistent, three-directional velocity fields rather than scalar image intensities.
+
+Physics-informed learning offers a principled framework to incorporate domain knowledge --- the governing equations of fluid mechanics and the physical constraints of MRI signal formation --- into the training objective, improving both the physical plausibility and generalisation of the learned haemodynamic representations \cite{kissas2020,ayed2023piml}. In the context of 4D Flow MRI, leveraging the divergence-free constraint of incompressible flow and the vessel-mask-aware structure of vascular velocity fields allows the network to focus its representational capacity on the haemodynamically relevant intraluminal regions, suppressing noise and artefacts in the extravascular background.
+
+In this work, we present \textbf{NeuroFlow}, a supervised deep learning framework for joint 3T-to-7T domain translation and super-resolution of cerebrovascular 4D Flow MRI. The key contributions of this work are as follows:
+
+\begin{enumerate}
+    \item We acquire and process the first dataset of paired 3T/7T 4D Flow MRI studies in patients with cerebrovascular pathology, establishing a rigorous multi-stage registration and motion correction pipeline to achieve voxel-level correspondence between field strengths.
+
+    \item We introduce a dual-branch vascular segmentation strategy combining a topology-aware nnU-Net ensemble \cite{isensee2021nnunet,yang2023topcow} with classical Frangi/Sato vesselness filtering \cite{frangi1998,sato1998} to generate high-quality Circle of Willis masks that guide mask-aware training.
+
+    \item We adapt and extend the SR4DFlowNet architecture \cite{ferdian2020,elahmar2023} with attention mechanisms --- including CBAM \cite{woo2018cbam} and bidirectional cross-attention \cite{vaswani2017attention} --- and evaluate two complementary task configurations: (i) same-resolution 3T$\to$7T domain translation ($\times$1), mapping registered 3T inputs to their masked 7T counterparts; and (ii) joint domain translation and super-resolution ($\times$2), mapping trilinearly downsampled ($\times$0.5) 3T inputs to the full-resolution masked 7T target. In both tasks the ground truth is the registered 7T volume restricted to the CoW mask $\mathcal{M}$.
+
+    \item We design a composite, mask-aware loss function that separately penalises velocity reconstruction error within and outside the vascular lumen, with an additional isotropic total variation penalty \cite{rudin1992tv} on extraluminal regions to suppress physiologically implausible background predictions.
+
+    \item We demonstrate that the resulting framework achieves substantial reductions in relative speed error (RSE) and relative magnitude error (RME) within the Circle of Willis, representing a meaningful step towards virtual 7T quality cerebrovascular haemodynamics from routine 3T acquisitions.
+\end{enumerate}
+
+The remainder of this paper is organised as follows. Section~2 reviews related work on 4D Flow MRI processing, MRI super-resolution, and domain adaptation. Section~3 describes the methodology in detail, covering data acquisition, registration, network architecture, loss formulation, and training protocol. Section~4 presents quantitative and qualitative results across architectural variants and task configurations. Section~5 discusses the clinical implications, limitations, and directions for future work.
+
+
+
+\section*{Methodology}
+
+\subsection*{3.1 Study Population and Data Acquisition}
+
+Seven patients with cerebrovascular pathology were prospectively enrolled and imaged using two MRI platforms: a clinical 3T Siemens system and an investigational 7T Siemens system. 4D Flow MRI enables simultaneous acquisition of three-directional velocity fields and is increasingly used for cerebrovascular hemodynamics assessment \cite{markl2012,dyverfeldt2015}. For each patient, paired 4D Flow MRI studies were acquired on both systems within a single session to minimize inter-session physiological variability. Each acquisition comprised four volumetric time series: a magnitude image and three directional phase-contrast velocity maps encoding the velocity components along the feet-head ($u$), left-right ($v$), and anterior-posterior ($w$) directions. The 3T acquisitions covered between 9 and 14 cardiac frames, while the 7T acquisitions spanned 10 to 15 frames, with a consistent velocity encoding of $\text{VENC} = 0.9$~m/s applied uniformly across all directional components and both field strengths \cite{bock2010}. All raw data were converted from DICOM to NIfTI format prior to further processing.
+
+% FIGURE 1 — Acquisition and Pairing Overview:
+% Schematic diagram illustrating the dual-field-strength acquisition protocol.
+% For each patient, a representative axial slice from the 3T and 7T magnitude images
+% should be shown side by side, highlighting differences in spatial resolution, SNR,
+% and vascular conspicuity. A sagittal MIP of each acquisition below to convey 3D coverage.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Acquisition and Pairing Overview. Schematic diagram illustrating the dual-field-strength acquisition protocol.}
+    \label{fig:acquisition}
+\end{figure}
+
+\subsection*{3.2 Motion Correction and Multi-Field-Strength Registration}
+
+\subsubsection*{3.2.1 Intra-Scan Motion Correction}
+
+Cardiac-gated 4D Flow MRI is intrinsically sensitive to bulk subject motion between cardiac phases \cite{stehning2020}. To correct for this, rigid-body transformations were estimated from the magnitude time series for each frame relative to a reference (first) frame, using normalized mutual information as the similarity criterion \cite{maes1997}. The resulting transformation matrices $\{\mathbf{T}_t^{\text{rigid}}\}_{t=1}^{T}$ were then applied consistently to the corresponding velocity phase images at each time point $t$:
+
+\begin{equation}
+    \mathbf{V}_t^{\text{corr}} = \mathbf{T}_t^{\text{rigid}} \circ \mathbf{V}_t^{\text{raw}}, \quad t = 1, \ldots, T
+\end{equation}
+
+where $\mathbf{V}_t^{\text{raw}} = (u_t, v_t, w_t)$ denotes the raw velocity volume at frame $t$. Following transformation, the velocity vectors were reoriented to maintain physical consistency in the scanner coordinate frame.
+
+\subsubsection*{3.2.2 Inter-Scan Registration (7T $\rightarrow$ 3T)}
+
+To align 7T volumes into the geometric space of the clinical 3T acquisitions, a multi-stage inter-scan registration was performed \cite{qu2020synth7t,cui2024synth7t}. A temporal maximum intensity projection (MIP) was first computed for each acquisition by retaining, at each voxel, the maximum magnitude value across all cardiac frames:
+
+\begin{equation}
+    \text{MIP}(\mathbf{x}) = \max_{t \in \{1,\ldots,T\}} M_t(\mathbf{x})
+\end{equation}
+
+where $M_t(\mathbf{x})$ denotes the magnitude volume at voxel $\mathbf{x}$ and time $t$. The MIP images provide a static, high-contrast angiographic representation suitable for robust registration. A two-stage registration strategy was employed: an initial rigid alignment $\mathbf{T}^{\text{rigid}}_{7T \to 3T}$, followed by an affine refinement $\mathbf{T}^{\text{affine}}_{7T \to 3T}$, both optimized using normalized mutual information. The composite transformation was then applied to the full 4D velocity volumes:
+
+\begin{equation}
+    \mathbf{V}_{7T \to 3T}^{\text{reg}}(\mathbf{x}, t) = \mathbf{T}^{\text{affine}}_{7T \to 3T} \circ \mathbf{V}_{7T}^{\text{corr}}(\mathbf{x}, t)
+\end{equation}
+
+This registration pipeline ensured voxel-level correspondence between paired 3T and 7T acquisitions, which is a prerequisite for supervised learning.
+
+% FIGURE 2 — Registration Pipeline:
+% Multi-panel figure: (a) temporal MIP of a 3T magnitude image; (b) temporal MIP of the
+% corresponding 7T magnitude image before registration; (c) 7T MIP after rigid + affine
+% registration into 3T space, with a checkerboard or difference overlay to demonstrate
+% alignment quality. An additional panel showing the displacement field magnitude can be included.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Registration Pipeline. Multi-panel figure showing the temporal MIPs and registration results.}
+    \label{fig:registration}
+\end{figure}
+
+\subsection*{3.3 Angiographic Volume Synthesis}
+
+To produce a voxel-level vascular probability map suitable for vessel segmentation, a synthetic 3D angiographic representation was constructed by combining complementary contrast sources. First, a 4D speed image was derived by computing the voxel-wise Euclidean norm of the VENC-scaled velocity vector at each cardiac frame:
+
+\begin{equation}
+    S(\mathbf{x}, t) = \sqrt{
+        \left(\frac{u(\mathbf{x},t)}{\text{VENC}}\right)^2 +
+        \left(\frac{v(\mathbf{x},t)}{\text{VENC}}\right)^2 +
+        \left(\frac{w(\mathbf{x},t)}{\text{VENC}}\right)^2
+    }
+\end{equation}
+
+The temporal projection of the speed image $\bar{S}(\mathbf{x}) = \max_t S(\mathbf{x}, t)$ was then normalized to the unit interval. Likewise, the temporal MIP of the magnitude image $\overline{\text{MIP}}(\mathbf{x})$ was min-max normalized. The final angiographic representation $\mathcal{A}(\mathbf{x})$ was obtained as the element-wise product of these two normalized fields:
+
+\begin{equation}
+    \mathcal{A}(\mathbf{x}) = \hat{\text{MIP}}(\mathbf{x}) \cdot \hat{S}(\mathbf{x})
+\end{equation}
+
+where $\hat{\cdot}$ denotes min-max normalization. This product reinforces voxels that are simultaneously bright in magnitude and fast in flow velocity, yielding enhanced arterial contrast while suppressing static tissue and background noise.
+
+% FIGURE 3 — Angiographic Volume Synthesis:
+% Three-column panel showing axial and coronal views of: (a) normalized temporal MIP of the
+% magnitude; (b) normalized temporal speed projection; (c) synthesized angiographic product
+% A(x). A 3D volume rendering of A clearly delineating the Circle of Willis anatomy.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Angiographic Volume Synthesis. Three-column panel showing the normalized MIP, speed projection, and synthesized angiographic product $\mathcal{A}(\mathbf{x})$.}
+    \label{fig:angiographic}
+\end{figure}
+
+\subsection*{3.4 Vascular Segmentation and Mask Generation}
+
+\subsubsection*{3.4.1 Dual-Branch Segmentation Strategy}
+
+Vessel masking was performed using a dual-branch strategy applied to the synthesized angiographic volume $\mathcal{A}(\mathbf{x})$, combining the complementary strengths of deep learning and classical image analysis.
+
+\textbf{Deep Learning Branch.} A topology-aware nnU-Net ensemble from the TopCoW 2024 winning solution (CLAIM Team, Charité) \cite{yang2023topcow,aydin2024topcow} was applied to $\mathcal{A}(\mathbf{x})$ to produce a probabilistic segmentation $P^{\text{DL}}(\mathbf{x}) \in [0,1]$ of the Circle of Willis (CoW). This model was specifically trained to preserve topological consistency of the CoW vascular graph, producing anatomically coherent segmentations even in regions of low SNR.
+
+\textbf{Classical Vesselness Branch.} In parallel, multi-scale Frangi and Sato vesselness filters \cite{frangi1998,sato1998} were computed over $\mathcal{A}(\mathbf{x})$. The Frangi filter exploits the eigenvalues $\lambda_1 \leq \lambda_2 \leq \lambda_3$ of the Hessian matrix $\mathbf{H}(\mathbf{x}, \sigma)$ at scale $\sigma$:
+
+\begin{equation}
+    V_\sigma(\mathbf{x}) = \begin{cases}
+        0 & \text{if } \lambda_2 > 0 \text{ or } \lambda_3 > 0 \\[6pt]
+        \left(1 - e^{-\mathcal{R}_A^2 / 2\alpha^2}\right)
+        e^{-\mathcal{R}_B^2 / 2\beta^2}
+        \left(1 - e^{-\mathcal{S}^2 / 2c^2}\right) & \text{otherwise}
+    \end{cases}
+\end{equation}
+
+where $\mathcal{R}_A = |\lambda_2|/|\lambda_3|$, $\mathcal{R}_B = |\lambda_1|/\sqrt{|\lambda_2 \lambda_3|}$, and $\mathcal{S} = \|\mathbf{H}\|_F$ are shape and structure descriptors, and $\alpha, \beta, c$ are sensitivity parameters. The final vesselness response was obtained as the maximum across scales: $V(\mathbf{x}) = \max_\sigma V_\sigma(\mathbf{x})$. The resulting map was binarized via percentile-based thresholding and refined through morphological operations including opening, closing, hole-filling, and connected component filtering, yielding a binary mask $P^{\text{class}}(\mathbf{x}) \in \{0, 1\}$.
+
+\textbf{Mask Fusion.} The final binary CoW mask $\mathcal{M}(\mathbf{x})$ was obtained as the logical union of both predictions:
+
+\begin{equation}
+    \mathcal{M}(\mathbf{x}) = \mathbb{1}\left[P^{\text{DL}}(\mathbf{x}) \geq \tau\right] \cup P^{\text{class}}(\mathbf{x})
+\end{equation}
+
+where $\tau = 0.5$ is the binarization threshold. This union strategy ensures recall is maximized, minimizing the risk of excluding valid arterial voxels from subsequent optimization.
+
+% FIGURE 4 — Dual-Branch Segmentation:
+% Side-by-side visualization of: (a) deep learning nnU-Net segmentation overlaid on the
+% angiographic volume; (b) classical Frangi/Sato vesselness map and its binarized result;
+% (c) final fused CoW binary mask M. A 3D rendering of the final mask colored by CoW
+% segment label (ICA, MCA, ACA, PCA, BA) is recommended.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Dual-Branch Segmentation. Side-by-side visualization of the deep learning segmentation, classical vesselness map, and final fused CoW binary mask $\mathcal{M}$.}
+    \label{fig:segmentation}
+\end{figure}
+
+\subsection*{3.5 Network Architecture: SR4DFlowNet}
+
+\subsubsection*{3.5.1 Input Representation}
+
+The core predictive model is an adapted SR4DFlowNet \cite{ferdian2020,elahmar2023}, a 3D fully convolutional network inspired by enhanced residual architectures for super-resolution \cite{lim2017edsr} and designed to jointly estimate high-quality velocity components and a magnitude channel from 4D Flow MRI patches. The model accepts six scalar input channels per voxel --- the three VENC-normalized velocity components $(u, v, w)$ and their corresponding magnitude-weighted counterparts $(u_m, v_m, w_m)$ --- and internally computes three auxiliary channels:
+
+\begin{equation}
+    S = \sqrt{u^2 + v^2 + w^2}, \quad
+    M = \sqrt{u_m^2 + v_m^2 + w_m^2}, \quad
+    \text{PCMR} = M \cdot S
+\end{equation}
+
+where $S$ is the voxel-wise flow speed, $M$ is the local signal magnitude, and PCMR (Phase-Contrast MR) captures their joint information.
+
+\subsubsection*{3.5.2 Dual-Stream Feature Extraction}
+
+The architecture processes velocity and physical information through two dedicated convolutional streams, each comprising two consecutive 3D convolutional layers with 64 feature maps, $3\times3\times3$ kernels, symmetric (replication) padding, and ReLU activation:
+
+\begin{itemize}
+    \item \textbf{Phase stream}: processes the velocity components $(u, v, w)$ to extract flow-kinematic features.
+    \item \textbf{PC stream}: processes the physical channels $(\text{PCMR}, M, S)$ to extract signal-intensity features.
+\end{itemize}
+
+The feature maps from both streams are concatenated along the channel dimension to form a 128-channel joint representation, which is then projected to 64 channels via a $1\times1\times1$ convolution followed by a $3\times3\times3$ refinement convolution.
+
+\subsubsection*{3.5.3 Residual Processing and Upsampling}
+
+The fused feature map is passed through a stack of $N_{LR} = 8$ residual blocks at the input resolution \cite{he2016resnet}. Each residual block consists of two $3\times3\times3$ convolutional layers with ReLU activation and a direct identity skip connection:
+
+\begin{equation}
+    \mathbf{F}^{(l+1)} = \mathbf{F}^{(l)} + f\left(\mathbf{F}^{(l)}; \Theta^{(l)}\right)
+\end{equation}
+
+Spatial upsampling is then performed via trilinear interpolation with scale factor $r \in \{1, 2\}$ (depending on task configuration), followed by $N_{HR} = 4$ additional high-resolution residual blocks operating at the target resolution.
+
+\subsubsection*{3.5.4 Output Heads and Magnitude Prediction}
+
+The network concludes with three independent output heads, each comprising two convolutional layers, to predict the super-resolved velocity components $(\hat{u}, \hat{v}, \hat{w})$. When enabled, a fourth head predicts a reconstructed magnitude channel $\hat{M}$, allowing the model to simultaneously perform domain translation and velocity estimation.
+
+\subsubsection*{3.5.5 Attention-Enhanced Variants}
+
+Several architectural extensions incorporating attention mechanisms were evaluated. The Convolutional Block Attention Module (CBAM) \cite{woo2018cbam} applies sequential channel and spatial attention to the feature maps. Given an intermediate feature map $\mathbf{F} \in \mathbb{R}^{C \times D \times H \times W}$, CBAM computes:
+
+\begin{equation}
+    \mathbf{F}' = \mathbf{F} \otimes \mathbf{A}_c(\mathbf{F}), \qquad
+    \mathbf{F}'' = \mathbf{F}' \otimes \mathbf{A}_s(\mathbf{F}')
+\end{equation}
+
+where $\mathbf{A}_c$ and $\mathbf{A}_s$ denote the channel and spatial attention gates, respectively, computed via pooled MLP and convolutional operations with sigmoid activation. More advanced variants incorporate \textbf{token-mixing attention} \cite{vaswani2017attention} --- compressing spatial features to a $P^3$ token grid via adaptive average pooling and applying multi-head self-attention in that compressed space --- and \textbf{bidirectional cross-attention} between the phase and PC feature streams, enabling explicit cross-modal feature interaction. The evaluated variants are summarized in Table~\ref{tab:variants}.
+
+% FIGURE 5 — Network Architecture Diagram:
+% Full architectural diagram of SR4DFlowNet showing: the dual-stream input (phase and PC paths),
+% feature concatenation, the low-resolution residual stack, the trilinear upsampling block,
+% the high-resolution residual stack, and the output heads for velocity and magnitude.
+% Insets illustrating the CBAM block structure and a simplified cross-attention diagram.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Network Architecture Diagram of SR4DFlowNet showing the dual-stream input, residual stacks, upsampling, and output heads.}
+    \label{fig:architecture}
+\end{figure}
+
+% TABLE 1 — Summary of evaluated SR4DFlowNet architectural variants and their attention components.
+% ============================================================
+%  Table 1 — SR4DFlowNet Architectural Variants
+%  Required packages: booktabs, multirow, xcolor (or colortbl),
+%                     makecell, array
+%  Usage: \input{table1}  or paste inline in your document.
+% ============================================================
+
+\begin{table}[!htbp]
+\centering
+\caption{Summary of evaluated SR4DFlowNet architectural variants and their attention components.
+Tick marks (\checkmark) indicate the presence of a module; dashes (---) indicate its absence.
+\textit{Placement} refers to the stage of the network where attention is inserted.
+All variants share the same dual-stream backbone ($N_{LR}=8$, $N_{HR}=4$, 64 channels)
+and the same training protocol.}
+\label{tab:variants}
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.35}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{
+    l
+    c
+    c
+    c
+    c
+    c
+    l
+}
+\toprule
+\multirow{2}{*}{\textbf{Variant}} &
+\multirow{2}{*}{\makecell{\textbf{Velocity}\\\textbf{skip}}} &
+\multirow{2}{*}{\makecell{\textbf{CBAM}\\\textbf{(local)}}} &
+\multirow{2}{*}{\makecell{\textbf{Cross-gated}\\\textbf{fusion}}} &
+\multirow{2}{*}{\makecell{\textbf{Token-mixing}\\\textbf{attention}}} &
+\multirow{2}{*}{\makecell{\textbf{Bidirectional}\\\textbf{cross-attention}}} &
+\multirow{2}{*}{\textbf{Placement of attention}} \\
+\\
+\midrule
+
+\texttt{original}
+  & ---        & ---        & ---        & ---        & ---
+  & Baseline; no attention \\
+
+\texttt{residual\_skip}
+  & \checkmark & ---        & ---        & ---        & ---
+  & Velocity identity skip ($r{=}1$) or upsample skip ($r{=}2$) \\
+
+\texttt{pre\_res\_attention}
+  & ---        & \checkmark & ---        & ---        & ---
+  & Single CBAM after stream fusion, before LR residual stack \\
+
+\texttt{pre\_upsample\_attention}
+  & ---        & \checkmark & ---        & ---        & ---
+  & Single CBAM after LR residual stack, before upsampling \\
+
+\texttt{phase1\_attention}
+  & ---        & \checkmark & ---        & ---        & ---
+  & CBAM in each branch, at fusion, and inside LR \& HR residual blocks \\
+
+\texttt{phase2\_attention}
+  & ---        & \checkmark & \checkmark & \checkmark & ---
+  & Phase~1 + cross-gating at fusion + token-mixing before/after upsample \\
+
+\texttt{phase3\_transformer}
+  & ---        & \checkmark & ---        & \checkmark & \checkmark
+  & Phase~1 + bidirectional cross-attention at fusion + token-mixing in LR \& HR stages \\
+
+\texttt{jit\_sr\_3d}
+  & ---        & ---        & ---        & \checkmark & ---
+  & Sinusoidal positional embeddings; token-mixing in fused feature space \\
+
+\bottomrule
+\end{tabular}
+}
+
+\smallskip
+\noindent
+\footnotesize
+\textbf{CBAM}: Convolutional Block Attention Module (sequential channel $\to$ spatial gates) \cite{woo2018cbam}.
+\textbf{Cross-gated fusion}: lightweight 1$\times$1 conv gates that modulate each stream with the other stream's features \cite{woo2018cbam}.
+\textbf{Token-mixing attention}: multi-head self-attention on adaptively pooled $P^3$ tokens, context reprojected to voxel grid via trilinear interpolation \cite{vaswani2017attention}.
+\textbf{Bidirectional cross-attention}: phase stream attends to PC stream and vice versa over pooled tokens \cite{vaswani2017attention}.
+\textbf{JiT-SR-3D}: Joint-in-time SR network with sinusoidal positional encoding and a single token-mixing context block on the concatenated dual-stream features.
+
+\end{table}
+\subsection*{3.6 Loss Function}
+
+Training minimized a composite loss function $\mathcal{L}$ that jointly penalizes velocity reconstruction error, magnitude reconstruction error, and texture regularity outside the vascular mask:
+
+\begin{equation}
+    \boxed{\mathcal{L} = \mathcal{L}_{\text{vel}} + \lambda_M \, \mathcal{L}_{\text{mag}} + \lambda_{\text{TV}} \, \mathcal{L}_{\text{TV}}}
+\end{equation}
+
+\subsubsection*{3.6.1 Masked Velocity Loss $\mathcal{L}_{\text{vel}}$}
+
+The velocity loss separates contributions from intraluminal (fluid) and extraluminal (background) regions using the binary mask $\mathcal{M}$. For a predicted velocity component $\hat{q} \in \{\hat{u}, \hat{v}, \hat{w}\}$ and its normalized target $q^* = q / \text{VENC}$, the per-voxel mean squared error is:
+
+\begin{equation}
+    \epsilon_q(\mathbf{x}) = \left(\hat{q}(\mathbf{x}) - q^*(\mathbf{x})\right)^2
+\end{equation}
+
+The masked fluid MSE for each component is:
+
+\begin{equation}
+    \mathcal{L}^q_{\text{fluid}} = \frac{\sum_{\mathbf{x}} \epsilon_q(\mathbf{x}) \cdot \mathcal{M}(\mathbf{x})}{\sum_{\mathbf{x}} \mathcal{M}(\mathbf{x}) + \varepsilon}
+\end{equation}
+
+Similarly, the non-fluid MSE for each component is:
+
+\begin{equation}
+    \mathcal{L}^q_{\text{bg}} = \frac{\sum_{\mathbf{x}} \epsilon_q(\mathbf{x}) \cdot (1 - \mathcal{M}(\mathbf{x}))}{\sum_{\mathbf{x}} (1 - \mathcal{M}(\mathbf{x})) + \varepsilon}
+\end{equation}
+
+The total velocity loss aggregates over all three components with a background downweighting factor $\lambda_{\text{bg}}$:
+
+\begin{equation}
+    \mathcal{L}_{\text{vel}} = \sum_{q \in \{u,v,w\}} \left( \mathcal{L}^q_{\text{fluid}} + \lambda_{\text{bg}} \, \mathcal{L}^q_{\text{bg}} \right)
+\end{equation}
+
+where $\lambda_{\text{bg}} = 0.1$ was used throughout, reflecting the primary clinical interest in accurate intraluminal velocity quantification while still regularizing background predictions.
+
+\subsubsection*{3.6.2 Magnitude Loss $\mathcal{L}_{\text{mag}}$}
+
+When the magnitude head is active, an analogous masked MSE is computed on the intensity-normalized magnitude channel. The predicted magnitude $\hat{M}$ is compared against the normalized target $M^* \in [0, 1]$ obtained via per-frame min-max scaling:
+
+\begin{equation}
+    \mathcal{L}_{\text{mag}} =
+        \frac{\sum_{\mathbf{x}} \left(\hat{M}(\mathbf{x}) - M^*(\mathbf{x})\right)^2 \cdot \mathcal{M}(\mathbf{x})}{\sum_{\mathbf{x}} \mathcal{M}(\mathbf{x}) + \varepsilon}
+        + \lambda_{\text{bg}}
+        \frac{\sum_{\mathbf{x}} \left(\hat{M}(\mathbf{x}) - M^*(\mathbf{x})\right)^2 \cdot (1-\mathcal{M}(\mathbf{x}))}{\sum_{\mathbf{x}} (1-\mathcal{M}(\mathbf{x})) + \varepsilon}
+\end{equation}
+
+The magnitude loss weight $\lambda_M = 1.0$ balanced its contribution relative to the velocity loss.
+
+\subsubsection*{3.6.3 Outside-Mask Total Variation Penalty $\mathcal{L}_{\text{TV}}$}
+
+To suppress spurious high-frequency texture in regions outside the vascular mask --- which would otherwise be unconstrained and produce physiologically implausible predictions --- an isotropic total variation (TV) penalty \cite{rudin1992tv,liu2019tvdip} was imposed on extraluminal voxels. For a predicted output channel $\hat{q}$, the TV penalty over the three Cartesian directions $d \in \{x, y, z\}$ is:
+
+\begin{equation}
+    \mathcal{L}_{\text{TV}} = \sum_{q} \sum_{d \in \{x,y,z\}} \frac{\sum_{\mathbf{x}} \left|\hat{q}(\mathbf{x} + \mathbf{e}_d) - \hat{q}(\mathbf{x})\right| \cdot \Omega(\mathbf{x}, d)}{\sum_{\mathbf{x}} \Omega(\mathbf{x}, d) + \varepsilon}
+\end{equation}
+
+where $\mathbf{e}_d$ is the unit displacement in direction $d$, and the joint outside indicator is:
+
+\begin{equation}
+    \Omega(\mathbf{x}, d) = \left(1 - \mathcal{M}(\mathbf{x})\right) \cdot \left(1 - \mathcal{M}(\mathbf{x} + \mathbf{e}_d)\right)
+\end{equation}
+
+The TV weight was set to $\lambda_{\text{TV}} = 10^{-5}$, providing gentle smoothness encouragement without over-regularizing the extraluminal signal.
+
+\subsubsection*{3.6.4 Evaluation Metrics}
+
+Model performance was assessed using two complementary metrics computed exclusively within the vascular mask. The \textbf{relative speed error} (RSE, reported as percentage) quantifies the vector-magnitude accuracy of the predicted velocity field:
+
+\begin{equation}
+    \text{RSE}(\%) = 100 \cdot \frac{
+        \sum_{\mathbf{x}} \dfrac{\sqrt{(\hat{u}-u^*)^2+(\hat{v}-v^*)^2+(\hat{w}-w^*)^2}}{\sqrt{u^{*2}+v^{*2}+w^{*2}}+\varepsilon} \cdot \mathcal{M}(\mathbf{x})
+    }{
+        \sum_{\mathbf{x}} \mathcal{M}(\mathbf{x})
+    }
+\end{equation}
+
+The \textbf{relative magnitude error} (RME) assesses the accuracy of the predicted intensity channel:
+
+\begin{equation}
+    \text{RME} = \frac{
+        \sum_{\mathbf{x}} \dfrac{|\hat{M}(\mathbf{x}) - M^*(\mathbf{x})|}{|M^*(\mathbf{x})| + \varepsilon} \cdot \mathcal{M}(\mathbf{x})
+    }{
+        \sum_{\mathbf{x}} \mathcal{M}(\mathbf{x})
+    }
+\end{equation}
+
+Both metrics were clipped to $[0, 1]$ per voxel prior to averaging to prevent outlier dominance.
+
+% FIGURE 6 — Loss Function Schematic:
+% Conceptual diagram showing: the binary mask M partitioning the volume into fluid and
+% background regions; arrows indicating the three loss terms (L_vel, L_mag, L_TV) and their
+% respective spatial domains; a bar chart or heatmap of per-voxel loss weights to visually
+% communicate the lambda_bg = 0.1 background down-weighting.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Loss Function Schematic. Conceptual diagram showing the binary mask $\mathcal{M}$ partitioning the volume into fluid and background regions, and the three loss terms.}
+    \label{fig:loss}
+\end{figure}
+
+\subsection*{3.7 Data Preparation and Task Configurations}
+
+\subsubsection*{3.7.1 VENC Normalization, Magnitude Scaling, and Ground-Truth Masking}
+
+Prior to network input, all velocity components were normalized by the global VENC:
+
+\begin{equation}
+    \tilde{q} = \frac{q}{\text{VENC}_{\text{global}}}, \quad q \in \{u, v, w\},
+    \quad \text{VENC}_{\text{global}} = \max(\text{VENC}_u, \text{VENC}_v, \text{VENC}_w)
+\end{equation}
+
+yielding values approximately in $[-1, 1]$. Magnitude images were normalized to $[0, 1]$ via per-frame min-max scaling using MONAI's \texttt{ScaleIntensity} transform \cite{cardoso2022monai}, ensuring temporal consistency within each cardiac cycle.
+
+In both task configurations described below, the reconstruction target is always the registered 7T velocity and magnitude volume \emph{after masking by} $\mathcal{M}(\mathbf{x})$:
+
+\begin{equation}
+    \mathbf{V}^{*}(\mathbf{x}, t) = \mathbf{V}_{7T}^{\text{reg}}(\mathbf{x}, t) \cdot \mathcal{M}(\mathbf{x})
+\end{equation}
+
+Applying the CoW mask to the ground truth confines supervision to the haemodynamically relevant intraluminal region, preventing the network from wasting representational capacity on extravascular tissue and ensuring that the loss is computed exclusively over voxels where accurate velocity quantification is clinically meaningful.
+
+\subsubsection*{3.7.2 Task Configuration I --- Same-Resolution Domain Translation ($\times$1)}
+
+In the first configuration, the network learns a direct mapping from the registered 3T acquisition to the masked 7T target at identical spatial resolution ($r = 1$). Formally, the input is the VENC-normalised 3T velocity and magnitude volume $\mathbf{V}_{3T}^{\text{reg}}(\mathbf{x}, t)$, and the target is $\mathbf{V}^{*}(\mathbf{x}, t)$. The two volumes occupy the same voxel grid by construction of the inter-scan registration pipeline (Section~3.2.2). This task constitutes a joint cross-field-strength domain translation and denoising problem: the model must simultaneously bridge the SNR gap between 3T and 7T, correct for residual contrast differences arising from distinct hardware and reconstruction chains, and predict the finer vascular detail visible only at 7T. The residual-skip variant of SR4DFlowNet was employed in this configuration, encouraging the network to learn incremental corrections relative to a direct identity shortcut rather than a full signal synthesis.
+
+\subsubsection*{3.7.3 Task Configuration II --- Super-Resolution ($\times$2)}
+
+In the second configuration, the network is trained to jointly perform cross-field-strength translation \emph{and} spatial super-resolution ($r = 2$): the input is a spatially downsampled version of the 3T acquisition, and the target is again the full-resolution masked 7T volume $\mathbf{V}^{*}(\mathbf{x}, t)$. The 3T volumes are downsampled by a factor of 0.5 along all three spatial dimensions using trilinear interpolation (zoom), which corresponds to the practical scenario of acquiring lower-resolution 3T data and seeking to recover both the spatial detail and the field-strength quality of 7T in a single forward pass:
+
+\begin{equation}
+    \mathbf{V}^{\text{LR}}_{3T}(\mathbf{x}, t) =
+        \mathcal{Z}_{0.5}\!\left[\mathbf{V}_{3T}^{\text{reg}}(\mathbf{x}, t)\right]
+\end{equation}
+
+where $\mathcal{Z}_{0.5}$ denotes isotropic spatial downsampling by a factor of 0.5 via trilinear interpolation. The network then maps $\mathbf{V}^{\text{LR}}_{3T}$ (at half the 3T voxel size) to $\mathbf{V}^{*}$ (at full 7T resolution), combining upsampling by $r = 2$ with domain translation in a single end-to-end pass. This configuration addresses the clinically relevant setting where only low-resolution 3T data are available and the goal is to recover the spatial and haemodynamic fidelity of 7T without a second acquisition.
+
+% FIGURE 7 — Task Configurations:
+% Two-panel schematic diagram:
+% (a) x1 task: 3T input (full res) --> SR4DFlowNet --> masked 7T target (full res).
+%     Show example axial velocity slices and difference map between input and target.
+% (b) x2 task: 3T input --> zoom x0.5 --> LR 3T input (half res) --> SR4DFlowNet (with
+%     x2 upsampling) --> masked 7T target (full res).
+%     Arrows should indicate the zoom step, the network upsampling, and the masking step.
+%     Velocity component maps (u, v, w) and magnitude shown for both configurations.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Task Configurations. (a)~$\times$1 domain translation: full-resolution 3T input mapped to masked 7T target at the same resolution. (b)~$\times$2 super-resolution: trilinearly downsampled 3T input ($\times 0.5$) mapped to the masked full-resolution 7T target via a network with $r=2$ upsampling. In both cases the ground truth is the registered 7T volume restricted to the CoW mask $\mathcal{M}$.}
+    \label{fig:tasks}
+\end{figure}
+
+\subsection*{3.8 Data Augmentation}
+
+To improve generalization given the limited patient cohort, a comprehensive augmentation strategy was applied online during training \cite{zhao2019augmentation}.
+
+\textbf{Vector-Aware Geometric Augmentation.} Random 90\textdegree{} rotations were applied with probability $p = 0.5$ per training sample. Rotation planes were selected uniformly from $\{xy, xz, yz\}$, and rotation multiplicities from $\{1, 2, 3\}$. Critically, the three velocity components were transformed as a proper vector field --- i.e., their values were permuted and sign-corrected in accordance with the rotation --- while the binary mask and magnitude images were treated as scalar fields and rotated without sign modification.
+
+\textbf{Synthetic Nonvascular Noise Augmentation.} To prevent the network from overfitting to specific noise patterns in the background and to encourage mask-focused learning, synthetic noise was injected into the extraluminal region of the low-resolution inputs. Noise amplitudes were drawn from one of several statistical distributions (zero-mean normal, Student-$t$, Laplace, skew-normal, or generalized normal) with randomized scale parameters in each training iteration. The noise was applied exclusively outside the binary mask $\mathcal{M}$ according to:
+
+\begin{equation}
+    \tilde{\mathbf{V}}^{\text{LR}}(\mathbf{x}) = \mathbf{V}^{\text{LR}}(\mathbf{x}) + \eta(\mathbf{x}) \cdot (1 - \mathcal{M}(\mathbf{x}))
+\end{equation}
+
+where $\eta(\mathbf{x}) \sim \mathcal{D}(0, \sigma_\eta)$ with $\sigma_\eta \in [\sigma_{\min}, \sigma_{\max}]$ sampled uniformly in each batch.
+
+\subsection*{3.9 Training Protocol}
+
+\subsubsection*{3.9.1 Patch-Based Sampling}
+
+All training was conducted on three-dimensional patches of size $16^3$ voxels (LR space), corresponding to $32^3$ (HR space) for the $\times$2 configuration \cite{peiffer2024patch}. During training, patches were sampled randomly from the full volumetric time series, with one cardiac frame selected uniformly at random per sample. For each training case, 64 patches were drawn per epoch; for validation, 16 center patches were used deterministically. An optional minimum mask coverage criterion ensured that sampled patches contained a sufficient proportion of vascular voxels.
+
+\subsubsection*{3.9.2 Optimizer and Learning Rate Schedule}
+
+The network was optimized using the Adam algorithm \cite{kingma2015adam} with an initial learning rate of $\eta_0 = 2\times10^{-4}$ and weight decay $\lambda_{L_2} = 5\times10^{-7}$. A ReduceLROnPlateau scheduler monitored the validation loss with a patience of 10 epochs, reducing the learning rate by a factor of 0.5 (minimum $\eta_{\min} = 10^{-6}$) when no improvement was observed. Early stopping was applied with a patience of 20 epochs to prevent overfitting, and an additional overfitting detector terminated training if the training loss decreased while validation loss increased for more than 15 consecutive epochs.
+
+\subsubsection*{3.9.3 Implementation Details}
+
+All models were implemented in PyTorch and trained on an NVIDIA GPU with a batch size of 4. The best model checkpoint (minimum validation loss) was retained for inference. Model checkpoints stored the full training state --- network weights, optimizer state, scheduler state, and hyperparameter configuration --- enabling reproducible evaluation.
+
+% FIGURE 8 — Training Curves:
+% Multi-panel figure showing training and validation loss curves over epochs for the x1 and
+% x2 configurations, with learning rate adjustments annotated. A secondary panel showing the
+% RSE (%) metric over epochs for both train and validation sets. Shaded regions indicating
+% the overfitting detection window and early stopping point for at least one representative run.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Training Curves. Multi-panel figure showing training and validation loss curves for the $\times$1 and $\times$2 configurations with learning rate adjustments annotated.}
+    \label{fig:training}
+\end{figure}
+
+\subsection*{3.10 Inference}
+
+At inference time, full 4D volumes were processed using an overlap-aware sliding-window strategy implemented via MONAI's \texttt{sliding\_window\_inference} \cite{cardoso2022monai,ronneberger2015unet}. For each time frame, the volume was partitioned into overlapping $16^3$ patches (25\% overlap, i.e., stride of $12$ voxels per dimension), and each patch was independently processed by the frozen network. Predicted patches were recombined using Gaussian-weighted blending at overlapping boundaries to eliminate patch-edge discontinuities:
+
+\begin{equation}
+    \hat{\mathbf{V}}(\mathbf{x}) = \frac{\sum_k w_k(\mathbf{x}) \cdot \hat{\mathbf{V}}_k(\mathbf{x})}{\sum_k w_k(\mathbf{x})}
+\end{equation}
+
+where $w_k(\mathbf{x})$ is a Gaussian window centered on patch $k$, and the sum is over all patches covering voxel $\mathbf{x}$. The resulting full-volume predictions were post-masked by $\mathcal{M}(\mathbf{x})$ to constrain the output to the CoW region, and the predicted velocity components were rescaled to physical units via $\hat{q}_{\text{phys}} = \hat{q} \cdot \text{VENC}$.
+
+% FIGURE 9 — Inference Pipeline and Qualitative Results:
+% Comprehensive results figure showing: (a) velocity vector maps (mid-systolic frame) from the
+% 3T input, the 7T reference, and the network prediction for x1 and x2 configurations on
+% representative axial slices through the Circle of Willis; (b) voxel-wise relative speed error
+% maps overlaid on the angiographic volume; (c) 3D streamline or arrow plots of the reconstructed
+% velocity field within the CoW mask. Zoomed inset on the MCA bifurcation recommended.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Inference Pipeline and Qualitative Results. Velocity vector maps, speed error maps, and 3D streamline plots for the $\times$1 and $\times$2 configurations.}
+    \label{fig:inference}
+\end{figure}
+
+% ============================================================
+%  Section 4 — Results
+% ============================================================
+\section*{Results}
+
+\subsection*{4.1 Experimental Overview}
+
+Nine configurations were evaluated on a held-out test subject (case~000) not seen during
+training.  Eight span the full factorial combination of two task modes, two network
+architectures, and two input conditioning strategies; the ninth is a two-stage cascade pipeline
+described below.  In \textbf{Denoising} mode ($\times 1$),
+the network translates clinical 3T acquisitions into the contrast and noise characteristics of
+7T, operating at native resolution.  In \textbf{Super-Resolution} mode ($\times 2$, hereafter
+\textbf{SR}), the network simultaneously denoises and upsamples by a factor of two, reconstructing
+7T-equivalent volumes from $\times 0.5$-downsampled 3T inputs.  The two architectures are the
+\textbf{Original} SR4DFlowNet baseline and the \textbf{CBAM-PreUpsampling} extension, which
+inserts a convolutional block attention module before the final upsampling stage.  Both strategies share the same composite loss function
+$\mathcal{L} = \mathcal{L}_\text{vel} + \lambda_M\mathcal{L}_\text{mag} +
+\lambda_\text{TV}\mathcal{L}_\text{TV}$; they differ exclusively in what is fed to the network.
+In the \textbf{Masked} strategy, the 3T input volume is element-wise multiplied by the binary
+CoW mask $\mathcal{M}$ before being passed to the network, so all background voxels are zeroed
+in the input.  In the \textbf{Synthetic-noise} strategy, the full, unmasked 3T volume is used
+directly, augmented with simulated acquisition noise to increase training variability.  The
+masked strategy therefore provides the network with an implicit spatial prior --- the input
+itself encodes where vessels are --- at the cost of requiring a pre-computed CoW segmentation at
+inference time.  The synthetic-noise strategy makes no such assumption and is applicable to any
+raw 3T acquisition without preprocessing.
+
+Configuration~\textbf{I} is a \textbf{two-stage cascade pipeline}: first, the SR model~H
+(CBAM-PreUpsampling, synthetic-noise, $\times 2$) is applied to the downsampled 3T input;
+the resulting SR prediction is then re-segmented with the same CoW segmentation pipeline used
+for the 7T reference, generating an automatic mask; finally, the masked SR output is fed into
+the Denoising model~A (Original, masked, $\times 1$) for a second refinement pass.  This
+cascade tests whether chaining the best available mask-free SR model with a masked Denoising
+model can recover the performance of pure masked training without requiring a pre-existing
+segmentation of the original 3T scan.
+
+Table~\ref{tab:experiment_map} maps each identifier to its configuration.  All geometry metrics
+are computed against a common 7T reference segmentation of 15{,}577 voxels at 0.5\,mm isotropic
+resolution.  Velocity and background metrics are averaged across nine cardiac frames, with all
+velocity MSE values expressed in VENC-normalised units using scientific notation ($\times 10^{-2}$
+for intraluminal velocity, $\times 10^{-3}$ for extravascular background).
+
+\begin{table}[!htbp]
+  \centering
+  \caption{Summary of the nine evaluated configurations.}
+  \label{tab:experiment_map}
+  \small
+  \begin{tabular}{clll}
+    \toprule
+    ID & Task mode & Architecture & Input strategy \\
+    \midrule
+    A & Denoising ($\times 1$) & Original           & Masked \\
+    B & Denoising ($\times 1$) & Original           & Synth.\ noise \\
+    C & Denoising ($\times 1$) & CBAM-PreUpsampling & Masked \\
+    D & Denoising ($\times 1$) & CBAM-PreUpsampling & Synth.\ noise \\
+    \midrule
+    E & Super-Resolution ($\times 2$) & Original           & Masked \\
+    F & Super-Resolution ($\times 2$) & Original           & Synth.\ noise \\
+    G & Super-Resolution ($\times 2$) & CBAM-PreUpsampling & Masked \\
+    H & Super-Resolution ($\times 2$) & CBAM-PreUpsampling & Synth.\ noise \\
+    \midrule
+    I & \makecell[l]{SR ($\times 2$) $\to$ Denoising ($\times 1$)\\(two-stage cascade)} &
+      \makecell[l]{CBAM-PreUpsampling (SR)\\+ Original (Denoising)} &
+      \makecell[l]{Synth.\ noise (SR) $\to$\\auto-seg.\ $\to$ Masked (Dn.)} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Performance is assessed along three complementary axes: (i)~\textbf{velocity reconstruction
+fidelity} via the masked MSE of all three velocity components jointly ($\text{MSE}_\text{vel}$)
+and per-directional breakdown ($u$: feet--head, $v$: left--right, $w$: anterior--posterior);
+(ii)~\textbf{vascular geometry fidelity} via the Dice coefficient, the symmetric mean surface
+distance (sMSD), and the Hausdorff distance (HD) of the re-segmented prediction mask against the
+7T reference; and (iii)~\textbf{background suppression} via the MSE of predicted velocities
+outside $\mathcal{M}$ ($\text{MSE}_\text{bg}$).
+
+% -------------------------------------------------------
+\subsection*{4.2 Velocity Reconstruction}
+% -------------------------------------------------------
+\label{sec:velocity}
+Table~\ref{tab:velocity} reports velocity MSE within the CoW mask.  Bold denotes the best value
+in each column within each task mode.
+
+\begin{table}[!htbp]
+  \centering
+  \caption{Intraluminal velocity reconstruction metrics.  All values are VENC-normalised MSE
+  ($\times 10^{-2}$) averaged over nine cardiac frames (lower is better).  Bold: best in each
+  column within each task group.}
+  \label{tab:velocity}
+  \setlength{\tabcolsep}{5pt}
+  \small
+  \begin{tabular}{cll l rrrr}
+    \toprule
+    \multirow{2}{*}{ID} & \multirow{2}{*}{Architecture} & \multirow{2}{*}{Input} &
+      & \multicolumn{4}{c}{MSE $\downarrow$ ($\times 10^{-2}$, VENC-normalised)} \\
+    \cmidrule(lr){5-8}
+    & & & & $\text{Total}$ & $u$ & $v$ & $w$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Denoising ($\times 1$)}} \\
+    \midrule
+    A & Original           & Masked        & & $\mathbf{4.281}$ & $1.354$ & $1.748$ & $1.180$ \\
+    B & Original           & Synth.\ noise & & $4.721$ & $1.440$ & $2.054$ & $1.227$ \\
+    C & CBAM-PreUpsampling & Masked        & & $4.306$ & $\mathbf{1.327}$ & $1.815$ & $\mathbf{1.164}$ \\
+    D & CBAM-PreUpsampling & Synth.\ noise & & $4.399$ & $1.458$ & $\mathbf{1.725}$ & $1.216$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Super-Resolution ($\times 2$)}} \\
+    \midrule
+    E & Original           & Masked        & & $4.977$ & $\mathbf{1.472}$ & $1.853$ & $1.652$ \\
+    F & Original           & Synth.\ noise & & $4.983$ & $1.592$ & $1.903$ & $1.489$ \\
+    G & CBAM-PreUpsampling & Masked        & & $4.844$ & $\mathbf{1.472}$ & $1.833$ & $1.539$ \\
+    H & CBAM-PreUpsampling & Synth.\ noise & & $\mathbf{4.833}$ & $1.577$ & $\mathbf{1.807}$ & $\mathbf{1.449}$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Two-Stage Cascade (SR $\to$ Denoising)}} \\
+    \midrule
+    I & \makecell[l]{CBAM-PreUps.\ (SR)\\+ Original (Dn.)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $5.154$ & $1.572$ & $2.072$ & $1.510$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+In the Denoising mode, masked training retains a clear velocity advantage.  Configuration~A
+achieves the lowest total MSE ($4.281{\times}10^{-2}$), a 9.3\% reduction over its
+synthetic-noise counterpart~B ($4.721{\times}10^{-2}$).  The CBAM-PreUpsampling architecture
+narrows but does not close this gap: configuration~D ($4.399{\times}10^{-2}$) outperforms~B by
+6.8\% and approaches the masked configurations, with a residual deficit of only 2.7\% relative
+to~C ($4.306{\times}10^{-2}$).  These results indicate that the attention mechanism provides a
+substantial architectural benefit when mask-guided supervision is unavailable.  The advantage of
+masked training under CBAM is accordingly smaller (2.1\%), as the architecture already recovers
+much of the information that masking contributes.  At the per-component level, configurations~C
+and~A trade leadership: CBAM-masked achieves the lowest $u$- and $w$-direction MSE
+($1.327$ and $1.164{\times}10^{-2}$ respectively), while the original masked model~A records the
+lowest $v$-direction MSE ($1.748{\times}10^{-2}$).  Interestingly, configuration~D records the
+best $v$-component of all Denoising models ($1.725{\times}10^{-2}$), slightly outperforming~A,
+suggesting that for the left--right direction the CBAM attention mechanism provides a specific
+benefit even without mask supervision.
+
+In the Super-Resolution mode, a qualitatively different pattern emerges.  The input strategy has
+almost no effect on total velocity MSE when the CBAM architecture is used: configuration~G
+(masked) and~H (synth.\ noise) differ by only $0.011{\times}10^{-2}$ (0.2\%), with~H
+($4.833{\times}10^{-2}$) marginally lower.  This near-zero gap implies that, for the harder
+$\times 2$ task, the pre-upsampling attention module recovers the velocity accuracy that masked
+supervision would otherwise provide.  For the Original architecture the gap is similarly minimal
+(E: $4.977{\times}10^{-2}$ vs.\ F: $4.983{\times}10^{-2}$).  The dominant factor in SR velocity
+accuracy is therefore the architecture rather than the input strategy: CBAM reduces total MSE by
+2.7\% over Original under masked training (G vs.\ E) and by 3.0\% under synthetic noise (H
+vs.\ F).  Configuration~H also achieves the lowest $v$- and $w$-component MSE across all SR
+models ($1.807$ and $1.449{\times}10^{-2}$ respectively).
+
+Configuration~I (two-stage cascade) yields the highest total velocity MSE of any configuration
+($5.154{\times}10^{-2}$), exceeding even the weakest single-stage model~B ($4.721{\times}10^{-2}$)
+by 9.2\%.  Rather than combining the strengths of its two constituent models, the cascade
+\emph{accumulates} their errors.  The Denoising model~A was trained on registered 3T
+acquisitions; receiving the SR-enhanced prediction from model~H as input places it outside the
+distribution it was trained on, degrading its velocity reconstruction.  The $v$-component is
+most affected ($2.072{\times}10^{-2}$, the worst among all nine configurations), consistent with
+the cascade compounding the left--right noise floor already present in the SR stage.
+
+% -------------------------------------------------------
+\subsection*{4.3 Vascular Geometry Fidelity}
+% -------------------------------------------------------
+
+Geometric fidelity metrics are reported in Table~\ref{tab:geometry}.  Each predicted 4D Flow
+volume was re-segmented using the CoW segmentation pipeline applied to the original 7T data,
+and the resulting mask was compared against the 7T reference (15{,}577 voxels).
+
+\begin{table}[!htbp]
+  \centering
+  \caption{Vascular geometry metrics.  The re-segmented prediction mask is compared against the
+  7T CoW reference (15{,}577 voxels at 0.5\,mm isotropic).  Dice: volumetric overlap
+  ($\uparrow$); sMSD: symmetric mean surface distance in mm ($\downarrow$); HD: Hausdorff
+  distance in mm ($\downarrow$).}
+  \label{tab:geometry}
+  \setlength{\tabcolsep}{4.5pt}
+  \small
+  \begin{tabular}{cll l r rrr}
+    \toprule
+    ID & Architecture & Input & & Pred.\ voxels &
+      Dice $\uparrow$ & sMSD $\downarrow$ & HD $\downarrow$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Denoising ($\times 1$) — reference: 15,577 voxels}} \\
+    \midrule
+    A & Original           & Masked        & & 18{,}027 & 0.843 & 0.202 & \textbf{8.57} \\
+    B & Original           & Synth.\ noise & & 14{,}840 & 0.734 & 0.667 & 15.09 \\
+    C & CBAM-PreUpsampling & Masked        & & 17{,}544 & \textbf{0.855} & \textbf{0.183} & 9.07 \\
+    D & CBAM-PreUpsampling & Synth.\ noise & & 15{,}533 & 0.761 & 0.501 & 9.86 \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Super-Resolution ($\times 2$) — reference: 15,577 voxels}} \\
+    \midrule
+    E & Original           & Masked        & & 18{,}623 & \textbf{0.715} & \textbf{0.412} & \textbf{9.01} \\
+    F & Original           & Synth.\ noise & & 12{,}808 & 0.694 & 0.828 & 14.82 \\
+    G & CBAM-PreUpsampling & Masked        & & 19{,}294 & 0.702 & 0.413 & 9.50 \\
+    H & CBAM-PreUpsampling & Synth.\ noise & & 12{,}841 & 0.698 & 0.737 & 13.59 \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Two-Stage Cascade (SR $\to$ Denoising) — reference: 15,577 voxels}} \\
+    \midrule
+    I & \makecell[l]{CBAM-PreUps.\ (SR)\\+ Original (Dn.)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & 17{,}984 & 0.680 & 0.767 & 13.54 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Geometry is the dimension most sensitive to training strategy.  In the Denoising mode, masked
+configurations (A and~C) substantially outperform synthetic-noise counterparts on all three
+metrics.  Configuration~C achieves the best Dice (0.855) and sMSD (0.183\,mm) of all Denoising
+models.  Configuration~A records the best Hausdorff distance (8.57\,mm), 0.50\,mm lower than~C,
+reflecting tighter containment of worst-case boundary outliers.  Both masked models predict
+volumes closely bracketing the reference (17{,}544--18{,}027 vs.\ 15{,}577 voxels), indicative
+of a modest, controlled over-segmentation of peripheral branches.
+
+The benefit of the CBAM architecture in the synthetic-noise Denoising setting (D vs.\ B) is
+striking: Dice improves from 0.734 to 0.761 (+3.7\,pp) and Hausdorff distance falls from
+15.09 to 9.86\,mm, a 34.6\% reduction.  This confirms that the attention mechanism provides an
+inductive bias that partially compensates for the absence of mask-guided supervision, keeping
+worst-case boundary errors close to the masked-training range (HD range for masked:
+8.57--9.07\,mm).
+
+In the Super-Resolution mode, Dice scores are uniformly lower than in Denoising ($\approx$14\,pp
+gap for the best configurations: E 0.715 vs.\ C 0.855), consistent with the harder task.  The
+relative ordering by training strategy is preserved: masked configurations (E and~G) achieve
+lower HD than their synthetic-noise counterparts (F and~H), with configurations~E and~G both
+producing HD values below 10\,mm.  Among SR models, the Original with masked input (E) achieves
+the best Dice (0.715), the best sMSD (0.412\,mm), and the lowest HD (9.01\,mm), marginally
+outperforming CBAM-masked (G: Dice 0.702, sMSD 0.413\,mm, HD 9.50\,mm).  The larger predicted
+voxel count of~G (19{,}294 vs.\ 18{,}623) points to slight over-segmentation as the explanation
+for this Dice gap.  For synthetic-noise SR, CBAM (H) reduces the HD relative to the Original (F)
+from 14.82 to 13.59\,mm ($-$8.3\%), a smaller but consistent pattern of architectural benefit.
+
+Configuration~I achieves the worst Dice of all nine configurations (0.680), despite its
+predicted voxel count (17{,}984) being close to the reference.  The intermediate CoW
+segmentation derived from the SR output (stage~1) does not match the true vessel boundaries as
+well as a mask derived from the original 3T data, and any geometric errors in this intermediate
+mask are directly propagated into the masked input fed to the Denoising model (stage~2).  The
+sMSD of 0.767\,mm and HD of 13.54\,mm further confirm that the two-stage pipeline introduces
+boundary localisation errors that neither single-stage model produces independently.
+
+% -------------------------------------------------------
+\subsection*{4.4 Background Suppression}
+% -------------------------------------------------------
+
+Table~\ref{tab:background} reports background velocity MSE (outside $\mathcal{M}$) for all eight
+configurations.
+
+\begin{table}[!htbp]
+  \centering
+  \caption{Background velocity MSE outside the Circle of Willis mask.  Values are VENC-normalised
+  mean squared errors averaged over nine cardiac frames (lower is better).}
+  \label{tab:background}
+  \setlength{\tabcolsep}{4.5pt}
+  \small
+  \begin{tabular}{cll l rrrr}
+    \toprule
+    ID & Architecture & Input & &
+      $\text{MSE}_{\text{bg}}$ $\downarrow$ &
+      $\text{MSE}_{u}$ $\downarrow$ &
+      $\text{MSE}_{v}$ $\downarrow$ &
+      $\text{MSE}_{w}$ $\downarrow$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Denoising ($\times 1$)}} \\
+    \midrule
+    A & Original           & Masked       & & $0.64{\times}10^{-3}$ & $0.19{\times}10^{-3}$ & $0.32{\times}10^{-3}$ & $0.14{\times}10^{-3}$ \\
+    B & Original           & Synth.\ noise & & $1.51{\times}10^{-3}$ & $0.36{\times}10^{-3}$ & $0.84{\times}10^{-3}$ & $0.31{\times}10^{-3}$ \\
+    C & CBAM-PreUpsampling & Masked       & & $\mathbf{0.61{\times}10^{-3}}$ & $\mathbf{0.15{\times}10^{-3}}$ & $0.34{\times}10^{-3}$ & $\mathbf{0.12{\times}10^{-3}}$ \\
+    D & CBAM-PreUpsampling & Synth.\ noise & & $1.61{\times}10^{-3}$ & $0.46{\times}10^{-3}$ & $0.86{\times}10^{-3}$ & $0.30{\times}10^{-3}$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Super-Resolution ($\times 2$)}} \\
+    \midrule
+    E & Original           & Masked        & & $0.78{\times}10^{-3}$ & $0.20{\times}10^{-3}$ & $0.41{\times}10^{-3}$ & $0.17{\times}10^{-3}$ \\
+    F & Original           & Synth.\ noise & & $1.50{\times}10^{-3}$ & $0.47{\times}10^{-3}$ & $0.69{\times}10^{-3}$ & $0.34{\times}10^{-3}$ \\
+    G & CBAM-PreUpsampling & Masked        & & $\mathbf{0.67{\times}10^{-3}}$ & $\mathbf{0.17{\times}10^{-3}}$ & $\mathbf{0.33{\times}10^{-3}}$ & $\mathbf{0.17{\times}10^{-3}}$ \\
+    H & CBAM-PreUpsampling & Synth.\ noise & & $1.42{\times}10^{-3}$ & $0.40{\times}10^{-3}$ & $0.75{\times}10^{-3}$ & $0.27{\times}10^{-3}$ \\
+    \midrule
+    \multicolumn{8}{l}{\textit{Two-Stage Cascade (SR $\to$ Denoising)}} \\
+    \midrule
+    I & \makecell[l]{CBAM-PreUps.\ (SR)\\+ Original (Dn.)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $0.84{\times}10^{-3}$ & $0.24{\times}10^{-3}$ & $0.42{\times}10^{-3}$ & $0.18{\times}10^{-3}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Background suppression is almost entirely determined by the input conditioning strategy.  Masked
+configurations reduce extravascular MSE by approximately 2.0--2.7$\times$ relative to their
+synthetic-noise counterparts: A vs.\ B ($\times 2.35$), C vs.\ D ($\times 2.65$), E vs.\ F
+($\times 1.92$), and G vs.\ H ($\times 2.12$).  Because both strategies share the same loss,
+this gap cannot be attributed to differences in the loss function.  Rather, it reflects the
+direct consequence of input conditioning: when the background is zeroed in the input, the
+network has no signal to propagate through those voxels during training and naturally learns to
+predict near-zero in extravascular regions.  For synthetic-noise models, the input carries real
+background signal throughout the volume, so the $\mathcal{L}_\text{TV}$ regulariser must
+actively suppress predictions that the network has been given non-zero information to make ---
+an inherently harder task.
+
+Within masked configurations, CBAM-PreUpsampling achieves lower background MSE than the Original
+in both modes (C vs.\ A; G vs.\ E), suggesting that the attention mechanism improves spatial
+localisation of predicted flow and thereby reduces extravascular signal leakage.  Within
+synthetic-noise configurations, the architecture-background relationship differs by mode: in
+Denoising, configuration~D (CBAM) produces the highest background MSE of any model
+($1.61{\times}10^{-3}$), exceeding its Original counterpart~B ($1.51{\times}10^{-3}$); in SR,
+the ordering reverses and CBAM~H ($1.42{\times}10^{-3}$) is slightly better than Original~F
+($1.50{\times}10^{-3}$).  This reversal is consistent with the observation from
+Section~\ref{sec:velocity} that the CBAM architecture has a qualitatively stronger impact on
+SR than on Denoising in the absence of mask supervision.
+
+The $v$-component (left--right phase-contrast direction) is consistently the largest contributor
+to background error across all nine configurations, reaching values approximately two to three
+times higher than $u$ or $w$ in the synthetic-noise setting.  This systematic pattern is
+consistent with the velocity reconstruction results and likely reflects residual phase errors
+or partial-volume effects in the left--right encoding direction of the 3T acquisition.
+
+Configuration~I produces a background MSE of $0.84{\times}10^{-3}$, intermediate between the
+masked models ($0.61$--$0.78{\times}10^{-3}$) and the single-stage synthetic-noise models
+($1.42$--$1.61{\times}10^{-3}$).  This is expected: the Denoising stage receives a masked input
+(zeroed outside the auto-generated CoW mask), so it still benefits from input-level background
+suppression.  However, the auto-generated mask from the SR output is less accurate than a
+ground-truth or 3T-derived mask, and any voxels mis-classified as vascular in stage~1 will leak
+non-zero signal into the stage~2 input, partially degrading background suppression relative to
+the gold-standard masked models (A and~C).
+
+% -------------------------------------------------------
+\subsection*{4.5 Consolidated Comparison}
+% -------------------------------------------------------
+
+Table~\ref{tab:summary} consolidates the five primary performance indicators across all nine
+configurations for direct cross-experiment comparison.
+
+\begin{table}[!htbp]
+  \centering
+  \caption{Consolidated results.  $\text{MSE}_\text{vel}$ in units of $10^{-2}$;
+  $\text{MSE}_\text{bg}$ in units of $10^{-3}$; sMSD and HD in mm.
+  Bold: best value within each task group per metric.}
+  \label{tab:summary}
+  \setlength{\tabcolsep}{4pt}
+  \small
+  \begin{tabular}{cll l rrrrr}
+    \toprule
+    ID & Architecture & Input & &
+      \makecell{$\text{MSE}_\text{vel}$ $\downarrow$\\(${\times}10^{-2}$)} &
+      Dice $\uparrow$ &
+      \makecell{sMSD $\downarrow$\\(mm)} &
+      \makecell{HD $\downarrow$\\(mm)} &
+      \makecell{$\text{MSE}_\text{bg}$ $\downarrow$\\(${\times}10^{-3}$)} \\
+    \midrule
+    \multicolumn{9}{l}{\textit{Denoising ($\times 1$)}} \\
+    \midrule
+    A & Original     & Masked        & & $\mathbf{4.281}$ & 0.843 & 0.202 & $\mathbf{8.57}$ & $0.64$ \\
+    B & Original     & Synth.\ noise & & $4.721$ & 0.734 & 0.667 & $15.09$ & $1.51$ \\
+    C & CBAM-PreUps. & Masked        & & $4.306$ & $\mathbf{0.855}$ & $\mathbf{0.183}$ & $9.07$ & $\mathbf{0.61}$ \\
+    D & CBAM-PreUps. & Synth.\ noise & & $4.399$ & 0.761 & 0.501 & $9.86$ & $1.61$ \\
+    \midrule
+    \multicolumn{9}{l}{\textit{Super-Resolution ($\times 2$)}} \\
+    \midrule
+    E & Original     & Masked        & & $4.977$ & $\mathbf{0.715}$ & $\mathbf{0.412}$ & $\mathbf{9.01}$ & $0.78$ \\
+    F & Original     & Synth.\ noise & & $4.983$ & 0.694 & 0.828 & $14.82$ & $1.50$ \\
+    G & CBAM-PreUps. & Masked        & & $4.844$ & 0.702 & 0.413 & $9.50$ & $\mathbf{0.67}$ \\
+    H & CBAM-PreUps. & Synth.\ noise & & $\mathbf{4.833}$ & 0.698 & 0.737 & $13.59$ & $1.42$ \\
+    \midrule
+    \multicolumn{9}{l}{\textit{Two-Stage Cascade (SR $\to$ Denoising)}} \\
+    \midrule
+    I & \makecell[l]{CBAM-PreUps.\ (SR)\\+ Original (Dn.)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $5.154$ & 0.680 & 0.767 & $13.54$ & $0.84$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Four principal conclusions emerge from the consolidated results.
+
+\textbf{Masked input conditioning is the dominant factor for geometric fidelity and background
+suppression, but this advantage carries an inference-time prerequisite.}  Across both task
+modes, masked configurations consistently achieve lower HD (by 5--6\,mm relative to
+synthetic-noise counterparts using the same architecture) and lower background MSE (by
+1.9--2.7$\times$), while Dice scores improve by 9--11\,pp in Denoising and up to 2\,pp in SR.
+Since both strategies share the same loss function, these gains stem from the zeroed input: the
+network learns a strong prior that background regions should produce near-zero predictions, and
+the spatial layout of vessels is implicitly encoded in the masked input at training and inference
+time.  This comes at a practical cost --- masked-input models require a pre-computed CoW
+segmentation at inference, which is typically unavailable in a purely clinical 3T workflow.
+Notably, the Hausdorff distance is the metric most sensitive to the input strategy:
+Original-architecture synthetic-noise training produces worst-case boundary errors above
+14\,mm (B: 15.09, F: 14.82), while CBAM synthetic-noise training reduces HD to 13.59\,mm (H)
+and even to 9.86\,mm (D), approaching the masked-training range; all masked models remain below
+10\,mm regardless of architecture.
+
+\textbf{The CBAM-PreUpsampling architecture is most impactful in the absence of mask supervision
+and in the SR setting.}  In the masked Denoising setting, CBAM (C) improves Dice by 1.2\,pp and
+sMSD by 9.4\% over the Original (A), while the velocity MSE change is negligible ($+$0.6\%).  The
+CBAM benefit is substantially larger in the synthetic-noise Denoising setting: Dice improves from
+0.734 to 0.761 ($+$3.7\,pp) and HD falls from 15.09 to 9.86\,mm ($-$34.6\%), consistent with
+the attention mechanism providing a spatial inductive bias that partially compensates for the
+absence of explicit mask guidance.  In SR, the architecture effect on velocity is the dominant
+signal: CBAM reduces $\text{MSE}_\text{vel}$ by 2.7--3.0\% in both input conditions, and G
+achieves the lowest background MSE for SR ($0.67{\times}10^{-3}$).
+
+\textbf{Input strategy and architecture interact differently across task modes, with important
+implications for mask-free clinical deployment.}  For Denoising, zeroing the input background
+provides a clear, consistent velocity advantage (9.3\% for Original; 2.1\% for CBAM).  For SR,
+this advantage effectively vanishes for the CBAM architecture: G (masked, $4.844{\times}10^{-2}$)
+and~H (synthetic noise, $4.833{\times}10^{-2}$) differ by only 0.2\%.  This implies that the
+pre-upsampling attention mechanism enables competitive intraluminal velocity accuracy from a raw,
+unmasked input when the task complexity is high enough to activate the full benefit of the
+attention module.  The trade-off is worse geometric fidelity (HD: 13.59 vs.\ 9.50\,mm) and
+higher background noise ($1.42$ vs.\ $0.67{\times}10^{-3}$).  For applications where a CoW mask
+is available, masked-input CBAM (G) offers the best balance.  For fully mask-free pipelines,
+CBAM with synthetic-noise augmentation (H) is the recommended configuration, achieving velocity
+accuracy within 0.2\% of its masked counterpart on unprocessed 3T inputs.
+
+\textbf{The two-stage cascade pipeline (I) does not outperform single-stage models and
+underscores the hazard of distribution shift between stages.}
+Configuration~I was designed to combine the mask-free flexibility of the SR model (H) with the
+refinement quality of the masked Denoising model (A), using an automatically generated
+intermediate mask to bridge the two stages.  Instead, it achieves the worst velocity MSE of all
+nine configurations ($5.154{\times}10^{-2}$), the worst Dice (0.680), and a background MSE
+($0.84{\times}10^{-3}$) comparable to the masked SR models rather than the masked Denoising
+models.  Two compounding mechanisms explain this failure: (i)~\emph{domain mismatch} --- model~A
+was trained on registered 3T acquisitions and receives SR-enhanced predictions from model~H as
+input, placing it outside its training distribution; and (ii)~\emph{mask error propagation} ---
+the intermediate CoW segmentation derived from the SR output is less geometrically accurate than
+a mask derived from the original acquisition, so the masked input fed to the Denoising stage
+embeds the geometric errors of stage~1 directly into stage~2.  These findings suggest that
+simple inference-time cascading of models trained independently in different input domains is not
+a viable shortcut; a jointly trained multi-stage or iterative refinement architecture would be
+required to benefit from chaining SR and Denoising stages.
+
+
+
+% ── Bibliography ──────────────────────────────────────────────────────────────
+% Use the following in your main .tex file:
+%   \bibliographystyle{ieeetr}   % or unsrt, apalike, etc.
+%   \bibliography{neuroflow}
+%
+% All entries are defined in neuroflow.bib (same directory).
+\bibliographystyle{ieeetr}
+\bibliography{references}
+
+\end{document}

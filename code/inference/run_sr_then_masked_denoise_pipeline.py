@@ -297,6 +297,7 @@ def main() -> None:
             "1",
             "--predict-mag",
             "--already-velocity-input",
+            "--hr-raw-phase-target",
             "--mag-norm-mode",
             "divisor",
             "--mag-scale",

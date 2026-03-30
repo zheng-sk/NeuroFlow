@@ -89,16 +89,29 @@ def main() -> None:
 
     parser.add_argument(
         "--raw-phase-input",
-        dest="raw_phase_input",
+        dest="lr_raw_phase_input",
         action="store_true",
         default=True,
-        help="Assume velocity NIfTI values are raw phase-like and convert to velocity.",
+        help="Assume LR/input velocity NIfTI values are raw phase-like and convert to velocity.",
     )
     parser.add_argument(
         "--already-velocity-input",
-        dest="raw_phase_input",
+        dest="lr_raw_phase_input",
         action="store_false",
-        help="Disable RAW conversion (input velocity already physical).",
+        help="Disable RAW conversion for LR/input velocity (input already physical).",
+    )
+    parser.add_argument(
+        "--hr-raw-phase-target",
+        dest="hr_raw_phase_input",
+        action="store_true",
+        default=None,
+        help="Assume HR/target velocity NIfTI values are raw phase-like and convert to velocity.",
+    )
+    parser.add_argument(
+        "--hr-already-velocity-target",
+        dest="hr_raw_phase_input",
+        action="store_false",
+        help="Disable RAW conversion for HR/target velocity (target already physical).",
     )
     parser.add_argument(
         "--legacy-invert-uv-sign-on-raw",
@@ -135,6 +148,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    hr_raw_phase_input = bool(args.lr_raw_phase_input) if args.hr_raw_phase_input is None else bool(args.hr_raw_phase_input)
 
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +210,8 @@ def main() -> None:
         sw_batch_size=int(args.sw_batch_size),
         overlap=float(args.overlap),
         device=device,
-        raw_phase_input=bool(args.raw_phase_input),
+        lr_raw_phase_input=bool(args.lr_raw_phase_input),
+        hr_raw_phase_input=bool(hr_raw_phase_input),
         legacy_invert_uv_sign_on_raw=bool(args.legacy_invert_uv_sign_on_raw),
         raw_center=float(args.raw_center),
         raw_scale=float(args.raw_scale),
@@ -231,7 +246,8 @@ def main() -> None:
         "model_path": str(Path(args.model_path).resolve()),
         "model_variant": str(getattr(model, "model_variant", "original")),
         "predict_mag": bool(predict_mag_flag),
-        "raw_phase_input": bool(args.raw_phase_input),
+        "lr_raw_phase_input": bool(args.lr_raw_phase_input),
+        "hr_raw_phase_input": bool(hr_raw_phase_input),
         "legacy_invert_uv_sign_on_raw": bool(args.legacy_invert_uv_sign_on_raw),
         "raw_center": float(args.raw_center),
         "raw_scale": float(args.raw_scale),

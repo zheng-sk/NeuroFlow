@@ -318,7 +318,8 @@ def _prepare_frame(
     case: Dict[str, Any],
     volumes: Dict[str, Any],
     frame_idx: int,
-    raw_phase_input: bool,
+    lr_raw_phase_input: bool,
+    hr_raw_phase_input: bool,
     legacy_invert_uv_sign_on_raw: bool,
     raw_center: float,
     raw_scale: float,
@@ -353,7 +354,7 @@ def _prepare_frame(
     venc_v = resolve_component_venc(case, "venc_v")
     venc_w = resolve_component_venc(case, "venc_w")
 
-    if raw_phase_input:
+    if lr_raw_phase_input:
         if venc_u <= 0:
             venc_u = float(np.max(np.abs(lr_u)))
         if venc_v <= 0:
@@ -365,16 +366,17 @@ def _prepare_frame(
         lr_v = raw_to_velocity(lr_v, venc_v, raw_center, raw_scale, legacy_invert_uv_sign_on_raw)
         lr_w = raw_to_velocity(lr_w, venc_w, raw_center, raw_scale, False)
 
+    if venc_u <= 0:
+        venc_u = float(np.max(np.abs(lr_u)))
+    if venc_v <= 0:
+        venc_v = float(np.max(np.abs(lr_v)))
+    if venc_w <= 0:
+        venc_w = float(np.max(np.abs(lr_w)))
+
+    if hr_raw_phase_input:
         hr_u = raw_to_velocity(hr_u, venc_u, raw_center, raw_scale, legacy_invert_uv_sign_on_raw)
         hr_v = raw_to_velocity(hr_v, venc_v, raw_center, raw_scale, legacy_invert_uv_sign_on_raw)
         hr_w = raw_to_velocity(hr_w, venc_w, raw_center, raw_scale, False)
-    else:
-        if venc_u <= 0:
-            venc_u = float(np.max(np.abs(lr_u)))
-        if venc_v <= 0:
-            venc_v = float(np.max(np.abs(lr_v)))
-        if venc_w <= 0:
-            venc_w = float(np.max(np.abs(lr_w)))
 
     venc_scalar = float(max(venc_u, venc_v, venc_w))
     if venc_scalar <= 0:
@@ -413,7 +415,8 @@ def run_case_inference(
     sw_batch_size: int,
     overlap: float,
     device: torch.device,
-    raw_phase_input: bool,
+    lr_raw_phase_input: bool,
+    hr_raw_phase_input: bool,
     legacy_invert_uv_sign_on_raw: bool,
     raw_center: float,
     raw_scale: float,
@@ -437,7 +440,8 @@ def run_case_inference(
             case=case,
             volumes=volumes,
             frame_idx=frame_idx,
-            raw_phase_input=raw_phase_input,
+            lr_raw_phase_input=lr_raw_phase_input,
+            hr_raw_phase_input=hr_raw_phase_input,
             legacy_invert_uv_sign_on_raw=legacy_invert_uv_sign_on_raw,
             raw_center=raw_center,
             raw_scale=raw_scale,

@@ -65,7 +65,13 @@ def _load_mask_3d(path: Path) -> tuple[np.ndarray, nib.Nifti1Image]:
     return (data >= 0.5).astype(np.float32), img
 
 
-def _apply_mask_to_nifti(input_path: Path, mask_3d: np.ndarray, out_path: Path) -> None:
+def _apply_mask_to_nifti(
+    input_path: Path,
+    mask_3d: np.ndarray,
+    out_path: Path,
+    clip_min: float | None = None,
+    clip_max: float | None = None,
+) -> None:
     img = nib.load(str(input_path))
     data = np.asarray(img.dataobj, dtype=np.float32)
 
@@ -79,6 +85,16 @@ def _apply_mask_to_nifti(input_path: Path, mask_3d: np.ndarray, out_path: Path) 
         masked = data * mask_3d[..., None]
     else:
         raise ValueError(f"Expected 3D/4D NIfTI, got shape {data.shape} for {input_path}")
+
+    if clip_min is not None or clip_max is not None:
+        lo = float(clip_min) if clip_min is not None else None
+        hi = float(clip_max) if clip_max is not None else None
+        if lo is not None and hi is not None:
+            masked = np.clip(masked, lo, hi)
+        elif lo is not None:
+            masked = np.maximum(masked, lo)
+        else:
+            masked = np.minimum(masked, hi)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     nib.save(nib.Nifti1Image(masked.astype(np.float32), img.affine, img.header), str(out_path))
@@ -245,7 +261,14 @@ def main() -> None:
     _apply_mask_to_nifti(sr_nifti_dir / "pred_u.nii.gz", mask_3d, masked_inputs_dir / "pred_u_masked.nii.gz")
     _apply_mask_to_nifti(sr_nifti_dir / "pred_v.nii.gz", mask_3d, masked_inputs_dir / "pred_v_masked.nii.gz")
     _apply_mask_to_nifti(sr_nifti_dir / "pred_w.nii.gz", mask_3d, masked_inputs_dir / "pred_w_masked.nii.gz")
-    _apply_mask_to_nifti(sr_nifti_dir / "pred_mag.nii.gz", mask_3d, masked_inputs_dir / "pred_mag_masked.nii.gz")
+    # Keep SR magnitude scale, but clip slight model overshoots before denoising.
+    _apply_mask_to_nifti(
+        sr_nifti_dir / "pred_mag.nii.gz",
+        mask_3d,
+        masked_inputs_dir / "pred_mag_masked.nii.gz",
+        clip_min=0.0,
+        clip_max=1.0,
+    )
 
     # Build one-row CSV for stage-2 denoising.
     stage2_case_csv = stage1_dir / "denoising_input_case.csv"

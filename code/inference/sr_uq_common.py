@@ -221,16 +221,29 @@ def load_sr_model(
 def _predict_with_sliding_window(
     model,
     lr_input_norm: np.ndarray,
+    mask_hr: Optional[np.ndarray],
     roi_size: Tuple[int, int, int],
     sw_batch_size: int,
     overlap: float,
     device: torch.device,
 ) -> np.ndarray:
+    uses_mask = bool(getattr(model, "requires_mask_input", False))
+
     def predictor_fn(x):
+        if uses_mask:
+            u_t, v_t, w_t, um_t, vm_t, wm_t, mask_t = torch.split(x, [1, 1, 1, 1, 1, 1, 1], dim=1)
+            return model(u_t, v_t, w_t, um_t, vm_t, wm_t, mask=mask_t[:, 0])
         u_t, v_t, w_t, um_t, vm_t, wm_t = torch.chunk(x, 6, dim=1)
         return model(u_t, v_t, w_t, um_t, vm_t, wm_t)
 
-    lr_tensor = torch.from_numpy(lr_input_norm).unsqueeze(0).to(device)
+    sw_input = lr_input_norm
+    if uses_mask:
+        if mask_hr is None:
+            raise ValueError("Mask-conditioned model requires mask_hr during inference.")
+        mask_lr = _align_mask_to_target(mask_hr.astype(np.float32), tuple(int(v) for v in lr_input_norm.shape[1:4]))
+        sw_input = np.concatenate([lr_input_norm, mask_lr[None, ...]], axis=0).astype(np.float32)
+
+    lr_tensor = torch.from_numpy(sw_input).unsqueeze(0).to(device)
     with torch.no_grad():
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -455,6 +468,7 @@ def run_case_inference(
         pred_norm = _predict_with_sliding_window(
             model=model,
             lr_input_norm=lr_input_norm,
+            mask_hr=mask_bin,
             roi_size=(int(patch_size), int(patch_size), int(patch_size)),
             sw_batch_size=sw_batch_size,
             overlap=overlap,

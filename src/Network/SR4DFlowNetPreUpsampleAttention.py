@@ -66,7 +66,9 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
             )
 
     def forward(self, u, v, w, u_mag, v_mag, w_mag):
-        speed = torch.sqrt(u**2 + v**2 + w**2)
+        # Epsilon avoids undefined gradients at exactly-zero velocity vectors,
+        # which become common when masked inputs are used in cascade training.
+        speed = torch.sqrt(u**2 + v**2 + w**2 + 1e-12)
         mag = u_mag
         pcmr = mag * speed
 

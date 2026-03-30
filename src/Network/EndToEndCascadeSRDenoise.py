@@ -96,7 +96,7 @@ class EndToEndCascadeSRDenoise(nn.Module):
         sr_u = stage1_out[:, 0:1]
         sr_v = stage1_out[:, 1:2]
         sr_w = stage1_out[:, 2:3]
-        sr_mag = stage1_out[:, 3:4]
+        sr_mag = stage1_out[:, 3:4].clamp_(0.0, 1.0)
 
         if self.apply_stage2_mask and mask is not None:
             sr_u = sr_u * mask[:, None]

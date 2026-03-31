@@ -60,6 +60,7 @@ class EndToEndCascadeSRDenoise(nn.Module):
         apply_stage2_mask_to_magnitude=True,
         use_stage1_seg_head=False,
         use_seg_mask_at_inference=False,
+        seg_head_bias_init=-4.0,
     ):
         super().__init__()
         if not bool(predict_mag):
@@ -71,6 +72,7 @@ class EndToEndCascadeSRDenoise(nn.Module):
         self.apply_stage2_mask_to_magnitude = bool(apply_stage2_mask_to_magnitude)
         self.use_stage1_seg_head = bool(use_stage1_seg_head)
         self.use_seg_mask_at_inference = bool(use_seg_mask_at_inference)
+        self.seg_head_bias_init = float(seg_head_bias_init)
 
         self.stage1 = build_sr_model(
             model_variant="pre_upsample_attention",
@@ -80,6 +82,7 @@ class EndToEndCascadeSRDenoise(nn.Module):
             channel_nr=int(channel_nr),
             predict_mag=True,
             cascade_use_seg_head=self.use_stage1_seg_head,
+            cascade_seg_head_bias_init=self.seg_head_bias_init,
         )
         self.stage2 = build_sr_model(
             model_variant="original",
@@ -141,7 +144,7 @@ class EndToEndCascadeSRDenoise(nn.Module):
             if mask is not None:
                 selected_mask = mask
             elif self.use_seg_mask_at_inference and seg_map is not None:
-                selected_mask = (seg_map[:, 0] > 0.5).float()
+                selected_mask = (torch.sigmoid(seg_map[:, 0]) > 0.5).float()
 
         if selected_mask is not None:
             sr_u = sr_u * selected_mask[:, None]

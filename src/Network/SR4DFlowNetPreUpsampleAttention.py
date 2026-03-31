@@ -19,12 +19,14 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
         predict_mag=False,
         attention_reduction=8,
         use_seg_head=False,
+        seg_head_bias_init=-4.0,
     ):
         super().__init__()
         self.res_increase = res_increase
         self.channel_nr = channel_nr
         self.predict_mag = bool(predict_mag)
         self.use_seg_head = bool(use_seg_head)
+        self.seg_head_bias_init = float(seg_head_bias_init)
 
         self.pc_path = nn.Sequential(
             Conv3dBlock(3, channel_nr, 3, "SYMMETRIC", "relu"),
@@ -71,8 +73,8 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
                 nn.Conv3d(channel_nr, 32, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv3d(32, 1, kernel_size=1),
-                nn.Sigmoid(),
             )
+            nn.init.constant_(self.seg_head[-1].bias, self.seg_head_bias_init)
         else:
             self.seg_head = None
 

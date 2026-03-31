@@ -288,7 +288,7 @@ def _predict_with_sliding_window(
         if isinstance(result, tuple):
             pred_t, seg_t = result
             if seg_t is not None:
-                return torch.cat((pred_t, seg_t), dim=1)
+                return torch.cat((pred_t, torch.sigmoid(seg_t)), dim=1)
             return pred_t
         return result
 

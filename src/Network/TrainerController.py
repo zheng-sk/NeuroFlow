@@ -82,6 +82,8 @@ class TrainerController:
         cascade_use_seg_mask_at_inference=False,
         seg_loss_weight=0.0,
         seg_loss_dice_weight=1.0,
+        seg_loss_bce_weight=1.0,
+        cascade_seg_head_bias_init=-4.0,
     ):
         """
         TrainerController constructor.
@@ -129,6 +131,8 @@ class TrainerController:
         self.cascade_use_seg_mask_at_inference = bool(cascade_use_seg_mask_at_inference)
         self.seg_loss_weight = max(float(seg_loss_weight), 0.0)
         self.seg_loss_dice_weight = max(float(seg_loss_dice_weight), 0.0)
+        self.seg_loss_bce_weight = max(float(seg_loss_bce_weight), 0.0)
+        self.cascade_seg_head_bias_init = float(cascade_seg_head_bias_init)
         self.model_outputs_seg_map = self.cascade_use_seg_head and self.model_variant in {
             "cascade_sr_dn_masked",
             "pre_upsample_attention",
@@ -151,6 +155,7 @@ class TrainerController:
             cascade_freeze_stage2=cascade_freeze_stage2,
             cascade_use_seg_head=self.cascade_use_seg_head,
             cascade_use_seg_mask_at_inference=self.cascade_use_seg_mask_at_inference,
+            cascade_seg_head_bias_init=self.cascade_seg_head_bias_init,
         ).to(self.device)
         self.metric_keys = [
             "train_loss",
@@ -169,6 +174,8 @@ class TrainerController:
                 self.metric_keys.extend(["train_mag_accuracy", "val_mag_accuracy"])
         if self.seg_loss_weight > 0.0:
             self.metric_keys.extend(["train_seg_dice_loss", "val_seg_dice_loss"])
+            if self.seg_loss_bce_weight > 0.0:
+                self.metric_keys.extend(["train_seg_bce_loss", "val_seg_bce_loss"])
         self.accuracy_metric = "val_loss"
 
         print(f"Divergence loss2 * {self.div_weight}")
@@ -186,8 +193,11 @@ class TrainerController:
         if self.seg_loss_weight > 0.0:
             print(
                 f"Segmentation loss: weight={self.seg_loss_weight}, "
-                f"dice_weight={self.seg_loss_dice_weight}"
+                f"dice_weight={self.seg_loss_dice_weight}, "
+                f"bce_weight={self.seg_loss_bce_weight}"
             )
+        if self.cascade_use_seg_head:
+            print(f"Seg-head bias init: {self.cascade_seg_head_bias_init}")
         if self.seg_loss_weight > 0.0 and not self.model_outputs_seg_map:
             print("Warning: seg_loss_weight > 0 but the selected model configuration does not emit seg_map.")
         if self.tb_image_every_n_epochs > 0:
@@ -320,6 +330,8 @@ class TrainerController:
                     "cascade_use_seg_mask_at_inference": self.cascade_use_seg_mask_at_inference,
                     "seg_loss_weight": self.seg_loss_weight,
                     "seg_loss_dice_weight": self.seg_loss_dice_weight,
+                    "seg_loss_bce_weight": self.seg_loss_bce_weight,
+                    "cascade_seg_head_bias_init": self.cascade_seg_head_bias_init,
                 },
                 checkpoint_path,
             )
@@ -353,15 +365,19 @@ class TrainerController:
         outside_tv = self._outside_tv_penalty(y_pred, mask)
         total_loss = vel_mse + (self.mag_loss_weight * mag_mse) + divergence_loss + (self.outside_tv_weight * outside_tv)
         seg_dice_loss = None
+        seg_bce_loss = None
         if self.seg_loss_weight > 0.0 and seg_map is not None and mask is not None:
-            seg_map_squeezed = seg_map[:, 0]
-            mask_aligned = self._align_mask_to_shape(mask, seg_map_squeezed.shape[-3:]).to(seg_map_squeezed.dtype)
-            dice = self._dice_loss(seg_map_squeezed, mask_aligned)
-            seg_loss = self.seg_loss_dice_weight * dice
+            seg_logits = seg_map[:, 0]
+            mask_aligned = self._align_mask_to_shape(mask, seg_logits.shape[-3:]).to(seg_logits.dtype)
+            seg_prob = torch.sigmoid(seg_logits)
+            dice = self._dice_loss(seg_prob, mask_aligned)
+            bce = F.binary_cross_entropy_with_logits(seg_logits, mask_aligned)
+            seg_loss = (self.seg_loss_dice_weight * dice) + (self.seg_loss_bce_weight * bce)
             total_loss = total_loss + (self.seg_loss_weight * seg_loss)
             seg_dice_loss = dice
+            seg_bce_loss = bce
 
-        return total_loss, vel_mse, divergence_loss, mag_mse, seg_dice_loss
+        return total_loss, vel_mse, divergence_loss, mag_mse, seg_dice_loss, seg_bce_loss
 
     def accuracy_function(self, y_true, y_pred, mask):
         """
@@ -626,8 +642,10 @@ class TrainerController:
         )
         utility.log_to_file(
             self.logfile,
-            f"Seg loss weight: {self.seg_loss_weight}, seg loss dice weight: {self.seg_loss_dice_weight}\n",
+            f"Seg loss weight: {self.seg_loss_weight}, seg loss dice weight: {self.seg_loss_dice_weight}, "
+            f"seg loss bce weight: {self.seg_loss_bce_weight}\n",
         )
+        utility.log_to_file(self.logfile, f"Seg-head bias init: {self.cascade_seg_head_bias_init}\n")
         utility.log_to_file(
             self.logfile,
             f"LR scheduler: {self.lr_scheduler_name} "
@@ -797,7 +815,9 @@ class TrainerController:
         hires, predictions, mask = self._align_spatial_shapes(hires, predictions, mask)
         if seg_map is not None:
             seg_map = seg_map[:, :, : predictions.shape[2], : predictions.shape[3], : predictions.shape[4]]
-        total_loss, mse, divloss, mag_mse, seg_dice_loss = self.loss_function(hires, predictions, mask, seg_map)
+        total_loss, mse, divloss, mag_mse, seg_dice_loss, seg_bce_loss = self.loss_function(
+            hires, predictions, mask, seg_map
+        )
         rel_error, _vel_rel_error, mag_rel_error = self.accuracy_function(hires, predictions, mask)
 
         batch_size = hires.shape[0]
@@ -813,6 +833,8 @@ class TrainerController:
                 self._update_metric(f"{metric_set}_mag_accuracy", mag_rel_error.mean().item(), batch_size)
         if seg_dice_loss is not None:
             self._log_metric("seg_dice_loss", seg_dice_loss.item(), metric_set, batch_size)
+        if seg_bce_loss is not None:
+            self._log_metric("seg_bce_loss", seg_bce_loss.item(), metric_set, batch_size)
         self._update_metric(f"{metric_set}_accuracy", rel_error.mean().item(), batch_size)
         return total_loss.mean()
 
@@ -986,6 +1008,8 @@ class TrainerController:
             "cascade_use_seg_mask_at_inference": self.cascade_use_seg_mask_at_inference,
             "seg_loss_weight": self.seg_loss_weight,
             "seg_loss_dice_weight": self.seg_loss_dice_weight,
+            "seg_loss_bce_weight": self.seg_loss_bce_weight,
+            "cascade_seg_head_bias_init": self.cascade_seg_head_bias_init,
         }
         torch.save(checkpoint, f"{self.model_path}-best.pt")
 
@@ -1041,6 +1065,8 @@ class TrainerController:
                 train_metrics["mag_accuracy"] = self._metric_value("train_mag_accuracy")
         if "train_seg_dice_loss" in self.metric_sums:
             train_metrics["seg_dice_loss"] = self._metric_value("train_seg_dice_loss")
+        if "train_seg_bce_loss" in self.metric_sums:
+            train_metrics["seg_bce_loss"] = self._metric_value("train_seg_bce_loss")
         for key, value in train_metrics.items():
             self.train_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -1056,6 +1082,8 @@ class TrainerController:
                 val_metrics["mag_accuracy"] = self._metric_value("val_mag_accuracy")
         if "val_seg_dice_loss" in self.metric_sums:
             val_metrics["seg_dice_loss"] = self._metric_value("val_seg_dice_loss")
+        if "val_seg_bce_loss" in self.metric_sums:
+            val_metrics["seg_bce_loss"] = self._metric_value("val_seg_bce_loss")
         for key, value in val_metrics.items():
             self.val_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -1069,7 +1097,7 @@ class TrainerController:
             u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr = self._prepare_batch(data_pairs)
             preds, seg_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
 
-            loss_val, mse, divloss, _mag_mse, _seg_dice = self.loss_function(hires, preds, mask, seg_map)
+            loss_val, mse, divloss, _mag_mse, _seg_dice, _seg_bce = self.loss_function(hires, preds, mask, seg_map)
             rel_loss, _vel_rel_loss, _mag_rel_loss = self.accuracy_function(hires, preds, mask)
             break
 

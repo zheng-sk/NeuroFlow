@@ -426,6 +426,18 @@ def main():
         default=1.0,
         help="Weight of Dice component within the seg loss.",
     )
+    parser.add_argument(
+        "--seg-loss-bce-weight",
+        type=float,
+        default=1.0,
+        help="Weight of BCEWithLogits component within the seg loss.",
+    )
+    parser.add_argument(
+        "--cascade-seg-head-bias-init",
+        type=float,
+        default=-4.0,
+        help="Initial bias for the final Stage-1 segmentation-head conv (negative favors sparse foreground).",
+    )
     args = parser.parse_args()
     args.model_variant = normalize_model_variant(args.model_variant)
     if args.model_variant not in set(available_model_variants()):
@@ -609,6 +621,8 @@ def main():
         cascade_use_seg_mask_at_inference=args.cascade_use_seg_mask_at_inference,
         seg_loss_weight=args.seg_loss_weight,
         seg_loss_dice_weight=args.seg_loss_dice_weight,
+        seg_loss_bce_weight=args.seg_loss_bce_weight,
+        cascade_seg_head_bias_init=args.cascade_seg_head_bias_init,
     )
     network.init_model_dir()
 

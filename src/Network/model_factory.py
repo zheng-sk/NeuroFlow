@@ -68,6 +68,7 @@ def build_sr_model(
     cascade_freeze_stage2: bool = False,
     cascade_use_seg_head: bool = False,
     cascade_use_seg_mask_at_inference: bool = False,
+    cascade_seg_head_bias_init: float = -4.0,
 ):
     variant = normalize_model_variant(model_variant)
 
@@ -114,6 +115,7 @@ def build_sr_model(
             channel_nr=channel_nr,
             predict_mag=predict_mag,
             use_seg_head=cascade_use_seg_head,
+            seg_head_bias_init=cascade_seg_head_bias_init,
         )
 
     if variant == "cascade_sr_dn_masked":
@@ -131,6 +133,7 @@ def build_sr_model(
             freeze_stage2=cascade_freeze_stage2,
             use_stage1_seg_head=cascade_use_seg_head,
             use_seg_mask_at_inference=cascade_use_seg_mask_at_inference,
+            seg_head_bias_init=cascade_seg_head_bias_init,
         )
 
     if variant == "phase1_attention":

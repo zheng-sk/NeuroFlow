@@ -204,6 +204,7 @@ def main() -> None:
     lr_all: list[np.ndarray] = []
     gt_all: list[np.ndarray] = []
     stage1_pred_all: list[np.ndarray] = []
+    stage1_seg_all: list[np.ndarray] = []
     ref_mask_all: list[np.ndarray] = []
     venc_all: list[float] = []
 
@@ -223,7 +224,7 @@ def main() -> None:
             apply_mask_to_lr_inputs=False,
             apply_mask_to_lr_magnitude=True,
         )
-        stage1_pred = _predict_with_sliding_window(
+        stage1_pred, stage1_seg = _predict_with_sliding_window(
             model=model.stage1,
             lr_input_norm=lr_input_norm,
             mask_hr=None,
@@ -238,6 +239,8 @@ def main() -> None:
         lr_all.append(lr_input_norm)
         gt_all.append(gt_4ch_norm)
         stage1_pred_all.append(stage1_pred.astype(np.float32))
+        if stage1_seg is not None:
+            stage1_seg_all.append(stage1_seg.astype(np.float32))
         ref_mask_all.append(mask_bin.astype(np.float32))
         venc_all.append(float(venc_scalar))
         print(f"Stage 1 processed frame {i + 1}/{len(frame_indices)} (t={frame_idx})")
@@ -255,6 +258,8 @@ def main() -> None:
         "hr_spacing": np.asarray(preview["hr_img"].header.get_zooms()[:3], dtype=np.float32),
         "t_count": int(preview["t_count"]),
     }
+    if stage1_seg_all:
+        stage1_payload["seg_pred"] = np.stack(stage1_seg_all, axis=0).astype(np.float32)
     stage1_nifti_paths = save_predicted_nifti(
         pred_norm=stage1_payload["pred_norm"],
         venc_per_frame=stage1_payload["venc"],
@@ -283,7 +288,7 @@ def main() -> None:
         sr_mag = np.clip(stage1_pred[3:4], 0.0, 1.0) * mask_stage1_aligned[None, ...]
         stage2_input = np.concatenate([sr_u, sr_v, sr_w, sr_mag, sr_mag, sr_mag], axis=0).astype(np.float32)
 
-        final_pred = _predict_with_sliding_window(
+        final_pred, _stage2_seg = _predict_with_sliding_window(
             model=model.stage2,
             lr_input_norm=stage2_input,
             mask_hr=None,

@@ -18,11 +18,13 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
         channel_nr=64,
         predict_mag=False,
         attention_reduction=8,
+        use_seg_head=False,
     ):
         super().__init__()
         self.res_increase = res_increase
         self.channel_nr = channel_nr
         self.predict_mag = bool(predict_mag)
+        self.use_seg_head = bool(use_seg_head)
 
         self.pc_path = nn.Sequential(
             Conv3dBlock(3, channel_nr, 3, "SYMMETRIC", "relu"),
@@ -64,6 +66,15 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
                 Conv3dBlock(channel_nr, channel_nr, 3, "SYMMETRIC", "relu"),
                 Conv3dBlock(channel_nr, 1, 3, "SYMMETRIC", None),
             )
+        if self.use_seg_head:
+            self.seg_head = nn.Sequential(
+                nn.Conv3d(channel_nr, 32, kernel_size=1),
+                nn.ReLU(inplace=True),
+                nn.Conv3d(32, 1, kernel_size=1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.seg_head = None
 
     def forward(self, u, v, w, u_mag, v_mag, w_mag):
         # Epsilon avoids undefined gradients at exactly-zero velocity vectors,
@@ -89,7 +100,11 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
         for block in self.hi_res_blocks:
             rb = block(rb)
 
+        seg_map = self.seg_head(rb) if self.use_seg_head else None
         outputs = [self.u_path(rb), self.v_path(rb), self.w_path(rb)]
         if self.predict_mag:
             outputs.append(self.mag_path(rb))
-        return torch.cat(outputs, dim=1)
+        velocity_output = torch.cat(outputs, dim=1)
+        if self.use_seg_head:
+            return velocity_output, seg_map
+        return velocity_output

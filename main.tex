@@ -548,10 +548,10 @@ where $w_k(\mathbf{x})$ is a Gaussian window centered on patch $k$, and the sum 
 
 \subsection*{4.1 Experimental Overview}
 
-Nine configurations were evaluated on a held-out test subject (case~000) not seen during
+Ten configurations were evaluated on a held-out test subject (case~000) not seen during
 training.  Eight span the full factorial combination of two task modes, two network
-architectures, and two input conditioning strategies; the ninth is a two-stage cascade pipeline
-described below.  In \textbf{Denoising} mode ($\times 1$),
+architectures, and two input conditioning strategies; the ninth and tenth are two-stage cascade
+pipelines described below.  In \textbf{Denoising} mode ($\times 1$),
 the network translates clinical 3T acquisitions into the contrast and noise characteristics of
 7T, operating at native resolution.  In \textbf{Super-Resolution} mode ($\times 2$, hereafter
 \textbf{SR}), the network simultaneously denoises and upsamples by a factor of two, reconstructing
@@ -569,24 +569,27 @@ itself encodes where vessels are --- at the cost of requiring a pre-computed CoW
 inference time.  The synthetic-noise strategy makes no such assumption and is applicable to any
 raw 3T acquisition without preprocessing.
 
-Configuration~\textbf{I} is a \textbf{two-stage cascade pipeline}: first, the SR model~H
+Configuration~\textbf{I} is an \textbf{independent two-stage cascade}: the SR model~H
 (CBAM-PreUpsampling, synthetic-noise, $\times 2$) is applied to the downsampled 3T input;
-the resulting SR prediction is then re-segmented with the same CoW segmentation pipeline used
-for the 7T reference, generating an automatic mask; finally, the masked SR output is fed into
-the Denoising model~A (Original, masked, $\times 1$) for a second refinement pass.  This
-cascade tests whether chaining the best available mask-free SR model with a masked Denoising
-model can recover the performance of pure masked training without requiring a pre-existing
-segmentation of the original 3T scan.
+the resulting SR prediction is re-segmented to produce an automatic CoW mask; the masked SR
+output is then passed to the Denoising model~A (Original, masked, $\times 1$), which was trained
+on registered 3T data.  Configuration~\textbf{J} is a \textbf{fine-tuned cascade}: the same
+frozen SR stage~1 (model~H) is used, but the Denoising stage~2 was subsequently fine-tuned on
+SR-stage outputs rather than original 3T acquisitions, explicitly resolving the domain mismatch
+present in configuration~I.  Both cascades test whether chaining a mask-free SR model with a
+masked Denoising model can recover the performance of pure masked training without requiring a
+pre-existing segmentation of the original 3T scan.
 
 Table~\ref{tab:experiment_map} maps each identifier to its configuration.  All geometry metrics
 are computed against a common 7T reference segmentation of 15{,}577 voxels at 0.5\,mm isotropic
 resolution.  Velocity and background metrics are averaged across nine cardiac frames, with all
 velocity MSE values expressed in VENC-normalised units using scientific notation ($\times 10^{-2}$
-for intraluminal velocity, $\times 10^{-3}$ for extravascular background).
+for intraluminal velocity, $\times 10^{-3}$ for extravascular background).  Configurations~I
+and~J are grouped together as two-stage cascade pipelines in all tables.
 
 \begin{table}[!htbp]
   \centering
-  \caption{Summary of the nine evaluated configurations.}
+  \caption{Summary of the ten evaluated configurations.}
   \label{tab:experiment_map}
   \small
   \begin{tabular}{clll}
@@ -603,9 +606,12 @@ for intraluminal velocity, $\times 10^{-3}$ for extravascular background).
     G & Super-Resolution ($\times 2$) & CBAM-PreUpsampling & Masked \\
     H & Super-Resolution ($\times 2$) & CBAM-PreUpsampling & Synth.\ noise \\
     \midrule
-    I & \makecell[l]{SR ($\times 2$) $\to$ Denoising ($\times 1$)\\(two-stage cascade)} &
+    I & \makecell[l]{SR ($\times 2$) $\to$ Denoising ($\times 1$)\\(independent cascade)} &
       \makecell[l]{CBAM-PreUpsampling (SR)\\+ Original (Denoising)} &
       \makecell[l]{Synth.\ noise (SR) $\to$\\auto-seg.\ $\to$ Masked (Dn.)} \\
+    J & \makecell[l]{SR ($\times 2$) $\to$ Denoising ($\times 1$)\\(fine-tuned cascade)} &
+      \makecell[l]{CBAM-PreUpsampling (SR, frozen)\\+ Original (Denoising, fine-tuned)} &
+      \makecell[l]{Synth.\ noise (SR) $\to$\\auto-seg.\ $\to$ Masked (fine-tuned Dn.)} \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -657,6 +663,7 @@ in each column within each task mode.
     \multicolumn{8}{l}{\textit{Two-Stage Cascade (SR $\to$ Denoising)}} \\
     \midrule
     I & \makecell[l]{CBAM-PreUps.\ (SR)\\+ Original (Dn.)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $5.154$ & $1.572$ & $2.072$ & $1.510$ \\
+    J & \makecell[l]{CBAM-PreUps.\ (SR, frozen)\\+ Original (Dn., fine-tuned)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $4.973$ & $1.575$ & $1.920$ & $1.478$ \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -689,14 +696,24 @@ accuracy is therefore the architecture rather than the input strategy: CBAM redu
 vs.\ F).  Configuration~H also achieves the lowest $v$- and $w$-component MSE across all SR
 models ($1.807$ and $1.449{\times}10^{-2}$ respectively).
 
-Configuration~I (two-stage cascade) yields the highest total velocity MSE of any configuration
+Configuration~I (independent cascade) yields the highest total velocity MSE of any configuration
 ($5.154{\times}10^{-2}$), exceeding even the weakest single-stage model~B ($4.721{\times}10^{-2}$)
 by 9.2\%.  Rather than combining the strengths of its two constituent models, the cascade
 \emph{accumulates} their errors.  The Denoising model~A was trained on registered 3T
 acquisitions; receiving the SR-enhanced prediction from model~H as input places it outside the
 distribution it was trained on, degrading its velocity reconstruction.  The $v$-component is
-most affected ($2.072{\times}10^{-2}$, the worst among all nine configurations), consistent with
+most affected ($2.072{\times}10^{-2}$, the worst among all ten configurations), consistent with
 the cascade compounding the left--right noise floor already present in the SR stage.
+
+Configuration~J (fine-tuned cascade) demonstrates that fine-tuning the Denoising stage on SR
+outputs directly resolves this domain mismatch.  Its total velocity MSE of $4.973{\times}10^{-2}$
+represents a 3.5\% improvement over the independent cascade~I ($5.154{\times}10^{-2}$), and
+closely matches the single-stage SR models (E: $4.977{\times}10^{-2}$, F: $4.983{\times}10^{-2}$).
+The $v$-direction shows the most dramatic recovery: $1.920{\times}10^{-2}$ for~J vs.\
+$2.072{\times}10^{-2}$ for~I, a 7.3\% reduction.  That said, the fine-tuned cascade does not
+surpass the best single-stage Denoising models (A: $4.281{\times}10^{-2}$), suggesting that the
+two-stage SR-then-Denoising pipeline introduces irreducible velocity error from the first
+stage that fine-tuning alone cannot eliminate.
 
 % -------------------------------------------------------
 \subsection*{4.3 Vascular Geometry Fidelity}
@@ -737,6 +754,7 @@ and the resulting mask was compared against the 7T reference (15{,}577 voxels).
     \multicolumn{8}{l}{\textit{Two-Stage Cascade (SR $\to$ Denoising) — reference: 15,577 voxels}} \\
     \midrule
     I & \makecell[l]{CBAM-PreUps.\ (SR)\\+ Original (Dn.)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & 17{,}984 & 0.680 & 0.767 & 13.54 \\
+    J & \makecell[l]{CBAM-PreUps.\ (SR, frozen)\\+ Original (Dn., fine-tuned)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & 18{,}005 & 0.684 & 0.760 & 13.55 \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -767,13 +785,25 @@ voxel count of~G (19{,}294 vs.\ 18{,}623) points to slight over-segmentation as 
 for this Dice gap.  For synthetic-noise SR, CBAM (H) reduces the HD relative to the Original (F)
 from 14.82 to 13.59\,mm ($-$8.3\%), a smaller but consistent pattern of architectural benefit.
 
-Configuration~I achieves the worst Dice of all nine configurations (0.680), despite its
+Configuration~I achieves the worst Dice of all ten configurations (0.680), despite its
 predicted voxel count (17{,}984) being close to the reference.  The intermediate CoW
 segmentation derived from the SR output (stage~1) does not match the true vessel boundaries as
 well as a mask derived from the original 3T data, and any geometric errors in this intermediate
 mask are directly propagated into the masked input fed to the Denoising model (stage~2).  The
 sMSD of 0.767\,mm and HD of 13.54\,mm further confirm that the two-stage pipeline introduces
 boundary localisation errors that neither single-stage model produces independently.
+
+Configuration~J (fine-tuned cascade) shows that fine-tuning the Denoising stage does not
+improve geometric fidelity: its Dice (0.684), sMSD (0.760\,mm), and HD (13.55\,mm) are
+virtually identical to those of configuration~I.  This confirms that the geometric bottleneck
+in the cascade lies not in the domain mismatch of the Denoising stage, but in the accuracy of
+the intermediate CoW mask derived from the SR output.  Since the same frozen SR model and the
+same auto-segmentation step are used in both I and J, both pipelines inject the same geometric
+errors at the stage~2 input boundary.  Fine-tuning the Denoising weights improves its ability
+to handle SR-domain inputs, but cannot correct the spatial layout of a mask it receives
+as-is.  Improving cascade geometry would therefore require either a more accurate intermediate
+segmentation or an end-to-end trainable boundary that avoids an explicit binary masking step
+altogether.
 
 % -------------------------------------------------------
 \subsection*{4.4 Background Suppression}
@@ -814,6 +844,7 @@ configurations.
     \multicolumn{8}{l}{\textit{Two-Stage Cascade (SR $\to$ Denoising)}} \\
     \midrule
     I & \makecell[l]{CBAM-PreUps.\ (SR)\\+ Original (Dn.)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $0.84{\times}10^{-3}$ & $0.24{\times}10^{-3}$ & $0.42{\times}10^{-3}$ & $0.18{\times}10^{-3}$ \\
+    J & \makecell[l]{CBAM-PreUps.\ (SR, frozen)\\+ Original (Dn., fine-tuned)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $\mathbf{0.57{\times}10^{-3}}$ & $\mathbf{0.19{\times}10^{-3}}$ & $\mathbf{0.25{\times}10^{-3}}$ & $\mathbf{0.13{\times}10^{-3}}$ \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -856,11 +887,24 @@ ground-truth or 3T-derived mask, and any voxels mis-classified as vascular in st
 non-zero signal into the stage~2 input, partially degrading background suppression relative to
 the gold-standard masked models (A and~C).
 
+Configuration~J (fine-tuned cascade) achieves the lowest background MSE of both cascades
+and indeed of all mask-free-input models: $0.57{\times}10^{-3}$, within the range of the
+single-stage masked models (A: $0.64$, C: $0.61$, E: $0.78$, G: $0.67{\times}10^{-3}$).
+This striking result --- better background suppression than any unmasked single-stage model ---
+reflects two compounding benefits: the fine-tuned Denoising stage has learned, on SR-domain
+inputs, that regions outside the auto-generated mask should produce near-zero predictions, while
+simultaneously having been exposed during fine-tuning to the typical mis-segmentations produced
+by the SR-derived mask, making it more robust to mask boundary leakage.  The $v$-component
+improvement is particularly pronounced ($0.25$ vs.\ $0.42{\times}10^{-3}$ in~I), consistent
+with the left--right phase channel being most sensitive to domain adaptation.  These findings
+demonstrate that fine-tuning directly addresses the domain mismatch for the background channel
+even though it cannot correct the geometric inaccuracies in the intermediate mask.
+
 % -------------------------------------------------------
 \subsection*{4.5 Consolidated Comparison}
 % -------------------------------------------------------
 
-Table~\ref{tab:summary} consolidates the five primary performance indicators across all nine
+Table~\ref{tab:summary} consolidates the five primary performance indicators across all ten
 configurations for direct cross-experiment comparison.
 
 \begin{table}[!htbp]
@@ -897,6 +941,7 @@ configurations for direct cross-experiment comparison.
     \multicolumn{9}{l}{\textit{Two-Stage Cascade (SR $\to$ Denoising)}} \\
     \midrule
     I & \makecell[l]{CBAM-PreUps.\ (SR)\\+ Original (Dn.)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $5.154$ & 0.680 & 0.767 & $13.54$ & $0.84$ \\
+    J & \makecell[l]{CBAM-PreUps.\ (SR, frozen)\\+ Original (Dn., fine-tuned)} & \makecell[l]{Synth.\ noise $\to$\\auto-seg.\ $\to$ Masked} & & $4.973$ & 0.684 & 0.760 & $13.55$ & $\mathbf{0.57}$ \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -942,22 +987,28 @@ is available, masked-input CBAM (G) offers the best balance.  For fully mask-fre
 CBAM with synthetic-noise augmentation (H) is the recommended configuration, achieving velocity
 accuracy within 0.2\% of its masked counterpart on unprocessed 3T inputs.
 
-\textbf{The two-stage cascade pipeline (I) does not outperform single-stage models and
-underscores the hazard of distribution shift between stages.}
-Configuration~I was designed to combine the mask-free flexibility of the SR model (H) with the
-refinement quality of the masked Denoising model (A), using an automatically generated
-intermediate mask to bridge the two stages.  Instead, it achieves the worst velocity MSE of all
-nine configurations ($5.154{\times}10^{-2}$), the worst Dice (0.680), and a background MSE
-($0.84{\times}10^{-3}$) comparable to the masked SR models rather than the masked Denoising
-models.  Two compounding mechanisms explain this failure: (i)~\emph{domain mismatch} --- model~A
-was trained on registered 3T acquisitions and receives SR-enhanced predictions from model~H as
-input, placing it outside its training distribution; and (ii)~\emph{mask error propagation} ---
-the intermediate CoW segmentation derived from the SR output is less geometrically accurate than
-a mask derived from the original acquisition, so the masked input fed to the Denoising stage
-embeds the geometric errors of stage~1 directly into stage~2.  These findings suggest that
-simple inference-time cascading of models trained independently in different input domains is not
-a viable shortcut; a jointly trained multi-stage or iterative refinement architecture would be
-required to benefit from chaining SR and Denoising stages.
+\textbf{Fine-tuning resolves domain mismatch in the cascade but cannot overcome the geometric
+bottleneck imposed by the intermediate binary mask.}
+Configuration~I was designed to combine the mask-free flexibility of the SR model~H with the
+refinement quality of the masked Denoising model~A, but instead achieves the worst velocity MSE
+of all ten configurations ($5.154{\times}10^{-2}$), the worst Dice (0.680), and degraded
+background suppression ($0.84{\times}10^{-3}$).  Two compounding failure modes are identified:
+(i)~\emph{domain mismatch} --- model~A was trained on registered 3T acquisitions and receives
+SR-enhanced predictions as input, placing it outside its training distribution; and
+(ii)~\emph{mask error propagation} --- the intermediate CoW segmentation derived from the SR
+output embeds the geometric errors of stage~1 directly into the masked input of stage~2.
+Configuration~J demonstrates that \emph{fine-tuning} directly and selectively corrects
+failure mode~(i): velocity MSE improves from $5.154$ to $4.973{\times}10^{-2}$ ($-3.5\%$) and
+background MSE drops from $0.84$ to $0.57{\times}10^{-3}$, the best background suppression of
+any mask-free pipeline.  However, fine-tuning leaves failure mode~(ii) entirely unchanged:
+J's geometry (Dice: 0.684, HD: 13.55\,mm) is nearly identical to~I (Dice: 0.680, HD:
+13.54\,mm), confirming that the mask accuracy is the exclusive geometric bottleneck.  The
+practical implication is that a cascade architecture requires both (a) domain-adapted stages
+\emph{and} (b) a higher-quality or continuous-valued intermediate segmentation to achieve
+competitive geometry.  Replacing the binary auto-segmentation step with a soft, differentiable
+mask probability map --- either from a learned segmentation network or by propagating the SR
+model's internal attention activations --- is the most direct avenue for addressing the
+remaining cascade geometry deficit.
 
 
 

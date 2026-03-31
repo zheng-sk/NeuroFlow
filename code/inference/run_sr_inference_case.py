@@ -23,6 +23,7 @@ from sr_uq_common import (
     load_case_table,
     load_sr_model,
     run_case_inference,
+    save_segmentation_nifti,
     save_metadata_json,
     save_payload_npz,
     save_predicted_nifti,
@@ -86,6 +87,18 @@ def main() -> None:
         default=None,
         help="Optional override for predict_mag model head. Default: inferred from checkpoint.",
     )
+    parser.add_argument(
+        "--cascade-use-seg-head",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Optional override for cascade stage-1 segmentation head. Default: inferred from checkpoint.",
+    )
+    parser.add_argument(
+        "--cascade-use-seg-mask-at-inference",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Optional override to use cascade seg-head mask at inference. Default: inferred from checkpoint.",
+    )
 
     parser.add_argument(
         "--raw-phase-input",
@@ -146,6 +159,24 @@ def main() -> None:
         default=True,
         help="When --apply-mask-to-lr-inputs is enabled, also mask LR magnitude channels.",
     )
+    parser.add_argument(
+        "--use-reference-mask-for-cascade",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Provide CSV/reference mask to cascade model during inference when available.",
+    )
+    parser.add_argument(
+        "--save-segmentation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save predicted segmentation probability/binary NIfTI when the model emits seg_map.",
+    )
+    parser.add_argument(
+        "--seg-threshold",
+        type=float,
+        default=0.5,
+        help="Threshold used to binarize saved segmentation predictions.",
+    )
 
     args = parser.parse_args()
     hr_raw_phase_input = bool(args.lr_raw_phase_input) if args.hr_raw_phase_input is None else bool(args.hr_raw_phase_input)
@@ -188,6 +219,8 @@ def main() -> None:
         device=device,
         predict_mag=args.predict_mag,
         model_variant=args.model_variant,
+        cascade_use_seg_head=args.cascade_use_seg_head,
+        cascade_use_seg_mask_at_inference=args.cascade_use_seg_mask_at_inference,
     )
 
     if not predict_mag_flag:
@@ -221,6 +254,7 @@ def main() -> None:
         time_axis=int(args.time_axis),
         apply_mask_to_lr_inputs=bool(args.apply_mask_to_lr_inputs),
         apply_mask_to_lr_magnitude=bool(args.apply_mask_to_lr_magnitude),
+        use_reference_mask_for_model=bool(args.use_reference_mask_for_cascade),
     )
 
     output_prefix = str((nifti_dir / args.output_prefix).resolve())
@@ -234,6 +268,15 @@ def main() -> None:
         res_increase=int(args.res_increase),
         save_uvw=True,
     )
+    seg_nifti_paths = {}
+    if bool(args.save_segmentation) and "seg_pred" in payload:
+        seg_nifti_paths = save_segmentation_nifti(
+            seg_pred=payload["seg_pred"],
+            out_prefix=output_prefix,
+            lr_affine=payload["lr_affine"],
+            res_increase=int(args.res_increase),
+            threshold=float(args.seg_threshold),
+        )
 
     payload_path = out_dir / "analysis_payload.npz"
     save_payload_npz(str(payload_path), payload)
@@ -256,6 +299,7 @@ def main() -> None:
         "mask_threshold": float(args.mask_threshold),
         "apply_mask_to_lr_inputs": bool(args.apply_mask_to_lr_inputs),
         "apply_mask_to_lr_magnitude": bool(args.apply_mask_to_lr_magnitude),
+        "use_reference_mask_for_cascade": bool(args.use_reference_mask_for_cascade),
         "patch_size": int(args.patch_size),
         "sw_batch_size": int(args.sw_batch_size),
         "overlap": float(args.overlap),
@@ -264,7 +308,10 @@ def main() -> None:
         "hi_resblock": int(args.hi_resblock),
         "time_axis": int(args.time_axis),
         "nifti_outputs": nifti_paths,
+        "segmentation_outputs": seg_nifti_paths,
         "payload_path": str(payload_path.resolve()),
+        "cascade_use_seg_head": bool(getattr(model, "cascade_use_seg_head", False)),
+        "cascade_use_seg_mask_at_inference": bool(getattr(model, "cascade_use_seg_mask_at_inference", False)),
         "case_paths": {
             "lr_u": case.get("lr_u", ""),
             "lr_v": case.get("lr_v", ""),
@@ -287,6 +334,8 @@ def main() -> None:
     print(f"- Metadata: {meta_path}")
     for key, val in nifti_paths.items():
         print(f"- NIfTI ({key}): {val}")
+    for key, val in seg_nifti_paths.items():
+        print(f"- Segmentation ({key}): {val}")
 
 
 if __name__ == "__main__":

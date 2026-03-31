@@ -11,6 +11,27 @@ def _extract_state_dict(checkpoint):
     return checkpoint
 
 
+def _load_state_dict_with_seg_head_compat(module, state_dict, seg_prefix="seg_head."):
+    module_keys = set(module.state_dict().keys())
+    state_keys = set(state_dict.keys())
+    missing_keys = sorted(module_keys - state_keys)
+    unexpected_keys = sorted(state_keys - module_keys)
+
+    only_seg_head_mismatch = (
+        all(key.startswith(seg_prefix) for key in missing_keys)
+        and all(key.startswith(seg_prefix) for key in unexpected_keys)
+    )
+    if missing_keys or unexpected_keys:
+        if only_seg_head_mismatch:
+            module.load_state_dict(state_dict, strict=False)
+            print(
+                "Info: loaded checkpoint with seg_head compatibility "
+                f"(missing={missing_keys}, unexpected={unexpected_keys})."
+            )
+            return
+    module.load_state_dict(state_dict)
+
+
 class EndToEndCascadeSRDenoise(nn.Module):
     """
     End-to-end cascade:
@@ -37,6 +58,8 @@ class EndToEndCascadeSRDenoise(nn.Module):
         freeze_stage2=False,
         apply_stage2_mask=True,
         apply_stage2_mask_to_magnitude=True,
+        use_stage1_seg_head=False,
+        use_seg_mask_at_inference=False,
     ):
         super().__init__()
         if not bool(predict_mag):
@@ -46,6 +69,8 @@ class EndToEndCascadeSRDenoise(nn.Module):
         self.res_increase = int(res_increase)
         self.apply_stage2_mask = bool(apply_stage2_mask)
         self.apply_stage2_mask_to_magnitude = bool(apply_stage2_mask_to_magnitude)
+        self.use_stage1_seg_head = bool(use_stage1_seg_head)
+        self.use_seg_mask_at_inference = bool(use_seg_mask_at_inference)
 
         self.stage1 = build_sr_model(
             model_variant="pre_upsample_attention",
@@ -54,6 +79,7 @@ class EndToEndCascadeSRDenoise(nn.Module):
             hi_resblock=int(hi_resblock),
             channel_nr=int(channel_nr),
             predict_mag=True,
+            cascade_use_seg_head=self.use_stage1_seg_head,
         )
         self.stage2 = build_sr_model(
             model_variant="original",
@@ -66,7 +92,7 @@ class EndToEndCascadeSRDenoise(nn.Module):
 
         if stage1_checkpoint:
             checkpoint = torch.load(stage1_checkpoint, map_location="cpu")
-            self.stage1.load_state_dict(_extract_state_dict(checkpoint))
+            _load_state_dict_with_seg_head_compat(self.stage1, _extract_state_dict(checkpoint))
         if stage2_checkpoint:
             checkpoint = torch.load(stage2_checkpoint, map_location="cpu")
             self.stage2.load_state_dict(_extract_state_dict(checkpoint))
@@ -90,19 +116,39 @@ class EndToEndCascadeSRDenoise(nn.Module):
         return stage1_out, mask
 
     def forward(self, u, v, w, u_mag, v_mag, w_mag, mask=None):
-        stage1_out = self.stage1(u, v, w, u_mag, v_mag, w_mag)
+        stage1_result = self.stage1(u, v, w, u_mag, v_mag, w_mag)
+        if isinstance(stage1_result, tuple):
+            stage1_out, seg_map = stage1_result
+        else:
+            stage1_out, seg_map = stage1_result, None
         stage1_out, mask = self._align_stage1_and_mask(stage1_out, mask)
+        if seg_map is not None:
+            seg_map = seg_map[
+                :,
+                :,
+                : stage1_out.shape[2],
+                : stage1_out.shape[3],
+                : stage1_out.shape[4],
+            ]
 
         sr_u = stage1_out[:, 0:1]
         sr_v = stage1_out[:, 1:2]
         sr_w = stage1_out[:, 2:3]
         sr_mag = stage1_out[:, 3:4].clamp_(0.0, 1.0)
 
-        if self.apply_stage2_mask and mask is not None:
-            sr_u = sr_u * mask[:, None]
-            sr_v = sr_v * mask[:, None]
-            sr_w = sr_w * mask[:, None]
-            if self.apply_stage2_mask_to_magnitude:
-                sr_mag = sr_mag * mask[:, None]
+        selected_mask = None
+        if self.apply_stage2_mask:
+            if mask is not None:
+                selected_mask = mask
+            elif self.use_seg_mask_at_inference and seg_map is not None:
+                selected_mask = (seg_map[:, 0] > 0.5).float()
 
-        return self.stage2(sr_u, sr_v, sr_w, sr_mag, sr_mag, sr_mag)
+        if selected_mask is not None:
+            sr_u = sr_u * selected_mask[:, None]
+            sr_v = sr_v * selected_mask[:, None]
+            sr_w = sr_w * selected_mask[:, None]
+            if self.apply_stage2_mask_to_magnitude:
+                sr_mag = sr_mag * selected_mask[:, None]
+
+        stage2_out = self.stage2(sr_u, sr_v, sr_w, sr_mag, sr_mag, sr_mag)
+        return stage2_out, seg_map

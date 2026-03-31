@@ -66,6 +66,8 @@ def build_sr_model(
     cascade_stage2_checkpoint: str = "",
     cascade_freeze_stage1: bool = False,
     cascade_freeze_stage2: bool = False,
+    cascade_use_seg_head: bool = False,
+    cascade_use_seg_mask_at_inference: bool = False,
 ):
     variant = normalize_model_variant(model_variant)
 
@@ -111,6 +113,7 @@ def build_sr_model(
             hi_resblock=hi_resblock,
             channel_nr=channel_nr,
             predict_mag=predict_mag,
+            use_seg_head=cascade_use_seg_head,
         )
 
     if variant == "cascade_sr_dn_masked":
@@ -126,6 +129,8 @@ def build_sr_model(
             stage2_checkpoint=cascade_stage2_checkpoint,
             freeze_stage1=cascade_freeze_stage1,
             freeze_stage2=cascade_freeze_stage2,
+            use_stage1_seg_head=cascade_use_seg_head,
+            use_seg_mask_at_inference=cascade_use_seg_mask_at_inference,
         )
 
     if variant == "phase1_attention":

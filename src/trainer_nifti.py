@@ -402,6 +402,30 @@ def main():
         action="store_true",
         help="Freeze stage-2 denoising subnetwork parameters in cascade_sr_dn_masked.",
     )
+    parser.add_argument(
+        "--cascade-use-seg-head",
+        action="store_true",
+        default=False,
+        help="Add segmentation head to Stage 1 of cascade model.",
+    )
+    parser.add_argument(
+        "--cascade-use-seg-mask-at-inference",
+        action="store_true",
+        default=False,
+        help="Use seg head output as intermediate mask at inference instead of external segmentation.",
+    )
+    parser.add_argument(
+        "--seg-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for segmentation head loss (0.0 = disabled).",
+    )
+    parser.add_argument(
+        "--seg-loss-dice-weight",
+        type=float,
+        default=1.0,
+        help="Weight of Dice component within the seg loss.",
+    )
     args = parser.parse_args()
     args.model_variant = normalize_model_variant(args.model_variant)
     if args.model_variant not in set(available_model_variants()):
@@ -581,6 +605,10 @@ def main():
         cascade_stage2_checkpoint=args.cascade_stage2_checkpoint,
         cascade_freeze_stage1=args.cascade_freeze_stage1,
         cascade_freeze_stage2=args.cascade_freeze_stage2,
+        cascade_use_seg_head=args.cascade_use_seg_head,
+        cascade_use_seg_mask_at_inference=args.cascade_use_seg_mask_at_inference,
+        seg_loss_weight=args.seg_loss_weight,
+        seg_loss_dice_weight=args.seg_loss_dice_weight,
     )
     network.init_model_dir()
 

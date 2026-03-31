@@ -34,6 +34,31 @@ def _add_src_to_path() -> None:
         sys.path.insert(0, str(src_dir))
 
 
+def _load_state_dict_with_seg_head_compat(module, state_dict):
+    seg_prefixes = ("seg_head.", "stage1.seg_head.")
+    module_keys = set(module.state_dict().keys())
+    state_keys = set(state_dict.keys())
+    missing_keys = sorted(module_keys - state_keys)
+    unexpected_keys = sorted(state_keys - module_keys)
+
+    def _is_seg_key(key: str) -> bool:
+        return any(key.startswith(prefix) for prefix in seg_prefixes)
+
+    if missing_keys or unexpected_keys:
+        only_seg_head_mismatch = all(_is_seg_key(key) for key in missing_keys) and all(
+            _is_seg_key(key) for key in unexpected_keys
+        )
+        if only_seg_head_mismatch:
+            module.load_state_dict(state_dict, strict=False)
+            print(
+                "Info: loaded checkpoint with seg_head compatibility "
+                f"(missing={missing_keys}, unexpected={unexpected_keys})."
+            )
+            return
+
+    module.load_state_dict(state_dict)
+
+
 def load_case_table(csv_path: str, include_hr_mag: bool = True) -> List[Dict[str, Any]]:
     _add_src_to_path()
     from Network.NiftiPatchDataset import load_nifti_case_table
@@ -186,6 +211,8 @@ def load_sr_model(
     device: torch.device,
     predict_mag: Optional[bool] = None,
     model_variant: Optional[str] = None,
+    cascade_use_seg_head: Optional[bool] = None,
+    cascade_use_seg_mask_at_inference: Optional[bool] = None,
 ):
     _add_src_to_path()
     from Network.model_factory import build_sr_model, normalize_model_variant
@@ -200,6 +227,18 @@ def load_sr_model(
     if isinstance(checkpoint, dict) and "model_variant" in checkpoint:
         checkpoint_variant = str(checkpoint["model_variant"])
     resolved_variant = normalize_model_variant(model_variant or checkpoint_variant)
+    if cascade_use_seg_head is None and isinstance(checkpoint, dict) and "cascade_use_seg_head" in checkpoint:
+        cascade_use_seg_head = bool(checkpoint["cascade_use_seg_head"])
+    if cascade_use_seg_head is None:
+        cascade_use_seg_head = False
+    if (
+        cascade_use_seg_mask_at_inference is None
+        and isinstance(checkpoint, dict)
+        and "cascade_use_seg_mask_at_inference" in checkpoint
+    ):
+        cascade_use_seg_mask_at_inference = bool(checkpoint["cascade_use_seg_mask_at_inference"])
+    if cascade_use_seg_mask_at_inference is None:
+        cascade_use_seg_mask_at_inference = False
 
     model = build_sr_model(
         model_variant=resolved_variant,
@@ -207,14 +246,18 @@ def load_sr_model(
         low_resblock=low_resblock,
         hi_resblock=hi_resblock,
         predict_mag=predict_mag,
+        cascade_use_seg_head=bool(cascade_use_seg_head),
+        cascade_use_seg_mask_at_inference=bool(cascade_use_seg_mask_at_inference),
     ).to(device)
 
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
+        _load_state_dict_with_seg_head_compat(model, checkpoint["model_state_dict"])
     else:
-        model.load_state_dict(checkpoint)
+        _load_state_dict_with_seg_head_compat(model, checkpoint)
     model.eval()
     setattr(model, "model_variant", resolved_variant)
+    setattr(model, "cascade_use_seg_head", bool(cascade_use_seg_head))
+    setattr(model, "cascade_use_seg_mask_at_inference", bool(cascade_use_seg_mask_at_inference))
     return model, bool(predict_mag)
 
 
@@ -226,20 +269,31 @@ def _predict_with_sliding_window(
     sw_batch_size: int,
     overlap: float,
     device: torch.device,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     uses_mask = bool(getattr(model, "requires_mask_input", False))
+    include_mask_channel = uses_mask and mask_hr is not None
 
     def predictor_fn(x):
         if uses_mask:
-            u_t, v_t, w_t, um_t, vm_t, wm_t, mask_t = torch.split(x, [1, 1, 1, 1, 1, 1, 1], dim=1)
-            return model(u_t, v_t, w_t, um_t, vm_t, wm_t, mask=mask_t[:, 0])
-        u_t, v_t, w_t, um_t, vm_t, wm_t = torch.chunk(x, 6, dim=1)
-        return model(u_t, v_t, w_t, um_t, vm_t, wm_t)
+            if x.shape[1] == 7:
+                u_t, v_t, w_t, um_t, vm_t, wm_t, mask_t = torch.split(x, [1, 1, 1, 1, 1, 1, 1], dim=1)
+                result = model(u_t, v_t, w_t, um_t, vm_t, wm_t, mask=mask_t[:, 0])
+            else:
+                u_t, v_t, w_t, um_t, vm_t, wm_t = torch.chunk(x, 6, dim=1)
+                result = model(u_t, v_t, w_t, um_t, vm_t, wm_t, mask=None)
+        else:
+            u_t, v_t, w_t, um_t, vm_t, wm_t = torch.chunk(x, 6, dim=1)
+            result = model(u_t, v_t, w_t, um_t, vm_t, wm_t)
+
+        if isinstance(result, tuple):
+            pred_t, seg_t = result
+            if seg_t is not None:
+                return torch.cat((pred_t, seg_t), dim=1)
+            return pred_t
+        return result
 
     sw_input = lr_input_norm
-    if uses_mask:
-        if mask_hr is None:
-            raise ValueError("Mask-conditioned model requires mask_hr during inference.")
+    if include_mask_channel:
         mask_lr = _align_mask_to_target(mask_hr.astype(np.float32), tuple(int(v) for v in lr_input_norm.shape[1:4]))
         sw_input = np.concatenate([lr_input_norm, mask_lr[None, ...]], axis=0).astype(np.float32)
 
@@ -260,7 +314,10 @@ def _predict_with_sliding_window(
                 overlap=float(overlap),
                 mode="gaussian",
             )
-    return pred.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    pred_np = pred.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    if pred_np.shape[0] > 4:
+        return pred_np[:4], pred_np[4:5]
+    return pred_np, None
 
 
 def _read_case_volumes(case: Dict[str, Any], time_axis: int) -> Dict[str, Any]:
@@ -439,12 +496,14 @@ def run_case_inference(
     time_axis: int,
     apply_mask_to_lr_inputs: bool = False,
     apply_mask_to_lr_magnitude: bool = True,
+    use_reference_mask_for_model: bool = True,
 ) -> Dict[str, Any]:
     volumes = _read_case_volumes(case=case, time_axis=time_axis)
 
     lr_all: List[np.ndarray] = []
     gt_all: List[np.ndarray] = []
     pred_all: List[np.ndarray] = []
+    seg_all: List[np.ndarray] = []
     mask_all: List[np.ndarray] = []
     venc_all: List[float] = []
 
@@ -465,10 +524,10 @@ def run_case_inference(
             apply_mask_to_lr_magnitude=apply_mask_to_lr_magnitude,
         )
 
-        pred_norm = _predict_with_sliding_window(
+        pred_norm, seg_norm = _predict_with_sliding_window(
             model=model,
             lr_input_norm=lr_input_norm,
-            mask_hr=mask_bin,
+            mask_hr=mask_bin if use_reference_mask_for_model else None,
             roi_size=(int(patch_size), int(patch_size), int(patch_size)),
             sw_batch_size=sw_batch_size,
             overlap=overlap,
@@ -480,12 +539,14 @@ def run_case_inference(
         lr_all.append(lr_input_norm)
         gt_all.append(gt_4ch_norm)
         pred_all.append(pred_norm)
+        if seg_norm is not None:
+            seg_all.append(seg_norm.astype(np.float32))
         mask_all.append(mask_bin)
         venc_all.append(float(venc_scalar))
 
         print(f"Processed frame {i + 1}/{len(frame_indices)} (t={frame_idx})")
 
-    return {
+    payload = {
         "frame_indices": np.asarray(frame_indices, dtype=np.int32),
         "lr_norm": np.stack(lr_all, axis=0).astype(np.float32),
         "gt_norm": np.stack(gt_all, axis=0).astype(np.float32),
@@ -498,6 +559,9 @@ def run_case_inference(
         "hr_spacing": np.asarray(volumes["hr_img"].header.get_zooms()[:3], dtype=np.float32),
         "t_count": int(volumes["t_count"]),
     }
+    if seg_all:
+        payload["seg_pred"] = np.stack(seg_all, axis=0).astype(np.float32)
+    return payload
 
 
 def save_predicted_nifti(
@@ -545,20 +609,48 @@ def save_predicted_nifti(
     return out_paths
 
 
+def save_segmentation_nifti(
+    seg_pred: np.ndarray,
+    out_prefix: str,
+    lr_affine: np.ndarray,
+    res_increase: int,
+    threshold: float = 0.5,
+) -> Dict[str, str]:
+    out_affine = adjust_affine_for_upsample(lr_affine, res_increase=res_increase)
+    seg_prob = seg_pred.astype(np.float32)
+    if seg_prob.ndim != 5 or seg_prob.shape[1] != 1:
+        raise ValueError(f"Expected seg_pred shape [T,1,X,Y,Z], got {seg_prob.shape}")
+
+    prob = seg_prob[:, 0]
+    seg_bin = (prob >= float(threshold)).astype(np.float32)
+    out_paths: Dict[str, str] = {}
+    for arr, stem in ((prob, "seg_prob"), (seg_bin, "seg_bin")):
+        if arr.shape[0] == 1:
+            arr_out = arr[0]
+        else:
+            arr_out = np.moveaxis(arr, 0, -1)
+        p = f"{out_prefix}_{stem}.nii.gz"
+        nib.save(nib.Nifti1Image(arr_out.astype(np.float32), out_affine), p)
+        out_paths[stem] = p
+    return out_paths
+
+
 def save_payload_npz(path: str, payload: Dict[str, Any]) -> None:
-    np.savez_compressed(
-        path,
-        frame_indices=payload["frame_indices"],
-        lr_norm=payload["lr_norm"],
-        gt_norm=payload["gt_norm"],
-        pred_norm=payload["pred_norm"],
-        mask=payload["mask"],
-        venc=payload["venc"],
-        lr_affine=payload["lr_affine"],
-        hr_affine=payload["hr_affine"],
-        lr_spacing=payload["lr_spacing"],
-        hr_spacing=payload["hr_spacing"],
-    )
+    npz_payload = {
+        "frame_indices": payload["frame_indices"],
+        "lr_norm": payload["lr_norm"],
+        "gt_norm": payload["gt_norm"],
+        "pred_norm": payload["pred_norm"],
+        "mask": payload["mask"],
+        "venc": payload["venc"],
+        "lr_affine": payload["lr_affine"],
+        "hr_affine": payload["hr_affine"],
+        "lr_spacing": payload["lr_spacing"],
+        "hr_spacing": payload["hr_spacing"],
+    }
+    if "seg_pred" in payload:
+        npz_payload["seg_pred"] = payload["seg_pred"]
+    np.savez_compressed(path, **npz_payload)
 
 
 def save_metadata_json(path: str, metadata: Dict[str, Any]) -> None:

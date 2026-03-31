@@ -17,6 +17,30 @@ from . import h5util, loss_utils, utility
 from .model_factory import build_sr_model, normalize_model_variant
 
 
+def _load_state_dict_with_seg_head_compat(module, state_dict):
+    seg_prefixes = ("seg_head.", "stage1.seg_head.")
+    module_keys = set(module.state_dict().keys())
+    state_keys = set(state_dict.keys())
+    missing_keys = sorted(module_keys - state_keys)
+    unexpected_keys = sorted(state_keys - module_keys)
+
+    def _is_seg_key(key):
+        return any(key.startswith(prefix) for prefix in seg_prefixes)
+
+    if missing_keys or unexpected_keys:
+        only_seg_head_mismatch = all(_is_seg_key(key) for key in missing_keys) and all(
+            _is_seg_key(key) for key in unexpected_keys
+        )
+        if only_seg_head_mismatch:
+            module.load_state_dict(state_dict, strict=False)
+            print(
+                "Info: loaded checkpoint with seg_head compatibility "
+                f"(missing={missing_keys}, unexpected={unexpected_keys})."
+            )
+            return
+    module.load_state_dict(state_dict)
+
+
 class TrainerController:
     # constructor
     def __init__(
@@ -54,6 +78,10 @@ class TrainerController:
         cascade_stage2_checkpoint="",
         cascade_freeze_stage1=False,
         cascade_freeze_stage2=False,
+        cascade_use_seg_head=False,
+        cascade_use_seg_mask_at_inference=False,
+        seg_loss_weight=0.0,
+        seg_loss_dice_weight=1.0,
     ):
         """
         TrainerController constructor.
@@ -97,6 +125,14 @@ class TrainerController:
         self.val_sw_patch_size = max(int(val_sw_patch_size), 1)
         self.val_sw_batch_size = max(int(val_sw_batch_size), 1)
         self.val_sw_overlap = float(val_sw_overlap)
+        self.cascade_use_seg_head = bool(cascade_use_seg_head)
+        self.cascade_use_seg_mask_at_inference = bool(cascade_use_seg_mask_at_inference)
+        self.seg_loss_weight = max(float(seg_loss_weight), 0.0)
+        self.seg_loss_dice_weight = max(float(seg_loss_dice_weight), 0.0)
+        self.model_outputs_seg_map = self.cascade_use_seg_head and self.model_variant in {
+            "cascade_sr_dn_masked",
+            "pre_upsample_attention",
+        }
         if not (0.0 <= self.val_sw_overlap < 1.0):
             raise ValueError("--val-sw-overlap must be in [0,1).")
 
@@ -113,6 +149,8 @@ class TrainerController:
             cascade_stage2_checkpoint=cascade_stage2_checkpoint,
             cascade_freeze_stage1=cascade_freeze_stage1,
             cascade_freeze_stage2=cascade_freeze_stage2,
+            cascade_use_seg_head=self.cascade_use_seg_head,
+            cascade_use_seg_mask_at_inference=self.cascade_use_seg_mask_at_inference,
         ).to(self.device)
         self.metric_keys = [
             "train_loss",
@@ -129,6 +167,8 @@ class TrainerController:
             self.metric_keys.extend(["train_mag_mse", "val_mag_mse"])
             if self.accuracy_include_mag:
                 self.metric_keys.extend(["train_mag_accuracy", "val_mag_accuracy"])
+        if self.seg_loss_weight > 0.0:
+            self.metric_keys.extend(["train_seg_dice_loss", "val_seg_dice_loss"])
         self.accuracy_metric = "val_loss"
 
         print(f"Divergence loss2 * {self.div_weight}")
@@ -139,6 +179,17 @@ class TrainerController:
         print(f"Model variant: {self.model_variant}")
         if self.predict_mag:
             print(f"Magnitude loss weight: {self.mag_loss_weight}")
+        if self.cascade_use_seg_head:
+            print("Stage-1 segmentation head: enabled")
+        if self.cascade_use_seg_mask_at_inference:
+            print(f"Use seg-head mask at inference: {self.cascade_use_seg_mask_at_inference}")
+        if self.seg_loss_weight > 0.0:
+            print(
+                f"Segmentation loss: weight={self.seg_loss_weight}, "
+                f"dice_weight={self.seg_loss_dice_weight}"
+            )
+        if self.seg_loss_weight > 0.0 and not self.model_outputs_seg_map:
+            print("Warning: seg_loss_weight > 0 but the selected model configuration does not emit seg_map.")
         if self.tb_image_every_n_epochs > 0:
             print(
                 f"TensorBoard validation recon images every {self.tb_image_every_n_epochs} epochs "
@@ -183,6 +234,11 @@ class TrainerController:
     def _update_metric(self, key, value, n=1):
         self.metric_sums[key] += float(value) * n
         self.metric_counts[key] += n
+
+    def _log_metric(self, metric_name, value, phase, n=1):
+        key = f"{phase}_{metric_name}"
+        if key in self.metric_sums:
+            self._update_metric(key, value, n)
 
     def _metric_value(self, key):
         if self.metric_counts[key] == 0:
@@ -260,13 +316,17 @@ class TrainerController:
                     "mag_loss_weight": self.mag_loss_weight,
                     "non_fluid_loss_weight": self.non_fluid_weight,
                     "outside_tv_weight": self.outside_tv_weight,
+                    "cascade_use_seg_head": self.cascade_use_seg_head,
+                    "cascade_use_seg_mask_at_inference": self.cascade_use_seg_mask_at_inference,
+                    "seg_loss_weight": self.seg_loss_weight,
+                    "seg_loss_dice_weight": self.seg_loss_dice_weight,
                 },
                 checkpoint_path,
             )
             message = f"Saving current model - {time.ctime()}\n"
             print(message)
 
-    def loss_function(self, y_true, y_pred, mask):
+    def loss_function(self, y_true, y_pred, mask, seg_map=None):
         """
         Calculate Total Loss function:
         Loss = velocity_MSE + mag_weight * magnitude_MSE + weight * div_loss2
@@ -292,7 +352,16 @@ class TrainerController:
         divergence_loss = torch.zeros_like(vel_mse)
         outside_tv = self._outside_tv_penalty(y_pred, mask)
         total_loss = vel_mse + (self.mag_loss_weight * mag_mse) + divergence_loss + (self.outside_tv_weight * outside_tv)
-        return total_loss, vel_mse, divergence_loss, mag_mse
+        seg_dice_loss = None
+        if self.seg_loss_weight > 0.0 and seg_map is not None and mask is not None:
+            seg_map_squeezed = seg_map[:, 0]
+            mask_aligned = self._align_mask_to_shape(mask, seg_map_squeezed.shape[-3:]).to(seg_map_squeezed.dtype)
+            dice = self._dice_loss(seg_map_squeezed, mask_aligned)
+            seg_loss = self.seg_loss_dice_weight * dice
+            total_loss = total_loss + (self.seg_loss_weight * seg_loss)
+            seg_dice_loss = dice
+
+        return total_loss, vel_mse, divergence_loss, mag_mse, seg_dice_loss
 
     def accuracy_function(self, y_true, y_pred, mask):
         """
@@ -316,6 +385,13 @@ class TrainerController:
         Calculate speed magnitude error.
         """
         return (u_pred - u) ** 2 + (v_pred - v) ** 2 + (w_pred - w) ** 2
+
+    def _dice_loss(self, pred, target):
+        intersection = (pred * target).sum(dim=(1, 2, 3))
+        dice = (2.0 * intersection + 1e-6) / (
+            pred.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3)) + 1e-6
+        )
+        return (1.0 - dice).mean()
 
     @staticmethod
     def _masked_region_mse(voxel_error, mask, non_fluid_weight: float = 1.0):
@@ -543,6 +619,15 @@ class TrainerController:
         utility.log_to_file(self.logfile, f"Divergence weight: {self.div_weight}\n")
         utility.log_to_file(self.logfile, f"Non-fluid loss weight: {self.non_fluid_weight}\n")
         utility.log_to_file(self.logfile, f"Outside TV weight: {self.outside_tv_weight}\n")
+        utility.log_to_file(self.logfile, f"Cascade use seg head: {self.cascade_use_seg_head}\n")
+        utility.log_to_file(
+            self.logfile,
+            f"Cascade use seg mask at inference: {self.cascade_use_seg_mask_at_inference}\n",
+        )
+        utility.log_to_file(
+            self.logfile,
+            f"Seg loss weight: {self.seg_loss_weight}, seg loss dice weight: {self.seg_loss_dice_weight}\n",
+        )
         utility.log_to_file(
             self.logfile,
             f"LR scheduler: {self.lr_scheduler_name} "
@@ -604,25 +689,31 @@ class TrainerController:
         del venc
 
         self.optimizer.zero_grad(set_to_none=True)
-        predictions = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
-        loss = self.calculate_and_update_metrics(hires, predictions, mask, "train")
+        predictions, seg_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
+        loss = self.calculate_and_update_metrics(hires, predictions, mask, seg_map, "train")
         loss.backward()
         self.optimizer.step()
 
     def _forward_model(self, u, v, w, u_mag, v_mag, w_mag, mask=None):
         if getattr(self.model, "requires_mask_input", False):
-            return self.model(u, v, w, u_mag, v_mag, w_mag, mask=mask)
-        return self.model(u, v, w, u_mag, v_mag, w_mag)
+            result = self.model(u, v, w, u_mag, v_mag, w_mag, mask=mask)
+        else:
+            result = self.model(u, v, w, u_mag, v_mag, w_mag)
+        if isinstance(result, tuple):
+            predictions, seg_map = result
+        else:
+            predictions, seg_map = result, None
+        return predictions, seg_map
 
     @staticmethod
-    def _align_mask_to_lr_shape(mask, lr_shape):
+    def _align_mask_to_shape(mask, target_shape):
         if mask is None:
             return None
-        if tuple(mask.shape[-3:]) == tuple(lr_shape):
+        if tuple(mask.shape[-3:]) == tuple(target_shape):
             return mask
 
         mx, my, mz = [int(v) for v in mask.shape[-3:]]
-        tx, ty, tz = [int(v) for v in lr_shape]
+        tx, ty, tz = [int(v) for v in target_shape]
         fx = mx // tx if tx > 0 else 0
         fy = my // ty if ty > 0 else 0
         fz = mz // tz if tz > 0 else 0
@@ -638,7 +729,11 @@ class TrainerController:
             pooled = mask.unfold(1, fx, fx).unfold(2, fy, fy).unfold(3, fz, fz)
             return pooled.amax(dim=(-1, -2, -3))
 
-        return F.interpolate(mask[:, None], size=tuple(lr_shape), mode="nearest")[:, 0]
+        return F.interpolate(mask[:, None], size=tuple(target_shape), mode="nearest")[:, 0]
+
+    @staticmethod
+    def _align_mask_to_lr_shape(mask, lr_shape):
+        return TrainerController._align_mask_to_shape(mask, lr_shape)
 
     @torch.no_grad()
     def test_step(self, data_pairs, return_visuals=False):
@@ -646,6 +741,7 @@ class TrainerController:
         u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _ = self._prepare_batch(data_pairs)
         del venc
 
+        seg_map = None
         if self.val_full_volume:
             lr_input = torch.cat((u, v, w, u_mag, v_mag, w_mag), dim=1)
             lr_mask = self._align_mask_to_lr_shape(mask, lr_input.shape[-3:])
@@ -658,7 +754,7 @@ class TrainerController:
                 mask_patch = x[:, 6:7] if x.shape[1] > 6 else None
                 if mask_patch is not None:
                     mask_patch = mask_patch[:, 0]
-                return self._forward_model(
+                pred_patch, seg_patch = self._forward_model(
                     x[:, 0:1],
                     x[:, 1:2],
                     x[:, 2:3],
@@ -667,26 +763,41 @@ class TrainerController:
                     x[:, 5:6],
                     mask_patch,
                 )
+                if self.model_outputs_seg_map:
+                    if seg_patch is None:
+                        seg_patch = torch.zeros_like(pred_patch[:, :1])
+                    return torch.cat((pred_patch, seg_patch), dim=1)
+                return pred_patch
 
-            predictions = sliding_window_inference(
+            sw_output = sliding_window_inference(
                 inputs=lr_input,
                 roi_size=(self.val_sw_patch_size, self.val_sw_patch_size, self.val_sw_patch_size),
                 sw_batch_size=self.val_sw_batch_size,
                 predictor=_predictor,
                 overlap=self.val_sw_overlap,
             )
+            if self.model_outputs_seg_map:
+                pred_channels = int(hires.shape[1])
+                predictions = sw_output[:, :pred_channels]
+                seg_map = sw_output[:, pred_channels : pred_channels + 1]
+            else:
+                predictions = sw_output
         else:
-            predictions = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
+            predictions, seg_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
 
         hires, predictions, mask = self._align_spatial_shapes(hires, predictions, mask)
-        self.calculate_and_update_metrics(hires, predictions, mask, "val")
+        if seg_map is not None:
+            seg_map = seg_map[:, :, : predictions.shape[2], : predictions.shape[3], : predictions.shape[4]]
+        self.calculate_and_update_metrics(hires, predictions, mask, seg_map, "val")
         if return_visuals:
             return predictions, (u, v, w, u_mag, hires, mask)
         return predictions
 
-    def calculate_and_update_metrics(self, hires, predictions, mask, metric_set):
+    def calculate_and_update_metrics(self, hires, predictions, mask, seg_map, metric_set):
         hires, predictions, mask = self._align_spatial_shapes(hires, predictions, mask)
-        total_loss, mse, divloss, mag_mse = self.loss_function(hires, predictions, mask)
+        if seg_map is not None:
+            seg_map = seg_map[:, :, : predictions.shape[2], : predictions.shape[3], : predictions.shape[4]]
+        total_loss, mse, divloss, mag_mse, seg_dice_loss = self.loss_function(hires, predictions, mask, seg_map)
         rel_error, _vel_rel_error, mag_rel_error = self.accuracy_function(hires, predictions, mask)
 
         batch_size = hires.shape[0]
@@ -700,6 +811,8 @@ class TrainerController:
             self._update_metric(f"{metric_set}_mag_mse", mag_mse.mean().item(), batch_size)
             if self.accuracy_include_mag and mag_rel_error is not None:
                 self._update_metric(f"{metric_set}_mag_accuracy", mag_rel_error.mean().item(), batch_size)
+        if seg_dice_loss is not None:
+            self._log_metric("seg_dice_loss", seg_dice_loss.item(), metric_set, batch_size)
         self._update_metric(f"{metric_set}_accuracy", rel_error.mean().item(), batch_size)
         return total_loss.mean()
 
@@ -869,6 +982,10 @@ class TrainerController:
             "mag_loss_weight": self.mag_loss_weight,
             "non_fluid_loss_weight": self.non_fluid_weight,
             "outside_tv_weight": self.outside_tv_weight,
+            "cascade_use_seg_head": self.cascade_use_seg_head,
+            "cascade_use_seg_mask_at_inference": self.cascade_use_seg_mask_at_inference,
+            "seg_loss_weight": self.seg_loss_weight,
+            "seg_loss_dice_weight": self.seg_loss_dice_weight,
         }
         torch.save(checkpoint, f"{self.model_path}-best.pt")
 
@@ -887,16 +1004,22 @@ class TrainerController:
                     f"Warning: checkpoint model_variant={checkpoint_variant!r} "
                     f"differs from current model_variant={self.model_variant!r}."
                 )
-            self.model.load_state_dict(checkpoint["model_state_dict"])
+            _load_state_dict_with_seg_head_compat(self.model, checkpoint["model_state_dict"])
             if "optimizer_state_dict" in checkpoint:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                try:
+                    self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                except ValueError as exc:
+                    print(f"Warning: optimizer state not restored due to parameter mismatch: {exc}")
             if self.scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
-                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                try:
+                    self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                except ValueError as exc:
+                    print(f"Warning: scheduler state not restored due to parameter mismatch: {exc}")
             if "learning_rate" in checkpoint:
                 for group in self.optimizer.param_groups:
                     group["lr"] = checkpoint["learning_rate"]
         else:
-            self.model.load_state_dict(checkpoint)
+            _load_state_dict_with_seg_head_compat(self.model, checkpoint)
 
     def _update_summary_logging(self, epoch):
         """
@@ -916,6 +1039,8 @@ class TrainerController:
             train_metrics["mag_mse"] = self._metric_value("train_mag_mse")
             if self.accuracy_include_mag:
                 train_metrics["mag_accuracy"] = self._metric_value("train_mag_accuracy")
+        if "train_seg_dice_loss" in self.metric_sums:
+            train_metrics["seg_dice_loss"] = self._metric_value("train_seg_dice_loss")
         for key, value in train_metrics.items():
             self.train_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -929,6 +1054,8 @@ class TrainerController:
             val_metrics["mag_mse"] = self._metric_value("val_mag_mse")
             if self.accuracy_include_mag:
                 val_metrics["mag_accuracy"] = self._metric_value("val_mag_accuracy")
+        if "val_seg_dice_loss" in self.metric_sums:
+            val_metrics["seg_dice_loss"] = self._metric_value("val_seg_dice_loss")
         for key, value in val_metrics.items():
             self.val_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -940,10 +1067,10 @@ class TrainerController:
         self.model.eval()
         for data_pairs in testset:
             u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr = self._prepare_batch(data_pairs)
-            preds = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
+            preds, seg_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
 
-            loss_val, mse, divloss, _mag_mse = self.loss_function(hires, preds, mask)
-            rel_loss = self.accuracy_function(hires, preds, mask)
+            loss_val, mse, divloss, _mag_mse, _seg_dice = self.loss_function(hires, preds, mask, seg_map)
+            rel_loss, _vel_rel_loss, _mag_rel_loss = self.accuracy_function(hires, preds, mask)
             break
 
         quicksave_filename = f"quicksave_{self.network_name}.h5"

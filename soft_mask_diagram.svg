@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="960" height="720" viewBox="0 0 960 720" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', Arial, sans-serif">
+
+  <!-- ── Background ── -->
+  <rect width="960" height="720" fill="#f8f9fb" rx="12"/>
+
+  <!-- ══════════════════════════════════════════════════════════
+       TITLE
+  ══════════════════════════════════════════════════════════ -->
+  <text x="480" y="34" text-anchor="middle" font-size="16" font-weight="700" fill="#1a1a2e">
+    NeuroFlow Stage 1 — SR con Cabeza Segmentadora (Entrenamiento + Cascade)
+  </text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       PANEL A: TRAINING
+  ══════════════════════════════════════════════════════════ -->
+  <rect x="18" y="50" width="922" height="380" rx="10" fill="#eef2ff" stroke="#7c83d0" stroke-width="1.5"/>
+  <text x="36" y="75" font-size="12" font-weight="700" fill="#4a4f9c" letter-spacing="1">ENTRENAMIENTO</text>
+
+  <!-- ── INPUT ── -->
+  <rect x="42" y="90" width="118" height="64" rx="8" fill="#fff" stroke="#6c63ff" stroke-width="2"/>
+  <text x="101" y="113" text-anchor="middle" font-size="11" font-weight="700" fill="#6c63ff">Input 3T (×0.5)</text>
+  <text x="101" y="129" text-anchor="middle" font-size="10" fill="#555">u, v, w</text>
+  <text x="101" y="143" text-anchor="middle" font-size="10" fill="#555">mag_u, mag_v, mag_w</text>
+  <text x="101" y="157" text-anchor="middle" font-size="9.5" fill="#888">(B, 6, D, H, W)</text>
+
+  <!-- arrow input → encoder -->
+  <line x1="160" y1="122" x2="195" y2="122" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- ── ENCODER ── -->
+  <rect x="196" y="90" width="120" height="64" rx="8" fill="#fff" stroke="#3a86ff" stroke-width="2"/>
+  <text x="256" y="117" text-anchor="middle" font-size="11" font-weight="700" fill="#3a86ff">Encoder</text>
+  <text x="256" y="133" text-anchor="middle" font-size="10" fill="#555">Residual Blocks</text>
+  <text x="256" y="147" text-anchor="middle" font-size="9.5" fill="#888">3D Conv × N</text>
+
+  <!-- arrow encoder → CBAM -->
+  <line x1="316" y1="122" x2="352" y2="122" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- ── CBAM ── -->
+  <rect x="353" y="90" width="112" height="64" rx="8" fill="#fff" stroke="#06d6a0" stroke-width="2"/>
+  <text x="409" y="114" text-anchor="middle" font-size="11" font-weight="700" fill="#06a17a">CBAM</text>
+  <text x="409" y="130" text-anchor="middle" font-size="10" fill="#555">Pre-Upsampling</text>
+  <text x="409" y="146" text-anchor="middle" font-size="9.5" fill="#888">Channel + Spatial Attn</text>
+
+  <!-- arrow CBAM → decoder -->
+  <line x1="465" y1="122" x2="500" y2="122" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- ── DECODER ── -->
+  <rect x="501" y="90" width="118" height="64" rx="8" fill="#fff" stroke="#3a86ff" stroke-width="2"/>
+  <text x="560" y="117" text-anchor="middle" font-size="11" font-weight="700" fill="#3a86ff">Decoder</text>
+  <text x="560" y="133" text-anchor="middle" font-size="10" fill="#555">Upsampling ×2</text>
+  <text x="560" y="147" text-anchor="middle" font-size="9.5" fill="#888">Shared features</text>
+
+  <!-- ── SPLIT: two arrows from decoder ── -->
+  <!-- shared feature node -->
+  <line x1="619" y1="122" x2="660" y2="122" stroke="#555" stroke-width="1.8"/>
+  <circle cx="660" cy="122" r="5" fill="#555"/>
+
+  <!-- arrow → velocity head (up-right) -->
+  <line x1="660" y1="122" x2="660" y2="95" stroke="#555" stroke-width="1.8"/>
+  <line x1="660" y1="95" x2="720" y2="95" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- arrow → seg head (down-right) -->
+  <line x1="660" y1="122" x2="660" y2="153" stroke="#555" stroke-width="1.8"/>
+  <line x1="660" y1="153" x2="720" y2="153" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- ── VELOCITY HEAD ── -->
+  <rect x="721" y="76" width="120" height="40" rx="7" fill="#fff" stroke="#3a86ff" stroke-width="1.8"/>
+  <text x="781" y="93" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3a86ff">Velocity Head</text>
+  <text x="781" y="108" text-anchor="middle" font-size="9.5" fill="#555">Conv3d → Pred vel.</text>
+
+  <!-- ── SEG HEAD ── -->
+  <rect x="721" y="135" width="120" height="40" rx="7" fill="#fff" stroke="#ff6b6b" stroke-width="2" stroke-dasharray="5,3"/>
+  <text x="781" y="152" text-anchor="middle" font-size="10.5" font-weight="700" fill="#cc2929">Seg Head (nuevo)</text>
+  <text x="781" y="167" text-anchor="middle" font-size="9.5" fill="#555">Conv3d × 2 → Sigmoid</text>
+
+  <!-- ── OUTPUTS ── -->
+  <!-- pred vel -->
+  <line x1="841" y1="96" x2="876" y2="96" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="877" y="76" width="52" height="40" rx="6" fill="#dbeafe" stroke="#3a86ff" stroke-width="1.5"/>
+  <text x="903" y="93" text-anchor="middle" font-size="9.5" font-weight="700" fill="#1d4ed8">Vel. 7T</text>
+  <text x="903" y="107" text-anchor="middle" font-size="8.5" fill="#1d4ed8">pred</text>
+
+  <!-- pred seg map -->
+  <line x1="841" y1="155" x2="876" y2="155" stroke="#555" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="877" y="135" width="52" height="40" rx="6" fill="#ffe4e4" stroke="#cc2929" stroke-width="1.5"/>
+  <text x="903" y="151" text-anchor="middle" font-size="9.5" font-weight="700" fill="#cc2929">Seg Map</text>
+  <text x="903" y="165" text-anchor="middle" font-size="8.5" fill="#cc2929">∈ [0,1]</text>
+
+  <!-- ══ LOSS SECTION ══ -->
+  <line x1="480" y1="154" x2="480" y2="210" stroke="#aaa" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="480" y="208" text-anchor="middle" font-size="9.5" fill="#888">features</text>
+
+  <!-- ── GROUND TRUTH COLUMN ── -->
+  <!-- GT vel -->
+  <rect x="42" y="240" width="118" height="40" rx="7" fill="#e0f7f0" stroke="#06a17a" stroke-width="1.5"/>
+  <text x="101" y="257" text-anchor="middle" font-size="10" font-weight="700" fill="#06a17a">GT 7T velocidades</text>
+  <text x="101" y="271" text-anchor="middle" font-size="9" fill="#555">referencia real</text>
+
+  <!-- GT CoW binary -->
+  <rect x="42" y="295" width="118" height="40" rx="7" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+  <text x="101" y="312" text-anchor="middle" font-size="10" font-weight="700" fill="#92400e">CoW mask binaria</text>
+  <text x="101" y="326" text-anchor="middle" font-size="9" fill="#555">Frangi(3T) + umbral</text>
+
+  <!-- GT Frangi 7T -->
+  <rect x="42" y="350" width="118" height="40" rx="7" fill="#fde8ff" stroke="#9333ea" stroke-width="1.5"/>
+  <text x="101" y="367" text-anchor="middle" font-size="10" font-weight="700" fill="#7e22ce">Frangi(7T ref.)</text>
+  <text x="101" y="381" text-anchor="middle" font-size="9" fill="#555">vesselness ∈ [0,1]</text>
+
+  <!-- ── LOSS BOXES ── -->
+  <!-- L_vel+mag+TV -->
+  <rect x="210" y="235" width="158" height="52" rx="8" fill="#fff" stroke="#3a86ff" stroke-width="1.8"/>
+  <text x="289" y="254" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3a86ff">ℒ_vel + ℒ_mag + ℒ_TV</text>
+  <text x="289" y="270" text-anchor="middle" font-size="9.5" fill="#555">MSE vel. (enmascarada)</text>
+  <text x="289" y="284" text-anchor="middle" font-size="9.5" fill="#555">+ magnitud + regulariz. TV</text>
+
+  <!-- L_vel_weighted annotation -->
+  <rect x="210" y="298" width="158" height="40" rx="8" fill="#e8f4ff" stroke="#3a86ff" stroke-width="1.2" stroke-dasharray="5,3"/>
+  <text x="289" y="315" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">ℒ_vel ponderada (opcional)</text>
+  <text x="289" y="330" text-anchor="middle" font-size="9" fill="#555">× peso Frangi(7T) por vóxel</text>
+
+  <!-- L_seg -->
+  <rect x="420" y="235" width="200" height="80" rx="8" fill="#fff5f5" stroke="#cc2929" stroke-width="2" stroke-dasharray="5,3"/>
+  <text x="520" y="257" text-anchor="middle" font-size="11" font-weight="700" fill="#cc2929">ℒ_seg (nueva)</text>
+  <line x1="430" y1="265" x2="612" y2="265" stroke="#eee" stroke-width="1"/>
+  <text x="520" y="278" text-anchor="middle" font-size="10" fill="#555">Dice(pred_seg, CoW binaria)</text>
+  <text x="520" y="293" text-anchor="middle" font-size="10" fill="#9333ea">+ λ · MSE(pred_seg, Frangi 7T)</text>
+  <text x="520" y="308" text-anchor="middle" font-size="9" fill="#888">supervisa forma continua y binaria</text>
+
+  <!-- ── TOTAL LOSS ── -->
+  <rect x="680" y="235" width="220" height="80" rx="8" fill="#f0fdf4" stroke="#15803d" stroke-width="2"/>
+  <text x="790" y="255" text-anchor="middle" font-size="11" font-weight="700" fill="#15803d">ℒ_total</text>
+  <text x="790" y="272" text-anchor="middle" font-size="10" fill="#333">ℒ_vel + λ_M ℒ_mag + λ_TV ℒ_TV</text>
+  <line x1="690" y1="280" x2="892" y2="280" stroke="#c6f0d4" stroke-width="1"/>
+  <text x="790" y="294" text-anchor="middle" font-size="10" fill="#cc2929" font-weight="600">+ λ_seg · ℒ_seg</text>
+  <text x="790" y="308" text-anchor="middle" font-size="9" fill="#888">(Dice + MSE vesselness)</text>
+
+  <!-- arrows GT → losses -->
+  <!-- GT vel → L_vel -->
+  <line x1="160" y1="260" x2="208" y2="260" stroke="#3a86ff" stroke-width="1.5" marker-end="url(#arr_blue)" stroke-dasharray="4,2"/>
+  <!-- CoW → L_seg -->
+  <line x1="160" y1="315" x2="418" y2="285" stroke="#cc2929" stroke-width="1.5" marker-end="url(#arr_red)" stroke-dasharray="4,2"/>
+  <!-- Frangi 7T → L_seg -->
+  <line x1="160" y1="370" x2="418" y2="300" stroke="#9333ea" stroke-width="1.5" marker-end="url(#arr_purple)" stroke-dasharray="4,2"/>
+
+  <!-- pred vel → L_vel (from above) -->
+  <path d="M 903 116 Q 903 230 289 234" stroke="#3a86ff" stroke-width="1.5" fill="none" marker-end="url(#arr_blue)" stroke-dasharray="4,2"/>
+  <!-- pred seg → L_seg (from above) -->
+  <path d="M 877 175 Q 850 215 622 235" stroke="#cc2929" stroke-width="1.5" fill="none" marker-end="url(#arr_red)" stroke-dasharray="4,2"/>
+
+  <!-- L_vel → L_total -->
+  <line x1="368" y1="261" x2="678" y2="261" stroke="#15803d" stroke-width="1.5" marker-end="url(#arr_green)"/>
+  <!-- L_seg → L_total -->
+  <line x1="620" y1="275" x2="678" y2="275" stroke="#cc2929" stroke-width="1.5" marker-end="url(#arr_red)"/>
+
+  <!-- ══════════════════════════════════════════════════════════
+       PANEL B: INFERENCE CASCADE
+  ══════════════════════════════════════════════════════════ -->
+  <rect x="18" y="448" width="922" height="250" rx="10" fill="#f0fdf4" stroke="#15803d" stroke-width="1.5"/>
+  <text x="36" y="473" font-size="12" font-weight="700" fill="#15803d" letter-spacing="1">INFERENCIA — CASCADE (I+J)</text>
+
+  <!-- Step 1: 3T input -->
+  <rect x="42" y="490" width="108" height="50" rx="7" fill="#fff" stroke="#6c63ff" stroke-width="2"/>
+  <text x="96" y="511" text-anchor="middle" font-size="10.5" font-weight="700" fill="#6c63ff">3T input (×0.5)</text>
+  <text x="96" y="527" text-anchor="middle" font-size="9.5" fill="#555">sin máscara previa</text>
+
+  <!-- arrow -->
+  <line x1="150" y1="515" x2="183" y2="515" stroke="#333" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- Step 2: Stage 1 SR -->
+  <rect x="184" y="490" width="130" height="50" rx="7" fill="#fff" stroke="#3a86ff" stroke-width="2"/>
+  <text x="249" y="509" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3a86ff">Stage 1: SR Model</text>
+  <text x="249" y="523" text-anchor="middle" font-size="9.5" fill="#555">CBAM-PreUpsampling</text>
+  <text x="249" y="537" text-anchor="middle" font-size="9" fill="#888">(frozen en J)</text>
+
+  <!-- two arrows out of Stage 1 -->
+  <line x1="314" y1="508" x2="347" y2="508" stroke="#333" stroke-width="1.8"/>
+  <circle cx="347" cy="508" r="4" fill="#333"/>
+  <!-- arrow to SR output -->
+  <line x1="347" y1="490" x2="347" y2="485" stroke="#333" stroke-width="1.8"/>
+  <line x1="347" y1="485" x2="420" y2="485" stroke="#333" stroke-width="1.8" marker-end="url(#arr)"/>
+  <!-- arrow to seg map -->
+  <line x1="347" y1="525" x2="347" y2="535" stroke="#cc2929" stroke-width="1.8"/>
+  <line x1="347" y1="535" x2="420" y2="535" stroke="#cc2929" stroke-width="1.8" marker-end="url(#arr_red)"/>
+
+  <!-- SR output box -->
+  <rect x="421" y="470" width="108" height="30" rx="6" fill="#dbeafe" stroke="#3a86ff" stroke-width="1.5"/>
+  <text x="475" y="490" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">Vel. SR predicha</text>
+
+  <!-- Seg map from head -->
+  <rect x="421" y="520" width="108" height="30" rx="6" fill="#ffe4e4" stroke="#cc2929" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="475" y="540" text-anchor="middle" font-size="10" font-weight="600" fill="#cc2929">Seg Map ∈ [0,1]</text>
+
+  <!-- arrow seg map → threshold -->
+  <line x1="529" y1="535" x2="561" y2="535" stroke="#cc2929" stroke-width="1.8" marker-end="url(#arr_red)"/>
+
+  <!-- threshold box -->
+  <rect x="562" y="520" width="100" height="30" rx="6" fill="#fde8ff" stroke="#9333ea" stroke-width="1.5"/>
+  <text x="612" y="538" text-anchor="middle" font-size="10" font-weight="600" fill="#7e22ce">Umbral → Mask</text>
+
+  <!-- arrows merge at multiply -->
+  <line x1="529" y1="485" x2="580" y2="485" stroke="#3a86ff" stroke-width="1.8"/>
+  <line x1="662" y1="535" x2="692" y2="535" stroke="#9333ea" stroke-width="1.8"/>
+  <line x1="692" y1="535" x2="692" y2="485" stroke="#9333ea" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- multiply node -->
+  <circle cx="612" cy="485" r="14" fill="#fff" stroke="#333" stroke-width="2"/>
+  <text x="612" y="490" text-anchor="middle" font-size="14" font-weight="700" fill="#333">⊗</text>
+
+  <!-- arrow multiply → masked SR -->
+  <line x1="626" y1="485" x2="660" y2="485" stroke="#333" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- masked SR output -->
+  <rect x="661" y="468" width="118" height="34" rx="6" fill="#e0f7f0" stroke="#06a17a" stroke-width="1.8"/>
+  <text x="720" y="483" text-anchor="middle" font-size="10" font-weight="700" fill="#06a17a">SR output enmascarado</text>
+  <text x="720" y="496" text-anchor="middle" font-size="9" fill="#333">vel_SR × mask_auto</text>
+
+  <!-- arrow → Stage 2 -->
+  <line x1="779" y1="485" x2="812" y2="485" stroke="#333" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- Stage 2: Denoising -->
+  <rect x="813" y="462" width="110" height="56" rx="7" fill="#fff" stroke="#06d6a0" stroke-width="2"/>
+  <text x="868" y="482" text-anchor="middle" font-size="10.5" font-weight="700" fill="#06a17a">Stage 2: Denoise</text>
+  <text x="868" y="496" text-anchor="middle" font-size="9.5" fill="#555">Original masked</text>
+  <text x="868" y="510" text-anchor="middle" font-size="9" fill="#888">(fine-tuned en J)</text>
+
+  <!-- arrow → final output -->
+  <line x1="868" y1="518" x2="868" y2="550" stroke="#333" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="818" y="551" width="100" height="34" rx="6" fill="#d1fae5" stroke="#15803d" stroke-width="2"/>
+  <text x="868" y="568" text-anchor="middle" font-size="10.5" font-weight="700" fill="#15803d">Predicción 7T</text>
+  <text x="868" y="582" text-anchor="middle" font-size="9" fill="#333">final</text>
+
+  <!-- ── IMPROVEMENT NOTE ── -->
+  <rect x="42" y="590" width="750" height="88" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+  <text x="62" y="610" font-size="10.5" font-weight="700" fill="#92400e">¿Por qué mejora la máscara?</text>
+  <text x="62" y="628" font-size="9.5" fill="#555">• El Seg Head aprende a predecir la forma exacta del mapa Frangi(7T), no solo el umbral binario.</text>
+  <text x="62" y="644" font-size="9.5" fill="#555">• La ℒ_seg fluye hacia el Encoder/CBAM: los features intermedios se reorganizan para ser más discriminativos de vasos.</text>
+  <text x="62" y="660" font-size="9.5" fill="#555">• Al umbralizar el Seg Map (en lugar del campo de vel. directamente), el Frangi recibe ya una representación pre-segmentada → umbral más robusto.</text>
+
+  <!-- ── LEGEND ── -->
+  <rect x="800" y="590" width="136" height="88" rx="6" fill="#fff" stroke="#ccc" stroke-width="1"/>
+  <text x="810" y="608" font-size="9.5" font-weight="700" fill="#333">Leyenda</text>
+  <line x1="810" y1="618" x2="830" y2="618" stroke="#3a86ff" stroke-width="1.8"/>
+  <text x="834" y="622" font-size="9" fill="#333">Flujo de datos</text>
+  <line x1="810" y1="632" x2="830" y2="632" stroke="#cc2929" stroke-width="1.8" stroke-dasharray="5,3"/>
+  <text x="834" y="636" font-size="9" fill="#333">Seg head (nuevo)</text>
+  <line x1="810" y1="646" x2="830" y2="646" stroke="#9333ea" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="834" y="650" font-size="9" fill="#333">Frangi / vesselness</text>
+  <line x1="810" y1="660" x2="830" y2="660" stroke="#15803d" stroke-width="1.8"/>
+  <text x="834" y="664" font-size="9" fill="#333">Loss total</text>
+
+  <!-- ══ ARROW MARKERS ══ -->
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#555"/>
+    </marker>
+    <marker id="arr_blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#3a86ff"/>
+    </marker>
+    <marker id="arr_red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#cc2929"/>
+    </marker>
+    <marker id="arr_green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#15803d"/>
+    </marker>
+    <marker id="arr_purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#9333ea"/>
+    </marker>
+  </defs>
+
+</svg>

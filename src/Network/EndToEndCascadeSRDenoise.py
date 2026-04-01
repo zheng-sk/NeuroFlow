@@ -11,6 +11,13 @@ def _extract_state_dict(checkpoint):
     return checkpoint
 
 
+def _extract_submodule_state_dict(state_dict, prefix):
+    prefix = str(prefix)
+    if any(key.startswith(prefix) for key in state_dict.keys()):
+        return {key[len(prefix) :]: value for key, value in state_dict.items() if key.startswith(prefix)}
+    return state_dict
+
+
 def _load_state_dict_with_seg_head_compat(module, state_dict, seg_prefix="seg_head."):
     module_keys = set(module.state_dict().keys())
     state_keys = set(state_dict.keys())
@@ -95,10 +102,12 @@ class EndToEndCascadeSRDenoise(nn.Module):
 
         if stage1_checkpoint:
             checkpoint = torch.load(stage1_checkpoint, map_location="cpu")
-            _load_state_dict_with_seg_head_compat(self.stage1, _extract_state_dict(checkpoint))
+            stage1_state = _extract_submodule_state_dict(_extract_state_dict(checkpoint), "stage1.")
+            _load_state_dict_with_seg_head_compat(self.stage1, stage1_state)
         if stage2_checkpoint:
             checkpoint = torch.load(stage2_checkpoint, map_location="cpu")
-            self.stage2.load_state_dict(_extract_state_dict(checkpoint))
+            stage2_state = _extract_submodule_state_dict(_extract_state_dict(checkpoint), "stage2.")
+            self.stage2.load_state_dict(stage2_state)
 
         if freeze_stage1:
             for p in self.stage1.parameters():

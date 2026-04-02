@@ -24,7 +24,33 @@ def _resolve_path(path_value: str, base_dir: Path) -> Path | None:
     path = Path(value)
     if path.is_absolute():
         return path
-    return (base_dir / path).resolve()
+
+    base_abs = base_dir.resolve()
+    search_roots = [base_abs, Path.cwd().resolve()]
+
+    cursor = base_abs
+    while True:
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        search_roots.append(parent)
+        cursor = parent
+
+    seen = set()
+    ordered_roots = []
+    for root in search_roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered_roots.append(root)
+
+    for root in ordered_roots:
+        candidate = (root / path).resolve()
+        if candidate.exists():
+            return candidate
+
+    return (base_abs / path).resolve()
 
 
 def _infer_hr_mag_path(row: dict, base_dir: Path) -> Path:

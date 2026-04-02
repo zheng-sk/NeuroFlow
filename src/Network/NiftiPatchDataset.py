@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from monai.data import CacheDataset, DataLoader, Dataset as MonaiDataset
 from monai.transforms import Compose, EnsureChannelFirstd, LoadImaged, RandomizableTransform, ScaleIntensity
 from torch.utils.data import Dataset
@@ -61,11 +62,22 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
         and one magnitude source from:
         lr_mag, lr_mag_u, lr_mag_v, lr_mag_w
     Optional columns:
-        hr_mag, mask, venc, venc_u, venc_v, venc_w, time_start, time_end, time_index
+        hr_mag, mask, vesselness_target, venc, venc_u, venc_v, venc_w, time_start, time_end, time_index
     """
     required = ["lr_u", "lr_v", "lr_w", "hr_u", "hr_v", "hr_w"]
     mag_keys = ["lr_mag_u", "lr_mag_v", "lr_mag_w"]
-    optional = ["hr_mag", "mask", "venc", "venc_u", "venc_v", "venc_w", "time_start", "time_end", "time_index"]
+    optional = [
+        "hr_mag",
+        "mask",
+        "vesselness_target",
+        "venc",
+        "venc_u",
+        "venc_v",
+        "venc_w",
+        "time_start",
+        "time_end",
+        "time_index",
+    ]
 
     base_dir = os.path.dirname(os.path.abspath(csv_path))
     cases = []
@@ -108,7 +120,7 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
                         case[key] = inferred if os.path.exists(inferred) else ""
                     else:
                         case[key] = ""
-                elif key == "mask":
+                elif key in {"mask", "vesselness_target"}:
                     case[key] = _resolve_path(value, base_dir) if str(value).strip() else None
                 else:
                     case[key] = _resolve_path(value, base_dir)
@@ -191,6 +203,32 @@ def _align_mask_to_target(mask: np.ndarray, target_shape: tuple[int, int, int]) 
     return _nearest_resize_mask(mask, target_shape).astype(np.float32)
 
 
+def _align_continuous_to_target(volume: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    if tuple(volume.shape) == tuple(target_shape):
+        return volume.astype(np.float32)
+
+    sx, sy, sz = volume.shape
+    tx, ty, tz = target_shape
+    fx = sx // tx if tx > 0 else 0
+    fy = sy // ty if ty > 0 else 0
+    fz = sz // tz if tz > 0 else 0
+
+    if (
+        fx > 0
+        and fy > 0
+        and fz > 0
+        and sx == tx * fx
+        and sy == ty * fy
+        and sz == tz * fz
+    ):
+        pooled = volume.reshape(tx, fx, ty, fy, tz, fz).mean(axis=(1, 3, 5))
+        return pooled.astype(np.float32)
+
+    tensor = torch.from_numpy(volume.astype(np.float32, copy=False))[None, None]
+    resized = F.interpolate(tensor, size=tuple(target_shape), mode="trilinear", align_corners=False)
+    return resized[0, 0].cpu().numpy().astype(np.float32)
+
+
 class _StackNormalizeFieldsd(RandomizableTransform):
     def __init__(
         self,
@@ -198,6 +236,7 @@ class _StackNormalizeFieldsd(RandomizableTransform):
         mag_norm_mode: str = "monai_minmax",
         mask_threshold: float = 0.5,
         include_hr_mag: bool = False,
+        include_vesselness_target: bool = False,
         raw_phase_input: bool = True,
         invert_uv_sign_on_raw: bool = False,
         raw_center: float = 2048.0,
@@ -213,6 +252,7 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             raise ValueError(f"Unsupported mag_norm_mode={mag_norm_mode!r}. Use 'monai_minmax' or 'divisor'.")
         self.mask_threshold = float(mask_threshold)
         self.include_hr_mag = bool(include_hr_mag)
+        self.include_vesselness_target = bool(include_vesselness_target)
         self.raw_phase_input = bool(raw_phase_input)
         self.invert_uv_sign_on_raw = bool(invert_uv_sign_on_raw)
         self.raw_center = float(raw_center)
@@ -298,6 +338,11 @@ class _StackNormalizeFieldsd(RandomizableTransform):
         mag_w_raw = d["lr_mag_w"][0].astype(np.float32)
         hr_mag_raw = d["hr_mag"][0].astype(np.float32) if self.include_hr_mag else None
         mask_raw = d["mask"][0].astype(np.float32) if "mask" in d and d["mask"] is not None else None
+        vesselness_raw = (
+            d["vesselness_target"][0].astype(np.float32)
+            if self.include_vesselness_target and "vesselness_target" in d and d["vesselness_target"] is not None
+            else None
+        )
 
         # 4D NIfTI support: sample/select one time frame and continue with 3D patching.
         if lr_u_raw.ndim == 4:
@@ -311,6 +356,9 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             if mask_raw is not None and mask_raw.ndim == 4:
                 axis = self._normalize_time_axis(mask_raw.ndim)
                 time_lengths.append(mask_raw.shape[axis])
+            if vesselness_raw is not None and vesselness_raw.ndim == 4:
+                axis = self._normalize_time_axis(vesselness_raw.ndim)
+                time_lengths.append(vesselness_raw.shape[axis])
 
             t_count = int(min(time_lengths))
             if t_count <= 0:
@@ -353,6 +401,7 @@ class _StackNormalizeFieldsd(RandomizableTransform):
         mag_w = self._select_time_frame(mag_w_raw, t_index)
         hr_mag = self._select_time_frame(hr_mag_raw, t_index) if hr_mag_raw is not None else None
         mask = self._select_time_frame(mask_raw, t_index) if mask_raw is not None else None
+        vesselness = self._select_time_frame(vesselness_raw, t_index) if vesselness_raw is not None else None
 
         venc_u = self._resolve_component_venc(d, "venc_u")
         venc_v = self._resolve_component_venc(d, "venc_v")
@@ -415,12 +464,21 @@ class _StackNormalizeFieldsd(RandomizableTransform):
         else:
             mask = np.ones(hr_vel.shape[1:], dtype=np.float32)
 
+        if vesselness is not None:
+            vesselness = np.nan_to_num(vesselness.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+            if tuple(vesselness.shape) != tuple(hr_vel.shape[1:]):
+                vesselness = _align_continuous_to_target(vesselness, hr_vel.shape[1:])
+            vesselness = np.clip(vesselness, 0.0, 1.0).astype(np.float32)
+            vesselness = vesselness * mask.astype(np.float32)
+
         d["lr_vel"] = lr_vel
         d["hr_vel"] = hr_vel
         d["lr_mag"] = lr_mag
         if hr_mag is not None:
             d["hr_mag"] = hr_mag
         d["mask"] = mask
+        if vesselness is not None:
+            d["vesselness_target"] = vesselness
         d["venc"] = np.float32(venc)
         return d
 
@@ -488,6 +546,10 @@ class _RandomVectorRotate90d(RandomizableTransform):
         if "hr_mag" in d:
             d["hr_mag"] = self._rotate_scalar(d["hr_mag"], rotation_idx, plane_nr).astype(np.float32)
         d["mask"] = self._rotate_scalar(d["mask"], rotation_idx, plane_nr).astype(np.float32)
+        if "vesselness_target" in d:
+            d["vesselness_target"] = self._rotate_scalar(d["vesselness_target"], rotation_idx, plane_nr).astype(
+                np.float32
+            )
         return d
 
 
@@ -887,7 +949,12 @@ class _PairedRandomPatchd(RandomizableTransform):
             else None
         )
         mask = np.ascontiguousarray(d["mask"][hx0 : hx0 + hp, hy0 : hy0 + hp, hz0 : hz0 + hp])
-        return lr_vel, lr_mag, hr_vel, hr_mag, mask
+        vesselness = (
+            np.ascontiguousarray(d["vesselness_target"][hx0 : hx0 + hp, hy0 : hy0 + hp, hz0 : hz0 + hp])
+            if "vesselness_target" in d
+            else None
+        )
+        return lr_vel, lr_mag, hr_vel, hr_mag, mask, vesselness
 
     def _compute_valid_lr_starts(self, d):
         _, lx, ly, lz = d["lr_vel"].shape
@@ -934,10 +1001,12 @@ class _PairedRandomPatchd(RandomizableTransform):
             x0 = max_x // 2
             y0 = max_y // 2
             z0 = max_z // 2
-            lr_vel, lr_mag, hr_vel, hr_mag, mask = self._crop_pair(d, x0, y0, z0)
+            lr_vel, lr_mag, hr_vel, hr_mag, mask, vesselness = self._crop_pair(d, x0, y0, z0)
             d["lr_vel"], d["lr_mag"], d["hr_vel"], d["mask"] = lr_vel, lr_mag, hr_vel, mask
             if self.include_hr_mag and hr_mag is not None:
                 d["hr_mag"] = hr_mag
+            if vesselness is not None:
+                d["vesselness_target"] = vesselness
             return d
 
         # Training mode: random patch with optional legacy minimum coverage constraint.
@@ -950,22 +1019,26 @@ class _PairedRandomPatchd(RandomizableTransform):
             y0 = self._randint(0, max_y + 1)
             z0 = self._randint(0, max_z + 1)
 
-            lr_vel, lr_mag, hr_vel, hr_mag, mask = self._crop_pair(d, x0, y0, z0)
+            lr_vel, lr_mag, hr_vel, hr_mag, mask, vesselness = self._crop_pair(d, x0, y0, z0)
             coverage = float(mask.mean())
             if coverage > best_cov:
                 best_cov = coverage
-                best = (lr_vel, lr_mag, hr_vel, hr_mag, mask)
+                best = (lr_vel, lr_mag, hr_vel, hr_mag, mask, vesselness)
 
             if coverage >= self.minimum_coverage:
                 d["lr_vel"], d["lr_mag"], d["hr_vel"], d["mask"] = lr_vel, lr_mag, hr_vel, mask
                 if self.include_hr_mag and hr_mag is not None:
                     d["hr_mag"] = hr_mag
+                if vesselness is not None:
+                    d["vesselness_target"] = vesselness
                 return d
 
         if self.allow_empty_fallback and best is not None:
-            d["lr_vel"], d["lr_mag"], d["hr_vel"], hr_mag, d["mask"] = best
+            d["lr_vel"], d["lr_mag"], d["hr_vel"], hr_mag, d["mask"], vesselness = best
             if self.include_hr_mag and hr_mag is not None:
                 d["hr_mag"] = hr_mag
+            if vesselness is not None:
+                d["vesselness_target"] = vesselness
             d["patch_coverage"] = np.float32(best_cov)
             return d
 
@@ -985,6 +1058,7 @@ class NiftiPatchDataset(Dataset):
         samples_per_volume: int,
         augment: bool,
         include_hr_mag: bool = False,
+        include_vesselness_target: bool = False,
         cache_dataset: bool = False,
         cache_eager: bool = True,
         random_time_frame: bool | None = None,
@@ -1028,8 +1102,16 @@ class NiftiPatchDataset(Dataset):
         self.samples_per_volume = int(samples_per_volume)
         self.samples_per_volume = max(self.samples_per_volume, 1)
         self.include_hr_mag = bool(include_hr_mag)
+        self.include_vesselness_target = bool(include_vesselness_target)
         self.cache_dataset = bool(cache_dataset)
         self.cache_eager = bool(cache_eager)
+        if self.include_vesselness_target:
+            missing = [idx for idx, case in enumerate(self.cases) if not case.get("vesselness_target")]
+            if missing:
+                raise ValueError(
+                    "include_vesselness_target=True requires `vesselness_target` in every CSV row. "
+                    f"Missing rows: {missing[:10]}"
+                )
 
         if random_time_frame is None:
             random_time_frame = augment
@@ -1041,6 +1123,8 @@ class NiftiPatchDataset(Dataset):
         load_keys = ["lr_u", "lr_v", "lr_w", "lr_mag_u", "lr_mag_v", "lr_mag_w", "hr_u", "hr_v", "hr_w", "mask"]
         if self.include_hr_mag:
             load_keys.append("hr_mag")
+        if self.include_vesselness_target:
+            load_keys.append("vesselness_target")
         self.load_transforms = Compose(
             [
                 LoadImaged(keys=load_keys, image_only=True, allow_missing_keys=True),
@@ -1054,6 +1138,7 @@ class NiftiPatchDataset(Dataset):
                 mag_norm_mode=mag_norm_mode,
                 mask_threshold=mask_threshold,
                 include_hr_mag=self.include_hr_mag,
+                include_vesselness_target=self.include_vesselness_target,
                 raw_phase_input=raw_phase_input,
                 invert_uv_sign_on_raw=invert_uv_sign_on_raw,
                 raw_center=raw_center,
@@ -1132,6 +1217,9 @@ class NiftiPatchDataset(Dataset):
         hr_vel = torch.from_numpy(sample["hr_vel"]).float()
         hr_mag = torch.from_numpy(sample["hr_mag"]).float() if self.include_hr_mag else None
         mask = torch.from_numpy(sample["mask"]).float()
+        vesselness = (
+            torch.from_numpy(sample["vesselness_target"]).float() if self.include_vesselness_target else None
+        )
         venc = torch.tensor(sample["venc"], dtype=torch.float32)
 
         out = (
@@ -1148,6 +1236,8 @@ class NiftiPatchDataset(Dataset):
         if self.include_hr_mag and hr_mag is not None:
             out = out + (hr_mag.unsqueeze(0),)
         out = out + (venc, mask)
+        if self.include_vesselness_target and vesselness is not None:
+            out = out + (vesselness,)
         return out
 
     def _prepare_case_dict(self, case_idx: int) -> dict:
@@ -1156,6 +1246,8 @@ class NiftiPatchDataset(Dataset):
             case.pop("mask", None)
         if not case.get("hr_mag"):
             case.pop("hr_mag", None)
+        if not case.get("vesselness_target"):
+            case.pop("vesselness_target", None)
         return case
 
 
@@ -1166,6 +1258,7 @@ class NiftiFullVolumeDataset(Dataset):
         self,
         cases: List[Dict],
         include_hr_mag: bool = False,
+        include_vesselness_target: bool = False,
         cache_dataset: bool = False,
         cache_eager: bool = True,
         random_time_frame: bool = False,
@@ -1182,12 +1275,22 @@ class NiftiFullVolumeDataset(Dataset):
     ):
         self.cases = list(cases)
         self.include_hr_mag = bool(include_hr_mag)
+        self.include_vesselness_target = bool(include_vesselness_target)
         self.cache_dataset = bool(cache_dataset)
         self.cache_eager = bool(cache_eager)
+        if self.include_vesselness_target:
+            missing = [idx for idx, case in enumerate(self.cases) if not case.get("vesselness_target")]
+            if missing:
+                raise ValueError(
+                    "include_vesselness_target=True requires `vesselness_target` in every CSV row. "
+                    f"Missing rows: {missing[:10]}"
+                )
 
         load_keys = ["lr_u", "lr_v", "lr_w", "lr_mag_u", "lr_mag_v", "lr_mag_w", "hr_u", "hr_v", "hr_w", "mask"]
         if self.include_hr_mag:
             load_keys.append("hr_mag")
+        if self.include_vesselness_target:
+            load_keys.append("vesselness_target")
         self.load_transforms = Compose(
             [
                 LoadImaged(keys=load_keys, image_only=True, allow_missing_keys=True),
@@ -1200,6 +1303,7 @@ class NiftiFullVolumeDataset(Dataset):
                 mag_norm_mode=mag_norm_mode,
                 mask_threshold=mask_threshold,
                 include_hr_mag=self.include_hr_mag,
+                include_vesselness_target=self.include_vesselness_target,
                 raw_phase_input=raw_phase_input,
                 invert_uv_sign_on_raw=invert_uv_sign_on_raw,
                 raw_center=raw_center,
@@ -1239,6 +1343,9 @@ class NiftiFullVolumeDataset(Dataset):
         hr_vel = torch.from_numpy(sample["hr_vel"]).float()
         hr_mag = torch.from_numpy(sample["hr_mag"]).float() if self.include_hr_mag else None
         mask = torch.from_numpy(sample["mask"]).float()
+        vesselness = (
+            torch.from_numpy(sample["vesselness_target"]).float() if self.include_vesselness_target else None
+        )
         venc = torch.tensor(sample["venc"], dtype=torch.float32)
 
         out = (
@@ -1255,6 +1362,8 @@ class NiftiFullVolumeDataset(Dataset):
         if self.include_hr_mag and hr_mag is not None:
             out = out + (hr_mag.unsqueeze(0),)
         out = out + (venc, mask)
+        if self.include_vesselness_target and vesselness is not None:
+            out = out + (vesselness,)
         return out
 
     def _prepare_case_dict(self, case_idx: int) -> dict:
@@ -1263,6 +1372,8 @@ class NiftiFullVolumeDataset(Dataset):
             case.pop("mask", None)
         if not case.get("hr_mag"):
             case.pop("hr_mag", None)
+        if not case.get("vesselness_target"):
+            case.pop("vesselness_target", None)
         return case
 
 
@@ -1275,6 +1386,7 @@ def create_nifti_patch_dataloader(
     shuffle: bool,
     augment: bool,
     include_hr_mag: bool = False,
+    include_vesselness_target: bool = False,
     cache_dataset: bool = False,
     cache_eager: bool = True,
     random_time_frame: bool | None = None,
@@ -1324,6 +1436,7 @@ def create_nifti_patch_dataloader(
         samples_per_volume=samples_per_volume,
         augment=augment,
         include_hr_mag=include_hr_mag,
+        include_vesselness_target=include_vesselness_target,
         cache_dataset=cache_dataset,
         cache_eager=cache_eager,
         random_time_frame=random_time_frame,
@@ -1395,6 +1508,7 @@ def create_nifti_full_volume_dataloader(
     batch_size: int,
     shuffle: bool,
     include_hr_mag: bool = False,
+    include_vesselness_target: bool = False,
     cache_dataset: bool = False,
     cache_eager: bool = True,
     random_time_frame: bool = False,
@@ -1415,6 +1529,7 @@ def create_nifti_full_volume_dataloader(
     dataset = NiftiFullVolumeDataset(
         cases=cases,
         include_hr_mag=include_hr_mag,
+        include_vesselness_target=include_vesselness_target,
         cache_dataset=cache_dataset,
         cache_eager=cache_eager,
         random_time_frame=random_time_frame,

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .SR4DFlowNet import Conv3dBlock, ResnetBlock, Upsample3D
 from .attention_blocks import CBAM3D
@@ -27,6 +28,8 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
         self.predict_mag = bool(predict_mag)
         self.use_seg_head = bool(use_seg_head)
         self.seg_head_bias_init = float(seg_head_bias_init)
+        self.last_attention_map_lr = None
+        self.last_attention_map = None
 
         self.pc_path = nn.Sequential(
             Conv3dBlock(3, channel_nr, 3, "SYMMETRIC", "relu"),
@@ -97,6 +100,7 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
             rb = block(rb)
 
         rb = self.pre_upsample_attn(rb)
+        self.last_attention_map_lr = getattr(self.pre_upsample_attn, "last_spatial_attention", None)
         rb = self.upsample(rb)
 
         for block in self.hi_res_blocks:
@@ -107,6 +111,15 @@ class SR4DFlowNetPreUpsampleAttention(nn.Module):
         if self.predict_mag:
             outputs.append(self.mag_path(rb))
         velocity_output = torch.cat(outputs, dim=1)
+        if self.last_attention_map_lr is not None:
+            self.last_attention_map = F.interpolate(
+                self.last_attention_map_lr,
+                size=velocity_output.shape[2:],
+                mode="trilinear",
+                align_corners=False,
+            )
+        else:
+            self.last_attention_map = None
         if self.use_seg_head:
             return velocity_output, seg_map
         return velocity_output

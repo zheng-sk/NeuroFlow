@@ -83,6 +83,11 @@ class TrainerController:
         seg_loss_weight=0.0,
         seg_loss_dice_weight=1.0,
         seg_loss_bce_weight=1.0,
+        seg_vesselness_loss_weight=0.0,
+        seg_vesselness_loss_type="mse",
+        attn_loss_weight=0.0,
+        attn_loss_type="bce",
+        attn_supervision_target="mask",
         cascade_seg_head_bias_init=-4.0,
     ):
         """
@@ -132,11 +137,38 @@ class TrainerController:
         self.seg_loss_weight = max(float(seg_loss_weight), 0.0)
         self.seg_loss_dice_weight = max(float(seg_loss_dice_weight), 0.0)
         self.seg_loss_bce_weight = max(float(seg_loss_bce_weight), 0.0)
+        self.seg_vesselness_loss_weight = max(float(seg_vesselness_loss_weight), 0.0)
+        self.seg_vesselness_loss_type = str(seg_vesselness_loss_type).strip().lower()
+        self.attn_loss_weight = max(float(attn_loss_weight), 0.0)
+        self.attn_loss_type = str(attn_loss_type).strip().lower()
+        self.attn_supervision_target = str(attn_supervision_target).strip().lower()
         self.cascade_seg_head_bias_init = float(cascade_seg_head_bias_init)
         self.model_outputs_seg_map = self.cascade_use_seg_head and self.model_variant in {
             "cascade_sr_dn_masked",
             "pre_upsample_attention",
         }
+        self.model_outputs_attn_map = self.attn_loss_weight > 0.0 and self.model_variant in {
+            "cascade_sr_dn_masked",
+            "pre_upsample_attention",
+        }
+        if self.seg_vesselness_loss_type not in {"bce", "mse", "l1", "smoothl1"}:
+            raise ValueError(
+                f"Unsupported seg_vesselness_loss_type={self.seg_vesselness_loss_type!r}. "
+                "Use one of: bce, mse, l1, smoothl1."
+            )
+        if self.attn_loss_type not in {"bce", "mse", "l1", "smoothl1"}:
+            raise ValueError(
+                f"Unsupported attn_loss_type={self.attn_loss_type!r}. "
+                "Use one of: bce, mse, l1, smoothl1."
+            )
+        if self.attn_supervision_target not in {"mask", "vesselness"}:
+            raise ValueError(
+                f"Unsupported attn_supervision_target={self.attn_supervision_target!r}. "
+                "Use one of: mask, vesselness."
+            )
+        self.uses_vesselness_target = self.seg_vesselness_loss_weight > 0.0 or (
+            self.attn_loss_weight > 0.0 and self.attn_supervision_target == "vesselness"
+        )
         if not (0.0 <= self.val_sw_overlap < 1.0):
             raise ValueError("--val-sw-overlap must be in [0,1).")
 
@@ -176,6 +208,10 @@ class TrainerController:
             self.metric_keys.extend(["train_seg_dice_loss", "val_seg_dice_loss"])
             if self.seg_loss_bce_weight > 0.0:
                 self.metric_keys.extend(["train_seg_bce_loss", "val_seg_bce_loss"])
+        if self.seg_vesselness_loss_weight > 0.0:
+            self.metric_keys.extend(["train_seg_vesselness_loss", "val_seg_vesselness_loss"])
+        if self.attn_loss_weight > 0.0:
+            self.metric_keys.extend(["train_attn_loss", "val_attn_loss"])
         self.accuracy_metric = "val_loss"
 
         print(f"Divergence loss2 * {self.div_weight}")
@@ -196,10 +232,26 @@ class TrainerController:
                 f"dice_weight={self.seg_loss_dice_weight}, "
                 f"bce_weight={self.seg_loss_bce_weight}"
             )
+        if self.seg_vesselness_loss_weight > 0.0:
+            print(
+                f"Seg-head vesselness loss: weight={self.seg_vesselness_loss_weight}, "
+                f"type={self.seg_vesselness_loss_type}"
+            )
+        if self.attn_loss_weight > 0.0:
+            print(
+                f"Attention supervision loss: weight={self.attn_loss_weight}, "
+                f"type={self.attn_loss_type}, target={self.attn_supervision_target}"
+            )
         if self.cascade_use_seg_head:
             print(f"Seg-head bias init: {self.cascade_seg_head_bias_init}")
         if self.seg_loss_weight > 0.0 and not self.model_outputs_seg_map:
             print("Warning: seg_loss_weight > 0 but the selected model configuration does not emit seg_map.")
+        if self.seg_vesselness_loss_weight > 0.0 and not self.model_outputs_seg_map:
+            print(
+                "Warning: seg_vesselness_loss_weight > 0 but the selected model configuration does not emit seg_map."
+            )
+        if self.attn_loss_weight > 0.0 and not self.model_outputs_attn_map:
+            print("Warning: attn_loss_weight > 0 but the selected model configuration does not expose attention maps.")
         if self.tb_image_every_n_epochs > 0:
             print(
                 f"TensorBoard validation recon images every {self.tb_image_every_n_epochs} epochs "
@@ -331,6 +383,11 @@ class TrainerController:
                     "seg_loss_weight": self.seg_loss_weight,
                     "seg_loss_dice_weight": self.seg_loss_dice_weight,
                     "seg_loss_bce_weight": self.seg_loss_bce_weight,
+                    "seg_vesselness_loss_weight": self.seg_vesselness_loss_weight,
+                    "seg_vesselness_loss_type": self.seg_vesselness_loss_type,
+                    "attn_loss_weight": self.attn_loss_weight,
+                    "attn_loss_type": self.attn_loss_type,
+                    "attn_supervision_target": self.attn_supervision_target,
                     "cascade_seg_head_bias_init": self.cascade_seg_head_bias_init,
                 },
                 checkpoint_path,
@@ -338,7 +395,7 @@ class TrainerController:
             message = f"Saving current model - {time.ctime()}\n"
             print(message)
 
-    def loss_function(self, y_true, y_pred, mask, seg_map=None):
+    def loss_function(self, y_true, y_pred, mask, seg_map=None, vesselness_target=None, attn_map=None):
         """
         Calculate Total Loss function:
         Loss = velocity_MSE + mag_weight * magnitude_MSE + weight * div_loss2
@@ -366,18 +423,45 @@ class TrainerController:
         total_loss = vel_mse + (self.mag_loss_weight * mag_mse) + divergence_loss + (self.outside_tv_weight * outside_tv)
         seg_dice_loss = None
         seg_bce_loss = None
+        seg_vesselness_loss = None
+        attn_loss = None
+        seg_logits = seg_map[:, 0] if seg_map is not None else None
+        seg_prob = torch.sigmoid(seg_logits) if seg_logits is not None else None
         if self.seg_loss_weight > 0.0 and seg_map is not None and mask is not None:
-            seg_logits = seg_map[:, 0]
             mask_aligned = self._align_mask_to_shape(mask, seg_logits.shape[-3:]).to(seg_logits.dtype)
-            seg_prob = torch.sigmoid(seg_logits)
             dice = self._dice_loss(seg_prob, mask_aligned)
             bce = F.binary_cross_entropy_with_logits(seg_logits, mask_aligned)
             seg_loss = (self.seg_loss_dice_weight * dice) + (self.seg_loss_bce_weight * bce)
             total_loss = total_loss + (self.seg_loss_weight * seg_loss)
             seg_dice_loss = dice
             seg_bce_loss = bce
+        if self.seg_vesselness_loss_weight > 0.0 and seg_prob is not None and vesselness_target is not None:
+            vesselness_aligned = self._align_continuous_to_shape(vesselness_target, seg_logits.shape[-3:]).to(
+                seg_logits.dtype
+            )
+            seg_vesselness_loss = self._probability_target_loss(
+                seg_prob,
+                vesselness_aligned,
+                self.seg_vesselness_loss_type,
+                logits=seg_logits if self.seg_vesselness_loss_type == "bce" else None,
+            )
+            total_loss = total_loss + (self.seg_vesselness_loss_weight * seg_vesselness_loss)
+        if self.attn_loss_weight > 0.0 and attn_map is not None:
+            attn_prob = attn_map[:, 0]
+            if self.attn_supervision_target == "vesselness":
+                if vesselness_target is not None:
+                    attn_target = self._align_continuous_to_shape(vesselness_target, attn_prob.shape[-3:])
+                else:
+                    attn_target = None
+            else:
+                attn_target = self._align_mask_to_shape(mask, attn_prob.shape[-3:]) if mask is not None else None
 
-        return total_loss, vel_mse, divergence_loss, mag_mse, seg_dice_loss, seg_bce_loss
+            if attn_target is not None:
+                attn_target = attn_target.to(attn_prob.dtype)
+                attn_loss = self._probability_target_loss(attn_prob, attn_target, self.attn_loss_type)
+                total_loss = total_loss + (self.attn_loss_weight * attn_loss)
+
+        return total_loss, vel_mse, divergence_loss, mag_mse, seg_dice_loss, seg_bce_loss, seg_vesselness_loss, attn_loss
 
     def accuracy_function(self, y_true, y_pred, mask):
         """
@@ -645,6 +729,17 @@ class TrainerController:
             f"Seg loss weight: {self.seg_loss_weight}, seg loss dice weight: {self.seg_loss_dice_weight}, "
             f"seg loss bce weight: {self.seg_loss_bce_weight}\n",
         )
+        utility.log_to_file(
+            self.logfile,
+            f"Seg vesselness loss weight: {self.seg_vesselness_loss_weight}, "
+            f"seg vesselness loss type: {self.seg_vesselness_loss_type}\n",
+        )
+        utility.log_to_file(
+            self.logfile,
+            f"Attention loss weight: {self.attn_loss_weight}, "
+            f"attention loss type: {self.attn_loss_type}, "
+            f"attention supervision target: {self.attn_supervision_target}\n",
+        )
         utility.log_to_file(self.logfile, f"Seg-head bias init: {self.cascade_seg_head_bias_init}\n")
         utility.log_to_file(
             self.logfile,
@@ -684,31 +779,36 @@ class TrainerController:
     def _prepare_batch(self, data_pairs):
         batch = self._to_device_batch(data_pairs)
         if self.predict_mag:
-            if len(batch) != 12:
+            if len(batch) not in {12, 13}:
                 raise ValueError(
-                    f"predict_mag=True expects 12 batch tensors (including hr_mag), got {len(batch)}."
+                    f"predict_mag=True expects 12 or 13 batch tensors (including optional vesselness), got {len(batch)}."
                 )
-            u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, mag_hr, venc, mask = batch
+            if len(batch) == 13:
+                u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, mag_hr, venc, mask, vesselness_target = batch
+            else:
+                u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, mag_hr, venc, mask = batch
+                vesselness_target = None
             hires = torch.cat((u_hr, v_hr, w_hr, mag_hr), dim=1)
-            return u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr
+            return u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr, vesselness_target
 
         if len(batch) == 12:
-            u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, _mag_hr, venc, mask = batch
+            u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, venc, mask, vesselness_target = batch
         elif len(batch) == 11:
             u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, venc, mask = batch
+            vesselness_target = None
         else:
             raise ValueError(f"Unexpected batch length {len(batch)}.")
         hires = torch.cat((u_hr, v_hr, w_hr), dim=1)
-        return u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, None
+        return u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, None, vesselness_target
 
     def train_step(self, data_pairs):
         self.model.train()
-        u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _ = self._prepare_batch(data_pairs)
+        u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _, vesselness_target = self._prepare_batch(data_pairs)
         del venc
 
         self.optimizer.zero_grad(set_to_none=True)
-        predictions, seg_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
-        loss = self.calculate_and_update_metrics(hires, predictions, mask, seg_map, "train")
+        predictions, seg_map, attn_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
+        loss = self.calculate_and_update_metrics(hires, predictions, mask, seg_map, attn_map, vesselness_target, "train")
         loss.backward()
         self.optimizer.step()
 
@@ -721,7 +821,7 @@ class TrainerController:
             predictions, seg_map = result
         else:
             predictions, seg_map = result, None
-        return predictions, seg_map
+        return predictions, seg_map, self._get_attention_map()
 
     @staticmethod
     def _align_mask_to_shape(mask, target_shape):
@@ -753,13 +853,64 @@ class TrainerController:
     def _align_mask_to_lr_shape(mask, lr_shape):
         return TrainerController._align_mask_to_shape(mask, lr_shape)
 
+    @staticmethod
+    def _align_continuous_to_shape(volume, target_shape):
+        if volume is None:
+            return None
+        if tuple(volume.shape[-3:]) == tuple(target_shape):
+            return volume
+
+        mx, my, mz = [int(v) for v in volume.shape[-3:]]
+        tx, ty, tz = [int(v) for v in target_shape]
+        fx = mx // tx if tx > 0 else 0
+        fy = my // ty if ty > 0 else 0
+        fz = mz // tz if tz > 0 else 0
+
+        if (
+            fx > 0
+            and fy > 0
+            and fz > 0
+            and mx == tx * fx
+            and my == ty * fy
+            and mz == tz * fz
+        ):
+            pooled = volume.unfold(1, fx, fx).unfold(2, fy, fy).unfold(3, fz, fz)
+            return pooled.mean(dim=(-1, -2, -3))
+
+        return F.interpolate(volume[:, None], size=tuple(target_shape), mode="trilinear", align_corners=False)[:, 0]
+
+    @staticmethod
+    def _probability_target_loss(pred, target, loss_type, logits=None):
+        loss_type = str(loss_type).strip().lower()
+        if loss_type == "bce":
+            if logits is not None:
+                return F.binary_cross_entropy_with_logits(logits, target)
+            pred = pred.clamp(1e-6, 1.0 - 1e-6)
+            return F.binary_cross_entropy(pred, target)
+        if loss_type == "mse":
+            return F.mse_loss(pred, target)
+        if loss_type == "l1":
+            return F.l1_loss(pred, target)
+        if loss_type == "smoothl1":
+            return F.smooth_l1_loss(pred, target)
+        raise ValueError(f"Unsupported probability target loss type: {loss_type}")
+
+    def _get_attention_map(self):
+        attn_map = getattr(self.model, "last_attention_map", None)
+        if attn_map is not None:
+            return attn_map
+        if hasattr(self.model, "stage1"):
+            return getattr(self.model.stage1, "last_attention_map", None)
+        return None
+
     @torch.no_grad()
     def test_step(self, data_pairs, return_visuals=False):
         self.model.eval()
-        u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _ = self._prepare_batch(data_pairs)
+        u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, _, vesselness_target = self._prepare_batch(data_pairs)
         del venc
 
         seg_map = None
+        attn_map = None
         if self.val_full_volume:
             lr_input = torch.cat((u, v, w, u_mag, v_mag, w_mag), dim=1)
             lr_mask = self._align_mask_to_lr_shape(mask, lr_input.shape[-3:])
@@ -772,7 +923,7 @@ class TrainerController:
                 mask_patch = x[:, 6:7] if x.shape[1] > 6 else None
                 if mask_patch is not None:
                     mask_patch = mask_patch[:, 0]
-                pred_patch, seg_patch = self._forward_model(
+                pred_patch, seg_patch, attn_patch = self._forward_model(
                     x[:, 0:1],
                     x[:, 1:2],
                     x[:, 2:3],
@@ -784,8 +935,14 @@ class TrainerController:
                 if self.model_outputs_seg_map:
                     if seg_patch is None:
                         seg_patch = torch.zeros_like(pred_patch[:, :1])
-                    return torch.cat((pred_patch, seg_patch), dim=1)
-                return pred_patch
+                outputs = [pred_patch]
+                if self.model_outputs_seg_map:
+                    outputs.append(seg_patch)
+                if self.model_outputs_attn_map:
+                    if attn_patch is None:
+                        attn_patch = torch.zeros_like(pred_patch[:, :1])
+                    outputs.append(attn_patch)
+                return torch.cat(outputs, dim=1) if len(outputs) > 1 else pred_patch
 
             sw_output = sliding_window_inference(
                 inputs=lr_input,
@@ -796,27 +953,42 @@ class TrainerController:
             )
             if self.model_outputs_seg_map:
                 pred_channels = int(hires.shape[1])
+                cursor = pred_channels
                 predictions = sw_output[:, :pred_channels]
-                seg_map = sw_output[:, pred_channels : pred_channels + 1]
+                seg_map = sw_output[:, cursor : cursor + 1]
+                cursor += 1
+                if self.model_outputs_attn_map:
+                    attn_map = sw_output[:, cursor : cursor + 1]
             else:
-                predictions = sw_output
+                if self.model_outputs_attn_map:
+                    pred_channels = int(hires.shape[1])
+                    predictions = sw_output[:, :pred_channels]
+                    attn_map = sw_output[:, pred_channels : pred_channels + 1]
+                else:
+                    predictions = sw_output
         else:
-            predictions, seg_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
+            predictions, seg_map, attn_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
 
         hires, predictions, mask = self._align_spatial_shapes(hires, predictions, mask)
         if seg_map is not None:
             seg_map = seg_map[:, :, : predictions.shape[2], : predictions.shape[3], : predictions.shape[4]]
-        self.calculate_and_update_metrics(hires, predictions, mask, seg_map, "val")
+        if attn_map is not None:
+            attn_map = attn_map[:, :, : predictions.shape[2], : predictions.shape[3], : predictions.shape[4]]
+        self.calculate_and_update_metrics(hires, predictions, mask, seg_map, attn_map, vesselness_target, "val")
         if return_visuals:
             return predictions, (u, v, w, u_mag, hires, mask)
         return predictions
 
-    def calculate_and_update_metrics(self, hires, predictions, mask, seg_map, metric_set):
+    def calculate_and_update_metrics(self, hires, predictions, mask, seg_map, attn_map, vesselness_target, metric_set):
         hires, predictions, mask = self._align_spatial_shapes(hires, predictions, mask)
         if seg_map is not None:
             seg_map = seg_map[:, :, : predictions.shape[2], : predictions.shape[3], : predictions.shape[4]]
-        total_loss, mse, divloss, mag_mse, seg_dice_loss, seg_bce_loss = self.loss_function(
-            hires, predictions, mask, seg_map
+        if attn_map is not None:
+            attn_map = attn_map[:, :, : predictions.shape[2], : predictions.shape[3], : predictions.shape[4]]
+        if vesselness_target is not None:
+            vesselness_target = vesselness_target[:, : predictions.shape[2], : predictions.shape[3], : predictions.shape[4]]
+        total_loss, mse, divloss, mag_mse, seg_dice_loss, seg_bce_loss, seg_vesselness_loss, attn_loss = self.loss_function(
+            hires, predictions, mask, seg_map, vesselness_target, attn_map
         )
         rel_error, _vel_rel_error, mag_rel_error = self.accuracy_function(hires, predictions, mask)
 
@@ -835,6 +1007,10 @@ class TrainerController:
             self._log_metric("seg_dice_loss", seg_dice_loss.item(), metric_set, batch_size)
         if seg_bce_loss is not None:
             self._log_metric("seg_bce_loss", seg_bce_loss.item(), metric_set, batch_size)
+        if seg_vesselness_loss is not None:
+            self._log_metric("seg_vesselness_loss", seg_vesselness_loss.item(), metric_set, batch_size)
+        if attn_loss is not None:
+            self._log_metric("attn_loss", attn_loss.item(), metric_set, batch_size)
         self._update_metric(f"{metric_set}_accuracy", rel_error.mean().item(), batch_size)
         return total_loss.mean()
 
@@ -1009,6 +1185,11 @@ class TrainerController:
             "seg_loss_weight": self.seg_loss_weight,
             "seg_loss_dice_weight": self.seg_loss_dice_weight,
             "seg_loss_bce_weight": self.seg_loss_bce_weight,
+            "seg_vesselness_loss_weight": self.seg_vesselness_loss_weight,
+            "seg_vesselness_loss_type": self.seg_vesselness_loss_type,
+            "attn_loss_weight": self.attn_loss_weight,
+            "attn_loss_type": self.attn_loss_type,
+            "attn_supervision_target": self.attn_supervision_target,
             "cascade_seg_head_bias_init": self.cascade_seg_head_bias_init,
         }
         torch.save(checkpoint, f"{self.model_path}-best.pt")
@@ -1067,6 +1248,10 @@ class TrainerController:
             train_metrics["seg_dice_loss"] = self._metric_value("train_seg_dice_loss")
         if "train_seg_bce_loss" in self.metric_sums:
             train_metrics["seg_bce_loss"] = self._metric_value("train_seg_bce_loss")
+        if "train_seg_vesselness_loss" in self.metric_sums:
+            train_metrics["seg_vesselness_loss"] = self._metric_value("train_seg_vesselness_loss")
+        if "train_attn_loss" in self.metric_sums:
+            train_metrics["attn_loss"] = self._metric_value("train_attn_loss")
         for key, value in train_metrics.items():
             self.train_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -1084,6 +1269,10 @@ class TrainerController:
             val_metrics["seg_dice_loss"] = self._metric_value("val_seg_dice_loss")
         if "val_seg_bce_loss" in self.metric_sums:
             val_metrics["seg_bce_loss"] = self._metric_value("val_seg_bce_loss")
+        if "val_seg_vesselness_loss" in self.metric_sums:
+            val_metrics["seg_vesselness_loss"] = self._metric_value("val_seg_vesselness_loss")
+        if "val_attn_loss" in self.metric_sums:
+            val_metrics["attn_loss"] = self._metric_value("val_attn_loss")
         for key, value in val_metrics.items():
             self.val_writer.add_scalar(f"{self.network_name}/{key}", value, epoch)
 
@@ -1094,10 +1283,17 @@ class TrainerController:
         """
         self.model.eval()
         for data_pairs in testset:
-            u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr = self._prepare_batch(data_pairs)
-            preds, seg_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
+            u, v, w, u_mag, v_mag, w_mag, hires, venc, mask, mag_hr, vesselness_target = self._prepare_batch(data_pairs)
+            preds, seg_map, attn_map = self._forward_model(u, v, w, u_mag, v_mag, w_mag, mask)
 
-            loss_val, mse, divloss, _mag_mse, _seg_dice, _seg_bce = self.loss_function(hires, preds, mask, seg_map)
+            loss_val, mse, divloss, _mag_mse, _seg_dice, _seg_bce, _seg_vesselness, _attn_loss = self.loss_function(
+                hires,
+                preds,
+                mask,
+                seg_map,
+                vesselness_target,
+                attn_map,
+            )
             rel_loss, _vel_rel_loss, _mag_rel_loss = self.accuracy_function(hires, preds, mask)
             break
 

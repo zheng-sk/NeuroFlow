@@ -80,6 +80,7 @@ class EndToEndCascadeSRDenoise(nn.Module):
         self.use_stage1_seg_head = bool(use_stage1_seg_head)
         self.use_seg_mask_at_inference = bool(use_seg_mask_at_inference)
         self.seg_head_bias_init = float(seg_head_bias_init)
+        self.last_attention_map = None
 
         self.stage1 = build_sr_model(
             model_variant="pre_upsample_attention",
@@ -142,6 +143,17 @@ class EndToEndCascadeSRDenoise(nn.Module):
                 : stage1_out.shape[3],
                 : stage1_out.shape[4],
             ]
+        attn_map = getattr(self.stage1, "last_attention_map", None)
+        if attn_map is not None:
+            self.last_attention_map = attn_map[
+                :,
+                :,
+                : stage1_out.shape[2],
+                : stage1_out.shape[3],
+                : stage1_out.shape[4],
+            ]
+        else:
+            self.last_attention_map = None
 
         sr_u = stage1_out[:, 0:1]
         sr_v = stage1_out[:, 1:2]

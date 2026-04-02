@@ -33,6 +33,7 @@ class SpatialAttention3D(nn.Module):
         padding = kernel_size // 2
         self.conv = nn.Conv3d(2, 1, kernel_size=kernel_size, padding=padding, bias=False)
         self.sigmoid = nn.Sigmoid()
+        self.last_attention = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Collapse channel dimension to two complementary spatial descriptors.
@@ -40,6 +41,7 @@ class SpatialAttention3D(nn.Module):
         max_map = torch.amax(x, dim=1, keepdim=True)
         # Spatial gate in [0,1] highlights informative voxels.
         att = self.sigmoid(self.conv(torch.cat([avg_map, max_map], dim=1)))
+        self.last_attention = att
         return x * att
 
 
@@ -48,11 +50,13 @@ class CBAM3D(nn.Module):
         super().__init__()
         self.channel_att = ChannelAttention3D(channels=channels, reduction=reduction)
         self.spatial_att = SpatialAttention3D(kernel_size=spatial_kernel)
+        self.last_spatial_attention = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Sequential channel->spatial attention (standard CBAM pattern).
         x = self.channel_att(x)
         x = self.spatial_att(x)
+        self.last_spatial_attention = self.spatial_att.last_attention
         return x
 
 

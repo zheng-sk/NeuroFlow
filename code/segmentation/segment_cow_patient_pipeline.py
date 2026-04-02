@@ -269,17 +269,10 @@ def compute_angiography_from_patient(
     }
 
 
-def classical_vesselness_cow_segmentation(
+def compute_classical_vesselness_map(
     angio_3d: np.ndarray,
     analysis_mask_bool: np.ndarray,
     sigmas,
-    percentile_threshold: float,
-    morph_radius: int,
-    use_morph_open: bool,
-    use_morph_close: bool,
-    min_component_size: int,
-    z_min_frac: float,
-    z_max_frac: float,
 ):
     try:
         from skimage.filters import frangi, sato
@@ -298,10 +291,32 @@ def classical_vesselness_cow_segmentation(
     frangi_n = robust_norm_in_mask(frangi_resp.astype(np.float32), mask.astype(np.float32))
     sato_n = robust_norm_in_mask(sato_resp.astype(np.float32), mask.astype(np.float32))
     vesselness = ((frangi_n + sato_n) * 0.5).astype(np.float32)
+    vesselness = np.nan_to_num(vesselness, nan=0.0, posinf=1.0, neginf=0.0)
+    vesselness *= mask.astype(np.float32)
+    return np.clip(vesselness, 0.0, 1.0).astype(np.float32)
 
+
+def classical_vesselness_cow_segmentation(
+    angio_3d: np.ndarray,
+    analysis_mask_bool: np.ndarray,
+    sigmas,
+    percentile_threshold: float,
+    morph_radius: int,
+    use_morph_open: bool,
+    use_morph_close: bool,
+    min_component_size: int,
+    z_min_frac: float,
+    z_max_frac: float,
+):
+    mask = analysis_mask_bool.astype(bool)
+    vesselness = compute_classical_vesselness_map(
+        angio_3d=angio_3d,
+        analysis_mask_bool=analysis_mask_bool,
+        sigmas=sigmas,
+    )
     valid = mask & np.isfinite(vesselness)
     if not np.any(valid):
-        return np.zeros_like(input_vol, dtype=np.uint8), {"threshold": None, "voxels": 0}
+        return np.zeros_like(angio_3d, dtype=np.uint8), {"threshold": None, "voxels": 0}
 
     threshold = float(np.percentile(vesselness[valid], percentile_threshold))
     bin_mask = (vesselness >= threshold) & mask

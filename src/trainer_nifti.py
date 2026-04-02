@@ -433,6 +433,39 @@ def main():
         help="Weight of BCEWithLogits component within the seg loss.",
     )
     parser.add_argument(
+        "--seg-vesselness-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for seg-head supervision against a continuous vesselness_target map.",
+    )
+    parser.add_argument(
+        "--seg-vesselness-loss-type",
+        type=str,
+        default="mse",
+        choices=["bce", "mse", "l1", "smoothl1"],
+        help="Loss used for seg-head supervision against vesselness_target.",
+    )
+    parser.add_argument(
+        "--attn-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for supervising the CBAM spatial attention map.",
+    )
+    parser.add_argument(
+        "--attn-loss-type",
+        type=str,
+        default="bce",
+        choices=["bce", "mse", "l1", "smoothl1"],
+        help="Loss used for CBAM attention supervision.",
+    )
+    parser.add_argument(
+        "--attn-supervision-target",
+        type=str,
+        default="mask",
+        choices=["mask", "vesselness"],
+        help="Target used for CBAM attention supervision.",
+    )
+    parser.add_argument(
         "--cascade-seg-head-bias-init",
         type=float,
         default=-4.0,
@@ -474,6 +507,9 @@ def main():
     train_rotation_prob = 0.0 if args.no_augmentation else max(float(args.rotation_prob), 0.0)
     train_random_time_frame = not args.no_augmentation
     train_random_patch = not args.deterministic_train_patches
+    use_vesselness_target = args.seg_vesselness_loss_weight > 0.0 or (
+        args.attn_loss_weight > 0.0 and args.attn_supervision_target == "vesselness"
+    )
 
     train_loader = create_nifti_patch_dataloader(
         csv_path=args.train_csv,
@@ -484,6 +520,7 @@ def main():
         shuffle=True,
         augment=True,
         include_hr_mag=args.predict_mag,
+        include_vesselness_target=use_vesselness_target,
         cache_dataset=args.cache_dataset,
         cache_eager=args.cache_eager,
         random_time_frame=train_random_time_frame,
@@ -533,6 +570,7 @@ def main():
             batch_size=1,
             shuffle=False,
             include_hr_mag=args.predict_mag,
+            include_vesselness_target=use_vesselness_target,
             cache_dataset=args.cache_dataset,
             cache_eager=args.cache_eager,
             random_time_frame=False,
@@ -559,6 +597,7 @@ def main():
             shuffle=False,
             augment=False,
             include_hr_mag=args.predict_mag,
+            include_vesselness_target=use_vesselness_target,
             cache_dataset=args.cache_dataset,
             cache_eager=args.cache_eager,
             random_time_frame=False,
@@ -622,6 +661,11 @@ def main():
         seg_loss_weight=args.seg_loss_weight,
         seg_loss_dice_weight=args.seg_loss_dice_weight,
         seg_loss_bce_weight=args.seg_loss_bce_weight,
+        seg_vesselness_loss_weight=args.seg_vesselness_loss_weight,
+        seg_vesselness_loss_type=args.seg_vesselness_loss_type,
+        attn_loss_weight=args.attn_loss_weight,
+        attn_loss_type=args.attn_loss_type,
+        attn_supervision_target=args.attn_supervision_target,
         cascade_seg_head_bias_init=args.cascade_seg_head_bias_init,
     )
     network.init_model_dir()

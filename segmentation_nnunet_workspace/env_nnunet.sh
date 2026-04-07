@@ -12,9 +12,17 @@ if [[ -z "${NNUNET_REPO_DIR:-}" ]]; then
 fi
 
 export NNUNET_REPO_DIR
-export nnUNet_raw="${nnUNet_raw:-${WORKSPACE_ROOT}/nnUNet_raw}"
-export nnUNet_preprocessed="${nnUNet_preprocessed:-${WORKSPACE_ROOT}/nnUNet_preprocessed}"
-export nnUNet_results="${nnUNet_results:-${WORKSPACE_ROOT}/nnUNet_results}"
+
+if [[ "${NNUNET_PRESERVE_PATHS:-0}" == "1" ]]; then
+  export nnUNet_raw="${nnUNet_raw:-${WORKSPACE_ROOT}/nnUNet_raw}"
+  export nnUNet_preprocessed="${nnUNet_preprocessed:-${WORKSPACE_ROOT}/nnUNet_preprocessed}"
+  export nnUNet_results="${nnUNet_results:-${WORKSPACE_ROOT}/nnUNet_results}"
+else
+  export nnUNet_raw="${WORKSPACE_ROOT}/nnUNet_raw"
+  export nnUNet_preprocessed="${WORKSPACE_ROOT}/nnUNet_preprocessed"
+  export nnUNet_results="${WORKSPACE_ROOT}/nnUNet_results"
+fi
+
 export PYTHONPATH="${NNUNET_REPO_DIR}:${REPO_ROOT}:${PYTHONPATH}"
 
 echo "NNUNET_REPO_DIR=${NNUNET_REPO_DIR}"

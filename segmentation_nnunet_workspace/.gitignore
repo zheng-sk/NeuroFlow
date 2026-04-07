@@ -1,0 +1,6 @@
+nnUNet_raw/
+nnUNet_preprocessed/
+nnUNet_results/
+logs/
+.venv*/
+__pycache__/

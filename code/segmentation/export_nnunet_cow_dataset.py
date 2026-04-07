@@ -18,6 +18,10 @@ EXPERIMENT_SPECS = {
         "description": "3D temporal projection of 3T magnitude only.",
         "channels": ["mag_proj"],
     },
+    "mag_proj_robust": {
+        "description": "3D temporal projection of 3T magnitude followed by robust 1-99 normalization.",
+        "channels": ["mag_proj_robust"],
+    },
     "mag_vel_proj": {
         "description": "3D temporal projection of 3T magnitude plus projected velocity components.",
         "channels": ["mag_proj", "vx_proj", "vy_proj", "vz_proj"],
@@ -253,6 +257,7 @@ def save_label(labels_tr: Path, case_token: str, mask_bin: np.ndarray, affine, h
 def default_dataset_name(exp: str) -> str:
     mapping = {
         "mag_proj": "CoW3TMagProj",
+        "mag_proj_robust": "CoW3TMagProjRobust",
         "mag_vel_proj": "CoW3TMagVelProj",
         "angio_mag_speed": "CoW3TAngioMagSpeed",
         "mag_frame": "CoW3TMagFrame",
@@ -335,6 +340,23 @@ def export_experiment(args: argparse.Namespace, exp: str, dataset_id: int, datas
             save_label(labels_tr, case_token_base, mask_bin, mask_img.affine, mask_img.header)
             exported += 1
 
+        elif exp == "mag_proj_robust":
+            channels = [
+                robust_norm(
+                    project_volume(
+                        mag_data,
+                        method=args.mag_projection_method,
+                        percentile=args.mag_projection_percentile,
+                        topk=args.mag_projection_topk,
+                    )
+                )
+            ]
+            if tuple(channels[0].shape) != tuple(mask_bin.shape):
+                raise ValueError(f"{case_id}: mag_proj_robust shape {channels[0].shape} != mask shape {mask_bin.shape}")
+            save_channels(images_tr, case_token_base, channels, mag_img.affine, mag_img.header)
+            save_label(labels_tr, case_token_base, mask_bin, mask_img.affine, mask_img.header)
+            exported += 1
+
         elif exp == "mag_vel_proj":
             channels = [
                 project_volume(mag_data, args.mag_projection_method, args.mag_projection_percentile, args.mag_projection_topk),
@@ -394,7 +416,7 @@ def export_experiment(args: argparse.Namespace, exp: str, dataset_id: int, datas
             print(f"[OK:{exp}] {case_id}")
 
     description = spec["description"]
-    if exp == "mag_proj":
+    if exp in {"mag_proj", "mag_proj_robust"}:
         description += f" MAG projection method={args.mag_projection_method}."
     if exp == "mag_vel_proj":
         description += (

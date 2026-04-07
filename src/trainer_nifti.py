@@ -381,6 +381,15 @@ def main():
     parser.add_argument("--restore-dir", type=str, default="", help="Checkpoint directory to restore from.")
     parser.add_argument("--restore-file", type=str, default="", help="Checkpoint filename (.pt).")
     parser.add_argument(
+        "--model-root-dir",
+        type=str,
+        default="",
+        help=(
+            "Optional directory where run folders are created. "
+            "Absolute paths are used as-is; relative paths are resolved from the repository root."
+        ),
+    )
+    parser.add_argument(
         "--cascade-stage1-checkpoint",
         type=str,
         default="",
@@ -667,6 +676,7 @@ def main():
         attn_loss_type=args.attn_loss_type,
         attn_supervision_target=args.attn_supervision_target,
         cascade_seg_head_bias_init=args.cascade_seg_head_bias_init,
+        model_root_dir=args.model_root_dir,
     )
     network.init_model_dir()
 

@@ -89,6 +89,7 @@ class TrainerController:
         attn_loss_type="bce",
         attn_supervision_target="mask",
         cascade_seg_head_bias_init=-4.0,
+        model_root_dir="",
     ):
         """
         TrainerController constructor.
@@ -109,6 +110,13 @@ class TrainerController:
         self.network_src_dir = os.path.dirname(os.path.abspath(__file__))
         self.src_root_dir = os.path.dirname(self.network_src_dir)
         self.repo_root_dir = os.path.dirname(self.src_root_dir)
+        if model_root_dir:
+            if os.path.isabs(model_root_dir):
+                self.model_root_dir = model_root_dir
+            else:
+                self.model_root_dir = os.path.join(self.repo_root_dir, model_root_dir)
+        else:
+            self.model_root_dir = os.path.join(self.repo_root_dir, "models")
 
         # Training params
         self.QUICKSAVE_ENABLED = quicksave_enable
@@ -689,7 +697,7 @@ class TrainerController:
         timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
         self.unique_model_name = f"{self.network_name}_{timestamp}"
 
-        self.model_dir = os.path.join(self.repo_root_dir, "models", self.unique_model_name)
+        self.model_dir = os.path.join(self.model_root_dir, self.unique_model_name)
         self.model_path = os.path.join(self.model_dir, self.network_name)
 
         if not os.path.isdir(self.model_dir):

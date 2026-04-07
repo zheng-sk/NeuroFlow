@@ -9,6 +9,7 @@ result/
 data/
 pytorch_venv/
 *.sh
+!run_loo_xval.sh
 *.out
 .venv*
 *.venv*

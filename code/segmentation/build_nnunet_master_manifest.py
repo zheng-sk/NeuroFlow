@@ -90,7 +90,13 @@ def resolve_path(value: str, csv_parent: Path) -> Path:
     path = Path(raw_value)
     if path.is_absolute():
         return path
-    return (csv_parent / path).resolve()
+    cwd_candidate = (Path.cwd().resolve() / path).resolve()
+    if cwd_candidate.exists():
+        return cwd_candidate
+    csv_candidate = (csv_parent / path).resolve()
+    if csv_candidate.exists():
+        return csv_candidate
+    return cwd_candidate
 
 
 def format_path(path: Path, mode: str, csv_out: Path) -> str:

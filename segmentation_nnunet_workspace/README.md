@@ -5,7 +5,8 @@ Esta carpeta deja aislado el flujo de segmentacion de CoW con nnU-Net.
 ## Estructura esperada
 
 - `code/segmentation/`: scripts del proyecto para manifest y export de datasets.
-- `topcow-2024-nnunet/`: copia local de nnU-Net. Si quieres una copia limpia/original, reemplaza esta carpeta por la tuya.
+- `nnUNet/`: aqui puedes clonar la copia original de `MIC-DKFZ/nnUNet`.
+- `topcow-2024-nnunet/`: copia local previa. Solo se usa como fallback si `nnUNet/` no existe.
 - `nnUNet_raw/`: datasets exportados para nnU-Net.
 - `nnUNet_preprocessed/`: salida de `plan_and_preprocess`.
 - `nnUNet_results/`: checkpoints y resultados de entrenamiento.
@@ -20,7 +21,7 @@ No se instala nada desde aqui. Cuando crees tu entorno, usa una version de PyTor
 ## Paso a paso
 
 1. Crear y activar tu nuevo ambiente.
-2. Copiar aqui tu nnU-Net original si no quieres usar la carpeta `topcow-2024-nnunet` actual.
+2. Clonar aqui tu nnU-Net original en `segmentation_nnunet_workspace/nnUNet`.
 3. Instalar nnU-Net y dependencias dentro de ese ambiente.
 4. Cargar variables del workspace:
 
@@ -51,6 +52,15 @@ DATASET_ID=301 FOLD=0 GPU=0 bash /Users/alejo/Documents/Internship/NeuroFlow/seg
 - `301`: `CoW3TMagProj`
 - `302`: `CoW3TMagVelProj`
 - `303`: `CoW3TAngioMagSpeed`
+
+## Clone recomendado
+
+```bash
+cd /Users/alejo/Documents/Internship/NeuroFlow/segmentation_nnunet_workspace
+git clone https://github.com/MIC-DKFZ/nnUNet.git
+```
+
+Los wrappers de esta carpeta detectan `nnUNet/` automaticamente.
 
 ## Notas
 

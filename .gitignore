@@ -10,6 +10,7 @@ data/
 pytorch_venv/
 *.sh
 !run_loo_xval.sh
+!segmentation_nnunet_workspace/*.sh
 *.out
 .venv*
 *.venv*

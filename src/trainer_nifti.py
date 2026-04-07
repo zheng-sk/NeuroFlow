@@ -511,7 +511,7 @@ def main():
         print(
             "Warning: --cache-dataset with num_workers>0 may duplicate cache per worker. "
             "For max memory efficiency use --num-workers 0."
-        )
+        , flush=True)
 
     train_rotation_prob = 0.0 if args.no_augmentation else max(float(args.rotation_prob), 0.0)
     train_random_time_frame = not args.no_augmentation
@@ -573,7 +573,7 @@ def main():
     )
     if args.val_full_volume:
         if args.batch_size != 1:
-            print("Validation full-volume mode forces val batch size to 1.")
+                print("Validation full-volume mode forces val batch size to 1.", flush=True)
         val_loader = create_nifti_full_volume_dataloader(
             csv_path=args.val_csv,
             batch_size=1,
@@ -630,7 +630,7 @@ def main():
             seed=args.seed,
         )
 
-    print(f"4DFlowNet NIfTI patch {args.patch_size}, lr {args.initial_learning_rate}, batch {args.batch_size}")
+    print(f"4DFlowNet NIfTI patch {args.patch_size}, lr {args.initial_learning_rate}, batch {args.batch_size}", flush=True)
     network = TrainerController(
         patch_size=args.patch_size,
         res_increase=args.res_increase,
@@ -683,9 +683,9 @@ def main():
     if args.restore:
         if not args.restore_dir or not args.restore_file:
             raise ValueError("--restore requires --restore-dir and --restore-file")
-        print(f"Restoring model {args.restore_file}...")
+        print(f"Restoring model {args.restore_file}...", flush=True)
         network.restore_model(args.restore_dir, args.restore_file)
-        print("Learning rate", network.optimizer.param_groups[0]["lr"])
+        print("Learning rate", network.optimizer.param_groups[0]["lr"], flush=True)
 
     network.train_network(train_loader, val_loader, n_epoch=args.epochs, testset=None)
 

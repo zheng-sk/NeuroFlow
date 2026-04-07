@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
-
 ROOT=${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}
 PYTHON_BIN=${PYTHON_BIN:-python}
 XVAL_EXPERIMENT_NAME=${XVAL_EXPERIMENT_NAME:-}
@@ -118,7 +116,8 @@ run_one_fold() {
   echo "===================================================================="
 
   CUDA_VISIBLE_DEVICES="${gpu}" \
-    "${PYTHON_BIN}" "${ROOT}/src/trainer_nifti.py" \
+    PYTHONUNBUFFERED=1 \
+    "${PYTHON_BIN}" -u "${ROOT}/src/trainer_nifti.py" \
     "${train_args[@]}" \
     2>&1 | tee "${log_path}"
 }

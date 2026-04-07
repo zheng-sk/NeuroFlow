@@ -1029,9 +1029,9 @@ class TrainerController:
         """
         Main training function. Receives trainining and validation DataLoaders.
         """
-        print("==================== TRAINING =================")
-        print(f"Learning rate {self.optimizer.param_groups[0]['lr']:.7f}")
-        print(f"Start training at {time.ctime()} - {self.unique_model_name}\n")
+        print("==================== TRAINING =================", flush=True)
+        print(f"Learning rate {self.optimizer.param_groups[0]['lr']:.7f}", flush=True)
+        print(f"Start training at {time.ctime()} - {self.unique_model_name}\n", flush=True)
         start_time = time.time()
 
         previous_loss = np.inf
@@ -1055,7 +1055,7 @@ class TrainerController:
                     f"loss: {self._metric_value('train_loss'):.5f} "
                     f"({self._metric_value('train_accuracy'):.1f} %) - {time.time() - start_loop:.1f} secs"
                 )
-                print(f"\r{message}", end="")
+                print(f"\r{message}", end="", flush=True)
 
             # --- Validation ---
             log_recon_this_epoch = (
@@ -1075,7 +1075,7 @@ class TrainerController:
                     f"loss: {self._metric_value('val_loss'):.5f} "
                     f"({self._metric_value('val_accuracy'):.1f} %) - {time.time() - start_loop:.1f} secs"
                 )
-                print(f"\r{message}", end="")
+                print(f"\r{message}", end="", flush=True)
 
             # --- Epoch logging ---
             message = (
@@ -1129,7 +1129,7 @@ class TrainerController:
             prev_epoch_train_loss = train_loss_epoch
             prev_epoch_val_loss = val_loss_epoch
 
-            print(message)
+            print(message, flush=True)
             utility.log_to_file(self.logfile, log_line + "\n")
 
             stop_due_to_no_improve = (
@@ -1150,7 +1150,7 @@ class TrainerController:
                         f"Overfitting detected: val_loss worsened while train_loss improved for "
                         f"{overfit_epochs} consecutive epochs (patience={self.overfit_patience})."
                     )
-                print(reason)
+                print(reason, flush=True)
                 utility.log_to_file(self.logfile, reason + "\n")
                 stopped_early = True
                 break
@@ -1163,7 +1163,7 @@ class TrainerController:
         message += f"\nFinished at {time.ctime()}"
         message += "\n==================== END TRAINING ================="
         utility.log_to_file(self.logfile, message)
-        print(message)
+        print(message, flush=True)
 
         self.train_writer.close()
         self.val_writer.close()

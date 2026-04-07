@@ -42,7 +42,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--masks-root",
         default="",
-        help="Optional root folder containing per-case masks. Used when the mask column is empty.",
+        help=(
+            "Optional root folder containing per-case masks. "
+            "When provided, <masks-root>/<case_id>/<mask-name> is preferred over the CSV mask path."
+        ),
     )
     parser.add_argument(
         "--mask-name",
@@ -206,9 +209,10 @@ def main() -> int:
         lr_v = resolve_path(row.get(args.lr_v_col, ""), csv_parent)
         lr_w = resolve_path(row.get(args.lr_w_col, ""), csv_parent)
         mask_value = row.get(args.mask_col, "") if args.mask_col in row else ""
-        mask_path = resolve_path(mask_value, csv_parent) if mask_value else Path("")
+        csv_mask_path = resolve_path(mask_value, csv_parent) if mask_value else Path("")
+        mask_path = csv_mask_path
 
-        if not mask_path and masks_root is not None:
+        if masks_root is not None:
             candidate = (masks_root / case_id / args.mask_name).resolve()
             if candidate.is_file():
                 mask_path = candidate

@@ -22,6 +22,14 @@ EXPERIMENT_SPECS = {
         "description": "3D temporal projection of 3T magnitude followed by robust 1-99 normalization.",
         "channels": ["mag_proj_robust"],
     },
+    "mag_proj_mix3t_x05": {
+        "description": "3D temporal projection dataset that includes both standard 3T and downsampled 3T x0.5 magnitude inputs.",
+        "channels": ["mag_proj"],
+    },
+    "mag_proj_x05": {
+        "description": "3D temporal projection of downsampled 3T x0.5 magnitude only.",
+        "channels": ["mag_proj"],
+    },
     "mag_vel_proj": {
         "description": "3D temporal projection of 3T magnitude plus projected velocity components.",
         "channels": ["mag_proj", "vx_proj", "vy_proj", "vz_proj"],
@@ -75,8 +83,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--u-col", default="lr_u")
     parser.add_argument("--v-col", default="lr_v")
     parser.add_argument("--w-col", default="lr_w")
+    parser.add_argument("--x05-mag-col", default="lr_x05_mag")
+    parser.add_argument("--x05-u-col", default="lr_x05_u")
+    parser.add_argument("--x05-v-col", default="lr_x05_v")
+    parser.add_argument("--x05-w-col", default="lr_x05_w")
     parser.add_argument("--mask-col", default="mask_gt")
     parser.add_argument("--ready-col", default="ready_for_nnunet")
+    parser.add_argument("--ready-x05-col", default="ready_for_nnunet_x05")
+    parser.add_argument("--x05-available-col", default="x05_available")
     parser.add_argument("--allow-not-ready", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -258,6 +272,8 @@ def default_dataset_name(exp: str) -> str:
     mapping = {
         "mag_proj": "CoW3TMagProj",
         "mag_proj_robust": "CoW3TMagProjRobust",
+        "mag_proj_mix3t_x05": "CoW3TMagProjMix3Tx05",
+        "mag_proj_x05": "CoW3Tx05MagProj",
         "mag_vel_proj": "CoW3TMagVelProj",
         "angio_mag_speed": "CoW3TAngioMagSpeed",
         "mag_frame": "CoW3TMagFrame",
@@ -340,6 +356,66 @@ def export_experiment(args: argparse.Namespace, exp: str, dataset_id: int, datas
             save_label(labels_tr, case_token_base, mask_bin, mask_img.affine, mask_img.header)
             exported += 1
 
+        elif exp == "mag_proj_mix3t_x05":
+            x05_ready = (row.get(args.ready_x05_col) or "").strip()
+            x05_available = (row.get(args.x05_available_col) or "").strip()
+            x05_mag_path = resolve_path(row.get(args.x05_mag_col, ""), manifest_parent)
+            if x05_available not in {"1", "true", "True"} or x05_ready not in {"1", "true", "True"} or not x05_mag_path.is_file():
+                raise FileNotFoundError(f"{case_id}: mag_proj_mix3t_x05 requires ready x0.5 magnitude input.")
+
+            channels_3t = [
+                project_volume(
+                    mag_data,
+                    method=args.mag_projection_method,
+                    percentile=args.mag_projection_percentile,
+                    topk=args.mag_projection_topk,
+                )
+            ]
+            save_channels(images_tr, f"{case_token_base}_3t", channels_3t, mag_img.affine, mag_img.header)
+            save_label(labels_tr, f"{case_token_base}_3t", mask_bin, mask_img.affine, mask_img.header)
+            exported += 1
+
+            x05_img = nib.load(str(x05_mag_path))
+            x05_data = np.asarray(x05_img.dataobj, dtype=np.float32)
+            channels_x05 = [
+                project_volume(
+                    x05_data,
+                    method=args.mag_projection_method,
+                    percentile=args.mag_projection_percentile,
+                    topk=args.mag_projection_topk,
+                )
+            ]
+            if tuple(channels_x05[0].shape) != tuple(mask_bin.shape):
+                raise ValueError(f"{case_id}: x05 mag_proj shape {channels_x05[0].shape} != mask shape {mask_bin.shape}")
+            save_channels(images_tr, f"{case_token_base}_x05", channels_x05, x05_img.affine, x05_img.header)
+            save_label(labels_tr, f"{case_token_base}_x05", mask_bin, mask_img.affine, mask_img.header)
+            exported += 1
+
+        elif exp == "mag_proj_x05":
+            x05_ready = (row.get(args.ready_x05_col) or "").strip()
+            x05_available = (row.get(args.x05_available_col) or "").strip()
+            x05_mag_path = resolve_path(row.get(args.x05_mag_col, ""), manifest_parent)
+            if x05_available not in {"1", "true", "True"} or x05_ready not in {"1", "true", "True"} or not x05_mag_path.is_file():
+                skipped += 1
+                if args.verbose:
+                    print(f"[SKIP:{exp}] {case_id}: x0.5 input not ready")
+                continue
+            x05_img = nib.load(str(x05_mag_path))
+            x05_data = np.asarray(x05_img.dataobj, dtype=np.float32)
+            channels = [
+                project_volume(
+                    x05_data,
+                    method=args.mag_projection_method,
+                    percentile=args.mag_projection_percentile,
+                    topk=args.mag_projection_topk,
+                )
+            ]
+            if tuple(channels[0].shape) != tuple(mask_bin.shape):
+                raise ValueError(f"{case_id}: x05 mag_proj shape {channels[0].shape} != mask shape {mask_bin.shape}")
+            save_channels(images_tr, case_token_base, channels, x05_img.affine, x05_img.header)
+            save_label(labels_tr, case_token_base, mask_bin, mask_img.affine, mask_img.header)
+            exported += 1
+
         elif exp == "mag_proj_robust":
             channels = [
                 robust_norm(
@@ -416,7 +492,7 @@ def export_experiment(args: argparse.Namespace, exp: str, dataset_id: int, datas
             print(f"[OK:{exp}] {case_id}")
 
     description = spec["description"]
-    if exp in {"mag_proj", "mag_proj_robust"}:
+    if exp in {"mag_proj", "mag_proj_robust", "mag_proj_mix3t_x05", "mag_proj_x05"}:
         description += f" MAG projection method={args.mag_projection_method}."
     if exp == "mag_vel_proj":
         description += (

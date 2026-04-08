@@ -23,6 +23,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-u-col", default="lr_u", help="CSV column for 3T velocity X.")
     parser.add_argument("--lr-v-col", default="lr_v", help="CSV column for 3T velocity Y.")
     parser.add_argument("--lr-w-col", default="lr_w", help="CSV column for 3T velocity Z.")
+    parser.add_argument(
+        "--lr-x05-root",
+        default="",
+        help="Optional root folder containing per-case downsampled 3T x0.5 volumes.",
+    )
+    parser.add_argument("--lr-x05-mag-name", default="input_mag_raw.nii.gz")
+    parser.add_argument("--lr-x05-u-name", default="Vx.nii.gz")
+    parser.add_argument("--lr-x05-v-name", default="Vy.nii.gz")
+    parser.add_argument("--lr-x05-w-name", default="Vz.nii.gz")
     parser.add_argument("--mask-col", default="mask", help="CSV column for GT mask path.")
     parser.add_argument(
         "--case-id-col",
@@ -190,16 +199,28 @@ def main() -> int:
         "lr_u",
         "lr_v",
         "lr_w",
+        "lr_x05_mag",
+        "lr_x05_u",
+        "lr_x05_v",
+        "lr_x05_w",
         "mask_gt",
         "lr_shape",
         "lr_spatial_shape",
+        "lr_x05_shape",
+        "lr_x05_spatial_shape",
         "mask_shape_raw",
         "mask_spatial_shape",
         "num_frames",
+        "num_frames_x05",
         "spacing_xyz",
+        "spacing_xyz_x05",
         "shape_match",
         "affine_match",
         "ready_for_nnunet",
+        "x05_available",
+        "shape_match_x05",
+        "affine_match_x05",
+        "ready_for_nnunet_x05",
     ]
 
     for row_idx, row in enumerate(rows, start=1):
@@ -214,6 +235,10 @@ def main() -> int:
         lr_u = resolve_path(row.get(args.lr_u_col, ""), csv_parent)
         lr_v = resolve_path(row.get(args.lr_v_col, ""), csv_parent)
         lr_w = resolve_path(row.get(args.lr_w_col, ""), csv_parent)
+        lr_x05_mag = Path("")
+        lr_x05_u = Path("")
+        lr_x05_v = Path("")
+        lr_x05_w = Path("")
         mask_value = row.get(args.mask_col, "") if args.mask_col in row else ""
         csv_mask_path = resolve_path(mask_value, csv_parent) if mask_value else Path("")
         mask_path = csv_mask_path
@@ -222,6 +247,13 @@ def main() -> int:
             candidate = (masks_root / case_id / args.mask_name).resolve()
             if candidate.is_file():
                 mask_path = candidate
+
+        if args.lr_x05_root:
+            x05_root = Path(args.lr_x05_root).resolve()
+            lr_x05_mag = (x05_root / case_id / args.lr_x05_mag_name).resolve()
+            lr_x05_u = (x05_root / case_id / args.lr_x05_u_name).resolve()
+            lr_x05_v = (x05_root / case_id / args.lr_x05_v_name).resolve()
+            lr_x05_w = (x05_root / case_id / args.lr_x05_w_name).resolve()
 
         paths = {
             "lr_mag": lr_mag,
@@ -250,9 +282,41 @@ def main() -> int:
             "lr_u": format_path(lr_u, args.path_mode, csv_out),
             "lr_v": format_path(lr_v, args.path_mode, csv_out),
             "lr_w": format_path(lr_w, args.path_mode, csv_out),
+            "lr_x05_mag": "",
+            "lr_x05_u": "",
+            "lr_x05_v": "",
+            "lr_x05_w": "",
             "mask_gt": format_path(mask_path, args.path_mode, csv_out),
             **inspected,
+            "lr_x05_shape": "",
+            "lr_x05_spatial_shape": "",
+            "num_frames_x05": "",
+            "spacing_xyz_x05": "",
+            "x05_available": "0",
+            "shape_match_x05": "",
+            "affine_match_x05": "",
+            "ready_for_nnunet_x05": "0",
         }
+
+        x05_paths = [lr_x05_mag, lr_x05_u, lr_x05_v, lr_x05_w]
+        if args.lr_x05_root and all(p.is_file() for p in x05_paths):
+            inspected_x05 = inspect_case(lr_mag=lr_x05_mag, mask_path=mask_path, mask_time_index=args.mask_time_index)
+            current.update(
+                {
+                    "lr_x05_mag": format_path(lr_x05_mag, args.path_mode, csv_out),
+                    "lr_x05_u": format_path(lr_x05_u, args.path_mode, csv_out),
+                    "lr_x05_v": format_path(lr_x05_v, args.path_mode, csv_out),
+                    "lr_x05_w": format_path(lr_x05_w, args.path_mode, csv_out),
+                    "lr_x05_shape": inspected_x05["lr_shape"],
+                    "lr_x05_spatial_shape": inspected_x05["lr_spatial_shape"],
+                    "num_frames_x05": inspected_x05["num_frames"],
+                    "spacing_xyz_x05": inspected_x05["spacing_xyz"],
+                    "x05_available": "1",
+                    "shape_match_x05": inspected_x05["shape_match"],
+                    "affine_match_x05": inspected_x05["affine_match"],
+                    "ready_for_nnunet_x05": inspected_x05["ready_for_nnunet"],
+                }
+            )
 
         if case_id in case_rows:
             duplicate_counts[case_id] = duplicate_counts.get(case_id, 1) + 1

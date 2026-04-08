@@ -88,6 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--x05-v-col", default="lr_x05_v")
     parser.add_argument("--x05-w-col", default="lr_x05_w")
     parser.add_argument("--mask-col", default="mask_gt")
+    parser.add_argument("--mask-x05-col", default="mask_gt_x05")
     parser.add_argument("--ready-col", default="ready_for_nnunet")
     parser.add_argument("--ready-x05-col", default="ready_for_nnunet_x05")
     parser.add_argument("--x05-available-col", default="x05_available")
@@ -360,7 +361,8 @@ def export_experiment(args: argparse.Namespace, exp: str, dataset_id: int, datas
             x05_ready = (row.get(args.ready_x05_col) or "").strip()
             x05_available = (row.get(args.x05_available_col) or "").strip()
             x05_mag_path = resolve_path(row.get(args.x05_mag_col, ""), manifest_parent)
-            if x05_available not in {"1", "true", "True"} or x05_ready not in {"1", "true", "True"} or not x05_mag_path.is_file():
+            x05_mask_path = resolve_path(row.get(args.mask_x05_col, ""), manifest_parent)
+            if x05_available not in {"1", "true", "True"} or x05_ready not in {"1", "true", "True"} or not x05_mag_path.is_file() or not x05_mask_path.is_file():
                 raise FileNotFoundError(f"{case_id}: mag_proj_mix3t_x05 requires ready x0.5 magnitude input.")
 
             channels_3t = [
@@ -377,6 +379,10 @@ def export_experiment(args: argparse.Namespace, exp: str, dataset_id: int, datas
 
             x05_img = nib.load(str(x05_mag_path))
             x05_data = np.asarray(x05_img.dataobj, dtype=np.float32)
+            x05_mask_img = nib.load(str(x05_mask_path))
+            x05_mask_data = np.asarray(x05_mask_img.dataobj)
+            x05_mask_3d = select_mask_3d(x05_mask_data, time_index=args.mask_time_index)
+            x05_mask_bin = (x05_mask_3d > 0).astype(np.uint8)
             channels_x05 = [
                 project_volume(
                     x05_data,
@@ -385,23 +391,28 @@ def export_experiment(args: argparse.Namespace, exp: str, dataset_id: int, datas
                     topk=args.mag_projection_topk,
                 )
             ]
-            if tuple(channels_x05[0].shape) != tuple(mask_bin.shape):
-                raise ValueError(f"{case_id}: x05 mag_proj shape {channels_x05[0].shape} != mask shape {mask_bin.shape}")
+            if tuple(channels_x05[0].shape) != tuple(x05_mask_bin.shape):
+                raise ValueError(f"{case_id}: x05 mag_proj shape {channels_x05[0].shape} != x05 mask shape {x05_mask_bin.shape}")
             save_channels(images_tr, f"{case_token_base}_x05", channels_x05, x05_img.affine, x05_img.header)
-            save_label(labels_tr, f"{case_token_base}_x05", mask_bin, mask_img.affine, mask_img.header)
+            save_label(labels_tr, f"{case_token_base}_x05", x05_mask_bin, x05_mask_img.affine, x05_mask_img.header)
             exported += 1
 
         elif exp == "mag_proj_x05":
             x05_ready = (row.get(args.ready_x05_col) or "").strip()
             x05_available = (row.get(args.x05_available_col) or "").strip()
             x05_mag_path = resolve_path(row.get(args.x05_mag_col, ""), manifest_parent)
-            if x05_available not in {"1", "true", "True"} or x05_ready not in {"1", "true", "True"} or not x05_mag_path.is_file():
+            x05_mask_path = resolve_path(row.get(args.mask_x05_col, ""), manifest_parent)
+            if x05_available not in {"1", "true", "True"} or x05_ready not in {"1", "true", "True"} or not x05_mag_path.is_file() or not x05_mask_path.is_file():
                 skipped += 1
                 if args.verbose:
                     print(f"[SKIP:{exp}] {case_id}: x0.5 input not ready")
                 continue
             x05_img = nib.load(str(x05_mag_path))
             x05_data = np.asarray(x05_img.dataobj, dtype=np.float32)
+            x05_mask_img = nib.load(str(x05_mask_path))
+            x05_mask_data = np.asarray(x05_mask_img.dataobj)
+            x05_mask_3d = select_mask_3d(x05_mask_data, time_index=args.mask_time_index)
+            x05_mask_bin = (x05_mask_3d > 0).astype(np.uint8)
             channels = [
                 project_volume(
                     x05_data,
@@ -410,10 +421,10 @@ def export_experiment(args: argparse.Namespace, exp: str, dataset_id: int, datas
                     topk=args.mag_projection_topk,
                 )
             ]
-            if tuple(channels[0].shape) != tuple(mask_bin.shape):
-                raise ValueError(f"{case_id}: x05 mag_proj shape {channels[0].shape} != mask shape {mask_bin.shape}")
+            if tuple(channels[0].shape) != tuple(x05_mask_bin.shape):
+                raise ValueError(f"{case_id}: x05 mag_proj shape {channels[0].shape} != x05 mask shape {x05_mask_bin.shape}")
             save_channels(images_tr, case_token_base, channels, x05_img.affine, x05_img.header)
-            save_label(labels_tr, case_token_base, mask_bin, mask_img.affine, mask_img.header)
+            save_label(labels_tr, case_token_base, x05_mask_bin, x05_mask_img.affine, x05_mask_img.header)
             exported += 1
 
         elif exp == "mag_proj_robust":

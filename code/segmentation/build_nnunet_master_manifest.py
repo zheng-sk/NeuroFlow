@@ -62,6 +62,16 @@ def parse_args() -> argparse.Namespace:
         help="Mask filename expected under <masks-root>/<case_id>/ when inferring missing masks.",
     )
     parser.add_argument(
+        "--masks-x05-root",
+        default="",
+        help="Optional root folder containing per-case masks already resampled to the 3T x0.5 grid.",
+    )
+    parser.add_argument(
+        "--mask-x05-name",
+        default="cow_seg_final.nii.gz",
+        help="Mask filename expected under <masks-x05-root>/<case_id>/ when using x0.5-space masks.",
+    )
+    parser.add_argument(
         "--mask-time-index",
         type=int,
         default=0,
@@ -165,6 +175,7 @@ def main() -> int:
     csv_out = Path(args.csv_out)
     csv_parent = csv_in.resolve().parent
     masks_root = Path(args.masks_root).resolve() if args.masks_root else None
+    masks_x05_root = Path(args.masks_x05_root).resolve() if args.masks_x05_root else None
 
     if not csv_in.is_file():
         raise FileNotFoundError(f"Input CSV not found: {csv_in}")
@@ -204,12 +215,15 @@ def main() -> int:
         "lr_x05_v",
         "lr_x05_w",
         "mask_gt",
+        "mask_gt_x05",
         "lr_shape",
         "lr_spatial_shape",
         "lr_x05_shape",
         "lr_x05_spatial_shape",
         "mask_shape_raw",
         "mask_spatial_shape",
+        "mask_x05_shape_raw",
+        "mask_x05_spatial_shape",
         "num_frames",
         "num_frames_x05",
         "spacing_xyz",
@@ -242,11 +256,16 @@ def main() -> int:
         mask_value = row.get(args.mask_col, "") if args.mask_col in row else ""
         csv_mask_path = resolve_path(mask_value, csv_parent) if mask_value else Path("")
         mask_path = csv_mask_path
+        mask_x05_path = Path("")
 
         if masks_root is not None:
             candidate = (masks_root / case_id / args.mask_name).resolve()
             if candidate.is_file():
                 mask_path = candidate
+        if masks_x05_root is not None:
+            candidate_x05 = (masks_x05_root / case_id / args.mask_x05_name).resolve()
+            if candidate_x05.is_file():
+                mask_x05_path = candidate_x05
 
         if args.lr_x05_root:
             x05_root = Path(args.lr_x05_root).resolve()
@@ -287,9 +306,12 @@ def main() -> int:
             "lr_x05_v": "",
             "lr_x05_w": "",
             "mask_gt": format_path(mask_path, args.path_mode, csv_out),
+            "mask_gt_x05": "",
             **inspected,
             "lr_x05_shape": "",
             "lr_x05_spatial_shape": "",
+            "mask_x05_shape_raw": "",
+            "mask_x05_spatial_shape": "",
             "num_frames_x05": "",
             "spacing_xyz_x05": "",
             "x05_available": "0",
@@ -300,7 +322,21 @@ def main() -> int:
 
         x05_paths = [lr_x05_mag, lr_x05_u, lr_x05_v, lr_x05_w]
         if args.lr_x05_root and all(p.is_file() for p in x05_paths):
-            inspected_x05 = inspect_case(lr_mag=lr_x05_mag, mask_path=mask_path, mask_time_index=args.mask_time_index)
+            if mask_x05_path.is_file():
+                inspected_x05 = inspect_case(lr_mag=lr_x05_mag, mask_path=mask_x05_path, mask_time_index=args.mask_time_index)
+                current["mask_gt_x05"] = format_path(mask_x05_path, args.path_mode, csv_out)
+                current["mask_x05_shape_raw"] = inspected_x05["mask_shape_raw"]
+                current["mask_x05_spatial_shape"] = inspected_x05["mask_spatial_shape"]
+            else:
+                inspected_x05 = {
+                    "lr_shape": inspected["lr_shape"],
+                    "lr_spatial_shape": inspected["lr_spatial_shape"],
+                    "num_frames": inspected["num_frames"],
+                    "spacing_xyz": inspected["spacing_xyz"],
+                    "shape_match": "0",
+                    "affine_match": "0",
+                    "ready_for_nnunet": "0",
+                }
             current.update(
                 {
                     "lr_x05_mag": format_path(lr_x05_mag, args.path_mode, csv_out),

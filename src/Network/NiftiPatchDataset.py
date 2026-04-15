@@ -300,14 +300,21 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             return "signed"
         return "not_raw"
 
-    def _raw_to_velocity(self, arr, venc, invert_sign=False):
-        mode = self._detect_raw_mode(arr)
+    def _raw_to_velocity(self, arr, venc, invert_sign=False, force_signed: bool = False):
+        mode = "signed" if force_signed else self._detect_raw_mode(arr)
         vel = arr.astype(np.float32)
         if mode == "unsigned":
             vel = (vel - self.raw_center) / self.raw_scale * float(venc)
         elif mode == "signed":
-            max_abs = max(abs(float(np.min(vel))), abs(float(np.max(vel))))
-            scale = 4096.0 if max_abs > 3000.0 else 2048.0
+            if force_signed:
+                # When the caller guarantees raw phase data (raw_phase_input=True), always
+                # use scale=4096. The heuristic max_abs>3000 can mis-select scale=2048 on
+                # frames whose peak velocity is far below VENC (e.g. low-flow subjects),
+                # producing values slightly outside [-1, 1].
+                scale = 4096.0
+            else:
+                max_abs = max(abs(float(np.min(vel))), abs(float(np.max(vel))))
+                scale = 4096.0 if max_abs > 3000.0 else 2048.0
             vel = vel / scale * float(venc)
         else:
             # Legacy fallback: preserve previous behavior when values do not look RAW.
@@ -419,12 +426,12 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             # Default behavior avoids double inversion when DICOM->NIfTI already
             # applied LPS->RAS sign correction to Vx/Vy. Enable legacy inversion
             # with `invert_uv_sign_on_raw=True` only for old datasets.
-            lr_u = self._raw_to_velocity(lr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw)
-            lr_v = self._raw_to_velocity(lr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw)
-            lr_w = self._raw_to_velocity(lr_w, venc=venc_w, invert_sign=False)
-            hr_u = self._raw_to_velocity(hr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw)
-            hr_v = self._raw_to_velocity(hr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw)
-            hr_w = self._raw_to_velocity(hr_w, venc=venc_w, invert_sign=False)
+            lr_u = self._raw_to_velocity(lr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw, force_signed=True)
+            lr_v = self._raw_to_velocity(lr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw, force_signed=True)
+            lr_w = self._raw_to_velocity(lr_w, venc=venc_w, invert_sign=False, force_signed=True)
+            hr_u = self._raw_to_velocity(hr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw, force_signed=True)
+            hr_v = self._raw_to_velocity(hr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw, force_signed=True)
+            hr_w = self._raw_to_velocity(hr_w, venc=venc_w, invert_sign=False, force_signed=True)
         else:
             if venc_u <= 0:
                 venc_u = float(np.max(np.abs(lr_u)))

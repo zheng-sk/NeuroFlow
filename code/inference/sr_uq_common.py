@@ -104,14 +104,22 @@ def detect_raw_mode(arr: np.ndarray) -> str:
     return "not_raw"
 
 
-def raw_to_velocity(data: np.ndarray, venc: float, raw_center: float, raw_scale: float, invert_sign: bool) -> np.ndarray:
+def raw_to_velocity(
+    data: np.ndarray,
+    venc: float,
+    raw_center: float,
+    raw_scale: float,
+    invert_sign: bool,
+    force_signed: bool = False,
+) -> np.ndarray:
     out = data.astype(np.float32)
-    mode = detect_raw_mode(out)
+    mode = "signed" if force_signed else detect_raw_mode(out)
     if mode == "unsigned":
         out = (out - float(raw_center)) / float(raw_scale) * float(venc)
     elif mode == "signed":
-        max_abs = max(abs(float(np.min(out))), abs(float(np.max(out))))
-        scale = 4096.0 if max_abs > 3000.0 else 2048.0
+        # When force_signed=True, always use scale=4096: the heuristic max_abs>3000
+        # can wrongly pick 2048 for low-flow subjects whose peak per-frame is < 3000.
+        scale = 4096.0 if force_signed else (4096.0 if max(abs(float(np.min(out))), abs(float(np.max(out)))) > 3000.0 else 2048.0)
         out = out / scale * float(venc)
     else:
         out = (out - float(raw_center)) / float(raw_scale) * float(venc)
@@ -432,9 +440,9 @@ def _prepare_frame(
         if venc_w <= 0:
             venc_w = float(np.max(np.abs(lr_w)))
 
-        lr_u = raw_to_velocity(lr_u, venc_u, raw_center, raw_scale, legacy_invert_uv_sign_on_raw)
-        lr_v = raw_to_velocity(lr_v, venc_v, raw_center, raw_scale, legacy_invert_uv_sign_on_raw)
-        lr_w = raw_to_velocity(lr_w, venc_w, raw_center, raw_scale, False)
+        lr_u = raw_to_velocity(lr_u, venc_u, raw_center, raw_scale, legacy_invert_uv_sign_on_raw, force_signed=True)
+        lr_v = raw_to_velocity(lr_v, venc_v, raw_center, raw_scale, legacy_invert_uv_sign_on_raw, force_signed=True)
+        lr_w = raw_to_velocity(lr_w, venc_w, raw_center, raw_scale, False, force_signed=True)
 
     if venc_u <= 0:
         venc_u = float(np.max(np.abs(lr_u)))
@@ -444,9 +452,9 @@ def _prepare_frame(
         venc_w = float(np.max(np.abs(lr_w)))
 
     if hr_raw_phase_input:
-        hr_u = raw_to_velocity(hr_u, venc_u, raw_center, raw_scale, legacy_invert_uv_sign_on_raw)
-        hr_v = raw_to_velocity(hr_v, venc_v, raw_center, raw_scale, legacy_invert_uv_sign_on_raw)
-        hr_w = raw_to_velocity(hr_w, venc_w, raw_center, raw_scale, False)
+        hr_u = raw_to_velocity(hr_u, venc_u, raw_center, raw_scale, legacy_invert_uv_sign_on_raw, force_signed=True)
+        hr_v = raw_to_velocity(hr_v, venc_v, raw_center, raw_scale, legacy_invert_uv_sign_on_raw, force_signed=True)
+        hr_w = raw_to_velocity(hr_w, venc_w, raw_center, raw_scale, False, force_signed=True)
 
     venc_scalar = float(max(venc_u, venc_v, venc_w))
     if venc_scalar <= 0:

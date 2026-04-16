@@ -53,6 +53,28 @@ def _resolve_path(path_value: str, base_dir: str) -> str:
     return os.path.abspath(os.path.join(base_abs, path_value))
 
 
+def _parse_int_sequence(value) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [int(item) for item in value]
+    text = str(value).strip()
+    if not text:
+        return []
+    return [int(part.strip()) for part in text.split(";") if part.strip()]
+
+
+def _parse_float_sequence(value) -> list[float]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [float(item) for item in value]
+    text = str(value).strip()
+    if not text:
+        return []
+    return [float(part.strip()) for part in text.split(";") if part.strip()]
+
+
 def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[Dict]:
     """
     Load case descriptors from CSV.
@@ -64,7 +86,10 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
     Optional columns:
         hr_mag, mask, vesselness_target, venc, venc_u, venc_v, venc_w,
         time_start, time_end, time_index,
-        lr_time_index, hr_time_index, lr_trigger_time_ms, hr_trigger_time_ms, pairing_method
+        lr_time_index, hr_time_index, hr_time_index_map,
+        lr_trigger_time_ms, hr_trigger_time_ms,
+        lr_trigger_time_ms_map, hr_trigger_time_ms_map,
+        pairing_method
     """
     required = ["lr_u", "lr_v", "lr_w", "hr_u", "hr_v", "hr_w"]
     mag_keys = ["lr_mag_u", "lr_mag_v", "lr_mag_w"]
@@ -81,8 +106,11 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
         "time_index",
         "lr_time_index",
         "hr_time_index",
+        "hr_time_index_map",
         "lr_trigger_time_ms",
         "hr_trigger_time_ms",
+        "lr_trigger_time_ms_map",
+        "hr_trigger_time_ms_map",
         "pairing_method",
     ]
     float_keys = {"venc", "venc_u", "venc_v", "venc_w", "lr_trigger_time_ms", "hr_trigger_time_ms"}
@@ -117,6 +145,10 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
                     case[key] = float(value) if str(value).strip() else 0.0
                 elif key in int_keys:
                     case[key] = int(value) if str(value).strip() else -1
+                elif key == "hr_time_index_map":
+                    case[key] = _parse_int_sequence(value)
+                elif key in {"lr_trigger_time_ms_map", "hr_trigger_time_ms_map"}:
+                    case[key] = _parse_float_sequence(value)
                 elif key in mag_keys:
                     case[key] = _resolve_path(value, base_dir) if str(value).strip() else shared_mag_path
                 elif key == "hr_mag":
@@ -312,21 +344,7 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             raise ValueError(f"{label}={index} is outside [0, {t_count}).")
         return int(index)
 
-    def _resolve_time_indices(self, d, lr_t_count: int, hr_t_count: int) -> tuple[int, int]:
-        lr_time_index = int(d.get("lr_time_index", -1))
-        hr_time_index = int(d.get("hr_time_index", -1))
-        has_explicit_pairing = lr_time_index >= 0 or hr_time_index >= 0
-
-        if has_explicit_pairing:
-            if lr_time_index < 0:
-                lr_time_index = hr_time_index
-            if hr_time_index < 0:
-                hr_time_index = lr_time_index
-            lr_time_index = self._validate_time_index("lr_time_index", lr_time_index, lr_t_count)
-            hr_time_index = self._validate_time_index("hr_time_index", hr_time_index, hr_t_count)
-            return lr_time_index, hr_time_index
-
-        t_count = min(lr_t_count, hr_t_count)
+    def _resolve_single_time_index(self, d, t_count: int) -> int:
         if t_count <= 0:
             raise ValueError("No valid time frames found in 4D NIfTI inputs.")
 
@@ -353,7 +371,38 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             range_len = time_end - time_start
             offset = int(np.clip(self.fixed_time_index, 0, range_len - 1))
             t_index = time_start + offset
+        return int(t_index)
 
+    def _resolve_time_indices(self, d, lr_t_count: int, hr_t_count: int) -> tuple[int, int]:
+        lr_time_index = int(d.get("lr_time_index", -1))
+        hr_time_index = int(d.get("hr_time_index", -1))
+        has_explicit_pairing = lr_time_index >= 0 or hr_time_index >= 0
+
+        if has_explicit_pairing:
+            if lr_time_index < 0:
+                lr_time_index = hr_time_index
+            if hr_time_index < 0:
+                hr_time_index = lr_time_index
+            lr_time_index = self._validate_time_index("lr_time_index", lr_time_index, lr_t_count)
+            hr_time_index = self._validate_time_index("hr_time_index", hr_time_index, hr_t_count)
+            return lr_time_index, hr_time_index
+
+        hr_time_index_map = d.get("hr_time_index_map") or []
+        if hr_time_index_map:
+            usable_lr_count = min(lr_t_count, len(hr_time_index_map))
+            if usable_lr_count <= 0:
+                raise ValueError("TriggerTime-derived hr_time_index_map is empty.")
+            lr_time_index = self._resolve_single_time_index(d, usable_lr_count)
+            hr_time_index = int(hr_time_index_map[lr_time_index])
+            hr_time_index = self._validate_time_index(
+                f"hr_time_index_map[{lr_time_index}]",
+                hr_time_index,
+                hr_t_count,
+            )
+            return lr_time_index, hr_time_index
+
+        t_count = min(lr_t_count, hr_t_count)
+        t_index = self._resolve_single_time_index(d, t_count)
         return t_index, t_index
 
     def _resolve_component_venc(self, d, key):

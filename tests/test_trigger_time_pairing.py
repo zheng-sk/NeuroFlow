@@ -106,6 +106,47 @@ class LoaderPairingTests(unittest.TestCase):
         self.assertAlmostEqual(float(sample["hr_vel"][0, 0, 0, 0]), 102.0)
         self.assertTrue(np.all(sample["mask"] == 1.0))
 
+    def test_trigger_time_map_restores_random_lr_sampling_with_mapped_hr_frame(self):
+        transform = _StackNormalizeFieldsd(
+            mag_scale=1.0,
+            mag_norm_mode="divisor",
+            mask_threshold=0.5,
+            include_hr_mag=True,
+            raw_phase_input=False,
+            random_time_frame=True,
+        )
+        mask = np.ones((1, 2, 2, 2, 7), dtype=np.float32)
+        data = {
+            "lr_u": make_4d_channel([10, 11, 12, 13, 14, 15, 16]),
+            "lr_v": make_4d_channel([20, 21, 22, 23, 24, 25, 26]),
+            "lr_w": make_4d_channel([30, 31, 32, 33, 34, 35, 36]),
+            "hr_u": make_4d_channel([100, 101, 102, 103, 104, 105, 106]),
+            "hr_v": make_4d_channel([200, 201, 202, 203, 204, 205, 206]),
+            "hr_w": make_4d_channel([300, 301, 302, 303, 304, 305, 306]),
+            "lr_mag_u": make_4d_channel([1, 2, 3, 4, 5, 6, 7]),
+            "lr_mag_v": make_4d_channel([11, 12, 13, 14, 15, 16, 17]),
+            "lr_mag_w": make_4d_channel([21, 22, 23, 24, 25, 26, 27]),
+            "hr_mag": make_4d_channel([1000, 1001, 1002, 1003, 1004, 1005, 1006]),
+            "mask": mask,
+            "venc": 1.0,
+            "venc_u": 1.0,
+            "venc_v": 1.0,
+            "venc_w": 1.0,
+            "time_start": 0,
+            "time_end": 4,
+            "hr_time_index_map": [0, 2, 3, 5],
+        }
+
+        seen = set()
+        for _ in range(20):
+            sample = transform(data)
+            lr_value = int(round(float(sample["lr_vel"][0, 0, 0, 0])))
+            hr_value = int(round(float(sample["hr_vel"][0, 0, 0, 0])))
+            seen.add((lr_value, hr_value))
+
+        self.assertTrue(seen)
+        self.assertEqual(seen, {(10, 100), (11, 102), (12, 103), (13, 105)})
+
     def test_load_nifti_case_table_parses_pair_columns(self):
         csv_path = REPO_ROOT / "tests" / "_tmp_pair_columns.csv"
         try:
@@ -173,6 +214,70 @@ class LoaderPairingTests(unittest.TestCase):
             if csv_path.exists():
                 csv_path.unlink()
 
+    def test_load_nifti_case_table_parses_case_mapping_columns(self):
+        csv_path = REPO_ROOT / "tests" / "_tmp_case_map_columns.csv"
+        try:
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "lr_u",
+                        "lr_v",
+                        "lr_w",
+                        "lr_mag_u",
+                        "lr_mag_v",
+                        "lr_mag_w",
+                        "hr_u",
+                        "hr_v",
+                        "hr_w",
+                        "hr_mag",
+                        "mask",
+                        "venc",
+                        "time_start",
+                        "time_end",
+                        "time_index",
+                        "hr_time_index_map",
+                        "lr_trigger_time_ms_map",
+                        "hr_trigger_time_ms_map",
+                        "pairing_method",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "lr_u": "case/lr_u.nii.gz",
+                        "lr_v": "case/lr_v.nii.gz",
+                        "lr_w": "case/lr_w.nii.gz",
+                        "lr_mag_u": "case/lr_mag.nii.gz",
+                        "lr_mag_v": "case/lr_mag.nii.gz",
+                        "lr_mag_w": "case/lr_mag.nii.gz",
+                        "hr_u": "case/hr_u.nii.gz",
+                        "hr_v": "case/hr_v.nii.gz",
+                        "hr_w": "case/hr_w.nii.gz",
+                        "hr_mag": "case/hr_mag.nii.gz",
+                        "mask": "case/mask.nii.gz",
+                        "venc": "0.9",
+                        "time_start": "0",
+                        "time_end": "9",
+                        "time_index": "",
+                        "hr_time_index_map": "0;2;3;5;7;8;10;11;13",
+                        "lr_trigger_time_ms_map": "36.570;109.711;182.852",
+                        "hr_trigger_time_ms_map": "28.894;144.470;202.258",
+                        "pairing_method": "trigger_time_nearest",
+                    }
+                )
+
+            cases = load_nifti_case_table(str(csv_path), include_hr_mag=True)
+            self.assertEqual(len(cases), 1)
+            case = cases[0]
+            self.assertEqual(case["hr_time_index_map"], [0, 2, 3, 5, 7, 8, 10, 11, 13])
+            self.assertEqual(case["lr_trigger_time_ms_map"], [36.57, 109.711, 182.852])
+            self.assertEqual(case["hr_trigger_time_ms_map"], [28.894, 144.47, 202.258])
+            self.assertEqual(case["pairing_method"], "trigger_time_nearest")
+        finally:
+            if csv_path.exists():
+                csv_path.unlink()
+
 
 class TriggerTimePairingHelperTests(unittest.TestCase):
     def test_case_001_nearest_mapping_matches_expected(self):
@@ -186,6 +291,23 @@ class TriggerTimePairingHelperTests(unittest.TestCase):
         hr = [37.287, 111.861, 186.436, 261.010, 335.584, 410.159, 484.733, 559.307, 633.882, 708.456]
         mapping = generate_trigger_time_frame_pairs.build_nearest_frame_mapping(lr, hr)
         self.assertEqual(mapping, list(range(10)))
+
+    def test_case_map_row_resets_time_range_and_serializes_mapping(self):
+        row = {
+            "lr_u": "data/paired_dataset/lr_3t/001_20240313/Vx.nii.gz",
+            "hr_u": "data/paired_dataset/hr_7t_in_3t_masked/001_20240313/Vx.nii.gz",
+            "time_start": "0",
+            "time_end": "8",
+            "time_index": "",
+        }
+        lr = [36.570350646973, 109.71105194092, 182.85174560547]
+        hr = [28.893999099731, 86.681999206543, 144.4700012207, 202.25799560547]
+        mapped = generate_trigger_time_frame_pairs.build_case_map_row(row, lr, hr)
+        self.assertEqual(mapped["time_start"], "0")
+        self.assertEqual(mapped["time_end"], "3")
+        self.assertEqual(mapped["time_index"], "")
+        self.assertEqual(mapped["hr_time_index_map"], "0;2;3")
+        self.assertEqual(mapped["pairing_method"], "trigger_time_nearest")
 
 
 class ExporterTimeRangeTests(unittest.TestCase):

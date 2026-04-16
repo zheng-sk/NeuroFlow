@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expand case-level paired CSVs into TriggerTime-guided frame-pair CSVs."""
+"""Generate TriggerTime-guided frame-pair or case-map CSVs from case-level inputs."""
 
 from __future__ import annotations
 
@@ -10,11 +10,17 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-NEW_COLUMNS = [
+FRAME_PAIR_COLUMNS = [
     "lr_time_index",
     "hr_time_index",
     "lr_trigger_time_ms",
     "hr_trigger_time_ms",
+    "pairing_method",
+]
+CASE_MAP_COLUMNS = [
+    "hr_time_index_map",
+    "lr_trigger_time_ms_map",
+    "hr_trigger_time_ms_map",
     "pairing_method",
 ]
 TRIGGER_TIME_DECIMALS = 3
@@ -23,12 +29,21 @@ TRIGGER_TIME_DECIMALS = 3
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Read TriggerTime from sorted-patient DICOM folders and expand a case-level paired "
-            "CSV into one row per 3T->7T frame pair using nearest normalized cardiac phase."
+            "Read TriggerTime from sorted-patient DICOM folders and generate either "
+            "frame-pair CSVs or case-level CSVs with a TriggerTime-derived 3T->7T mapping."
         )
     )
     parser.add_argument("--input-csv", required=True, help="Case-level CSV with 4D LR/HR NIfTI paths.")
-    parser.add_argument("--output-csv", required=True, help="Expanded frame-paired CSV to write.")
+    parser.add_argument("--output-csv", required=True, help="Output CSV to write.")
+    parser.add_argument(
+        "--output-mode",
+        choices=["frame_pairs", "case_map"],
+        default="frame_pairs",
+        help=(
+            "frame_pairs: one row per LR/HR temporal pair. "
+            "case_map: keep one row per case and store the TriggerTime-derived HR frame map."
+        ),
+    )
     parser.add_argument(
         "--sorted-patients-root",
         default="data/sorted_patients",
@@ -161,6 +176,18 @@ def build_nearest_frame_mapping(lr_trigger_times: Sequence[float], hr_trigger_ti
     return mapping
 
 
+def _format_trigger_time(value: float) -> str:
+    return f"{round(float(value), TRIGGER_TIME_DECIMALS):.3f}"
+
+
+def _serialize_int_sequence(values: Sequence[int]) -> str:
+    return ";".join(str(int(value)) for value in values)
+
+
+def _serialize_float_sequence(values: Sequence[float]) -> str:
+    return ";".join(_format_trigger_time(value) for value in values)
+
+
 def infer_case_key(row: dict[str, str], base_dir: str) -> str:
     lr_u = _resolve_path(row.get("lr_u", ""), base_dir)
     hr_u = _resolve_path(row.get("hr_u", ""), base_dir)
@@ -191,12 +218,34 @@ def expand_case_row(
             expanded["time_index"] = str(lr_index)
         expanded["lr_time_index"] = str(lr_index)
         expanded["hr_time_index"] = str(hr_index)
-        expanded["lr_trigger_time_ms"] = f"{round(float(lr_trigger_times[lr_index]), TRIGGER_TIME_DECIMALS):.3f}"
-        expanded["hr_trigger_time_ms"] = f"{round(float(hr_trigger_times[hr_index]), TRIGGER_TIME_DECIMALS):.3f}"
+        expanded["lr_trigger_time_ms"] = _format_trigger_time(lr_trigger_times[lr_index])
+        expanded["hr_trigger_time_ms"] = _format_trigger_time(hr_trigger_times[hr_index])
         expanded["pairing_method"] = "trigger_time_nearest"
         expanded_rows.append(expanded)
 
     return expanded_rows
+
+
+def build_case_map_row(
+    row: dict[str, str],
+    lr_trigger_times: Sequence[float],
+    hr_trigger_times: Sequence[float],
+) -> dict[str, str]:
+    hr_mapping = build_nearest_frame_mapping(lr_trigger_times=lr_trigger_times, hr_trigger_times=hr_trigger_times)
+    mapped_hr_trigger_times = [float(hr_trigger_times[hr_index]) for hr_index in hr_mapping]
+
+    mapped_row = dict(row)
+    if "time_start" in mapped_row:
+        mapped_row["time_start"] = "0"
+    if "time_end" in mapped_row:
+        mapped_row["time_end"] = str(len(hr_mapping))
+    if "time_index" in mapped_row:
+        mapped_row["time_index"] = ""
+    mapped_row["hr_time_index_map"] = _serialize_int_sequence(hr_mapping)
+    mapped_row["lr_trigger_time_ms_map"] = _serialize_float_sequence(lr_trigger_times)
+    mapped_row["hr_trigger_time_ms_map"] = _serialize_float_sequence(mapped_hr_trigger_times)
+    mapped_row["pairing_method"] = "trigger_time_nearest"
+    return mapped_row
 
 
 def main() -> None:
@@ -213,11 +262,12 @@ def main() -> None:
 
     if not fieldnames:
         raise SystemExit(f"Input CSV has no header: {input_csv}")
-    for column in NEW_COLUMNS:
+    extra_columns = FRAME_PAIR_COLUMNS if args.output_mode == "frame_pairs" else CASE_MAP_COLUMNS
+    for column in extra_columns:
         if column not in fieldnames:
             fieldnames.append(column)
 
-    expanded_rows: list[dict[str, str]] = []
+    output_rows: list[dict[str, str]] = []
     case_summaries: list[tuple[str, int, int, int]] = []
 
     for row in rows:
@@ -248,12 +298,22 @@ def main() -> None:
                 f"HR NIfTI frames ({hr_frame_count})."
             )
 
-        case_rows = expand_case_row(row=row, lr_trigger_times=lr_trigger_times, hr_trigger_times=hr_trigger_times)
-        expanded_rows.extend(case_rows)
-        case_summaries.append((case_key, len(lr_trigger_times), len(hr_trigger_times), len(case_rows)))
+        if args.output_mode == "frame_pairs":
+            case_rows = expand_case_row(row=row, lr_trigger_times=lr_trigger_times, hr_trigger_times=hr_trigger_times)
+            output_rows.extend(case_rows)
+            out_count = len(case_rows)
+        else:
+            case_row = build_case_map_row(row=row, lr_trigger_times=lr_trigger_times, hr_trigger_times=hr_trigger_times)
+            output_rows.append(case_row)
+            out_count = 1
+
+        case_summaries.append((case_key, len(lr_trigger_times), len(hr_trigger_times), out_count))
 
         if args.verbose:
-            mapping = [int(case_row["hr_time_index"]) for case_row in case_rows]
+            if args.output_mode == "frame_pairs":
+                mapping = [int(case_row["hr_time_index"]) for case_row in case_rows]
+            else:
+                mapping = build_nearest_frame_mapping(lr_trigger_times=lr_trigger_times, hr_trigger_times=hr_trigger_times)
             print(
                 f"{case_key}: 3T={len(lr_trigger_times)} frame(s), "
                 f"7T={len(hr_trigger_times)} frame(s), hr_mapping={mapping}"
@@ -263,9 +323,9 @@ def main() -> None:
     with output_csv.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(expanded_rows)
+        writer.writerows(output_rows)
 
-    print(f"Wrote {len(expanded_rows)} paired frame row(s) to {output_csv}")
+    print(f"Wrote {len(output_rows)} row(s) to {output_csv} [mode={args.output_mode}]")
     for case_key, lr_count, hr_count, out_count in case_summaries:
         print(f"- {case_key}: 3T={lr_count}, 7T={hr_count}, output_rows={out_count}")
 

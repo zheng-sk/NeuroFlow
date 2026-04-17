@@ -121,6 +121,69 @@ When volumes are 4D:
 - train mode can sample random time frame
 - val mode uses deterministic index/range logic
 
+### 4.1 TriggerTime-guided discrete LR/HR pairing
+
+When 3T and 7T have different numbers of cardiac frames, you can expand a case-level CSV
+into one row per paired frame without temporal resampling:
+
+```bash
+python code/registration/generate_trigger_time_frame_pairs.py \
+  --input-csv data/paired_dataset/train_random_1_src.csv \
+  --output-csv data/paired_dataset/train_random_1_src_trigger_pairs.csv \
+  --sorted-patients-root data/sorted_patients
+```
+
+The paired CSV keeps the original 4D NIfTI paths and adds:
+
+```text
+lr_time_index,hr_time_index,lr_trigger_time_ms,hr_trigger_time_ms,pairing_method
+```
+
+Behavior:
+
+- one output row = one fixed 3T frame paired to one fixed 7T frame
+- `pairing_method=trigger_time_nearest` means the 7T frame was chosen by nearest
+  normalized `TriggerTime`
+- no temporal interpolation or time remeshing is performed
+- when `lr_time_index` / `hr_time_index` are present, the loader uses those explicit
+  indices and ignores random temporal sampling plus legacy `time_start/time_end/time_index`
+  selection for that row
+
+For training, a case-level TriggerTime mapping is usually a better fit because it preserves the
+old "one row per patient" dataset size while still sampling the correct paired 7T frame:
+
+```bash
+python code/registration/generate_trigger_time_frame_pairs.py \
+  --input-csv data/paired_dataset/paired_nifti_cases_hrmasked_with_cow_mask.csv \
+  --output-csv data/paired_dataset/paired_nifti_cases_hrmasked_with_cow_mask_trigger_map.csv \
+  --sorted-patients-root data/sorted_patients \
+  --output-mode case_map
+```
+
+The case-map CSV adds:
+
+```text
+hr_time_index_map,lr_trigger_time_ms_map,hr_trigger_time_ms_map,pairing_method
+```
+
+Behavior of `case_map` mode:
+
+- one output row = one patient/case, not one frame
+- train mode can still sample a random LR frame
+- the loader resolves the HR frame through `hr_time_index_map`
+- random spatial patch sampling works exactly as before
+- `time_end` is rewritten to the full mapped LR frame count so older off-by-one exports do not
+  silently drop the last frame
+
+Recommended usage:
+
+- `case_map` for training CSVs when you want random frame sampling with correct TriggerTime pairing
+- `frame_pairs` for explicit per-frame validation or analysis
+
+Legacy note:
+
+- `time_end` in case-level CSVs uses exclusive semantics: `[time_start, time_end)`
+
 ## 5) Patch Sampling
 
 - LR patch size: `patch_size`

@@ -53,6 +53,28 @@ def _resolve_path(path_value: str, base_dir: str) -> str:
     return os.path.abspath(os.path.join(base_abs, path_value))
 
 
+def _parse_int_sequence(value) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [int(item) for item in value]
+    text = str(value).strip()
+    if not text:
+        return []
+    return [int(part.strip()) for part in text.split(";") if part.strip()]
+
+
+def _parse_float_sequence(value) -> list[float]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [float(item) for item in value]
+    text = str(value).strip()
+    if not text:
+        return []
+    return [float(part.strip()) for part in text.split(";") if part.strip()]
+
+
 def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[Dict]:
     """
     Load case descriptors from CSV.
@@ -62,7 +84,12 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
         and one magnitude source from:
         lr_mag, lr_mag_u, lr_mag_v, lr_mag_w
     Optional columns:
-        hr_mag, mask, vesselness_target, venc, venc_u, venc_v, venc_w, time_start, time_end, time_index
+        hr_mag, mask, vesselness_target, venc, venc_u, venc_v, venc_w,
+        time_start, time_end, time_index,
+        lr_time_index, hr_time_index, hr_time_index_map,
+        lr_trigger_time_ms, hr_trigger_time_ms,
+        lr_trigger_time_ms_map, hr_trigger_time_ms_map,
+        pairing_method
     """
     required = ["lr_u", "lr_v", "lr_w", "hr_u", "hr_v", "hr_w"]
     mag_keys = ["lr_mag_u", "lr_mag_v", "lr_mag_w"]
@@ -77,7 +104,17 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
         "time_start",
         "time_end",
         "time_index",
+        "lr_time_index",
+        "hr_time_index",
+        "hr_time_index_map",
+        "lr_trigger_time_ms",
+        "hr_trigger_time_ms",
+        "lr_trigger_time_ms_map",
+        "hr_trigger_time_ms_map",
+        "pairing_method",
     ]
+    float_keys = {"venc", "venc_u", "venc_v", "venc_w", "lr_trigger_time_ms", "hr_trigger_time_ms"}
+    int_keys = {"time_start", "time_end", "time_index", "lr_time_index", "hr_time_index"}
 
     base_dir = os.path.dirname(os.path.abspath(csv_path))
     cases = []
@@ -104,10 +141,14 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
             case = {}
             for key in required + mag_keys + optional:
                 value = row.get(key, "") or ""
-                if key in ("venc", "venc_u", "venc_v", "venc_w"):
+                if key in float_keys:
                     case[key] = float(value) if str(value).strip() else 0.0
-                elif key in ("time_start", "time_end", "time_index"):
+                elif key in int_keys:
                     case[key] = int(value) if str(value).strip() else -1
+                elif key == "hr_time_index_map":
+                    case[key] = _parse_int_sequence(value)
+                elif key in {"lr_trigger_time_ms_map", "hr_trigger_time_ms_map"}:
+                    case[key] = _parse_float_sequence(value)
                 elif key in mag_keys:
                     case[key] = _resolve_path(value, base_dir) if str(value).strip() else shared_mag_path
                 elif key == "hr_mag":
@@ -120,6 +161,8 @@ def load_nifti_case_table(csv_path: str, include_hr_mag: bool = False) -> List[D
                         case[key] = inferred if os.path.exists(inferred) else ""
                     else:
                         case[key] = ""
+                elif key == "pairing_method":
+                    case[key] = str(value).strip()
                 elif key in {"mask", "vesselness_target"}:
                     case[key] = _resolve_path(value, base_dir) if str(value).strip() else None
                 else:
@@ -278,6 +321,90 @@ class _StackNormalizeFieldsd(RandomizableTransform):
         time_axis = self._normalize_time_axis(arr.ndim)
         return np.take(arr, indices=t_index, axis=time_axis)
 
+    def _maybe_time_count(self, arr: np.ndarray) -> Optional[int]:
+        if arr.ndim == 3:
+            return None
+        if arr.ndim != 4:
+            raise ValueError(f"Expected 3D/4D volume after channel squeeze, got shape {arr.shape}")
+        time_axis = self._normalize_time_axis(arr.ndim)
+        return int(arr.shape[time_axis])
+
+    def _resolve_side_time_count(self, arrays: List[np.ndarray]) -> int:
+        counts = [count for count in (self._maybe_time_count(arr) for arr in arrays) if count is not None]
+        if not counts:
+            return 1
+        t_count = int(min(counts))
+        if t_count <= 0:
+            raise ValueError("No valid time frames found in 4D NIfTI inputs.")
+        return t_count
+
+    @staticmethod
+    def _validate_time_index(label: str, index: int, t_count: int) -> int:
+        if index < 0 or index >= t_count:
+            raise ValueError(f"{label}={index} is outside [0, {t_count}).")
+        return int(index)
+
+    def _resolve_single_time_index(self, d, t_count: int) -> int:
+        if t_count <= 0:
+            raise ValueError("No valid time frames found in 4D NIfTI inputs.")
+
+        time_start = int(d.get("time_start", -1))
+        time_end = int(d.get("time_end", -1))
+        time_index = int(d.get("time_index", -1))
+
+        if time_start < 0:
+            time_start = 0
+        if time_end <= 0 or time_end > t_count:
+            time_end = t_count
+        if time_start >= time_end:
+            raise ValueError(f"Invalid time range [{time_start}, {time_end}) for {t_count} frames.")
+
+        if time_index >= 0:
+            if time_index < time_start or time_index >= time_end:
+                raise ValueError(
+                    f"time_index={time_index} is outside selected range [{time_start}, {time_end})."
+                )
+            t_index = int(time_index)
+        elif self.random_time_frame:
+            t_index = int(self.R.randint(time_start, time_end))
+        else:
+            range_len = time_end - time_start
+            offset = int(np.clip(self.fixed_time_index, 0, range_len - 1))
+            t_index = time_start + offset
+        return int(t_index)
+
+    def _resolve_time_indices(self, d, lr_t_count: int, hr_t_count: int) -> tuple[int, int]:
+        lr_time_index = int(d.get("lr_time_index", -1))
+        hr_time_index = int(d.get("hr_time_index", -1))
+        has_explicit_pairing = lr_time_index >= 0 or hr_time_index >= 0
+
+        if has_explicit_pairing:
+            if lr_time_index < 0:
+                lr_time_index = hr_time_index
+            if hr_time_index < 0:
+                hr_time_index = lr_time_index
+            lr_time_index = self._validate_time_index("lr_time_index", lr_time_index, lr_t_count)
+            hr_time_index = self._validate_time_index("hr_time_index", hr_time_index, hr_t_count)
+            return lr_time_index, hr_time_index
+
+        hr_time_index_map = d.get("hr_time_index_map") or []
+        if hr_time_index_map:
+            usable_lr_count = min(lr_t_count, len(hr_time_index_map))
+            if usable_lr_count <= 0:
+                raise ValueError("TriggerTime-derived hr_time_index_map is empty.")
+            lr_time_index = self._resolve_single_time_index(d, usable_lr_count)
+            hr_time_index = int(hr_time_index_map[lr_time_index])
+            hr_time_index = self._validate_time_index(
+                f"hr_time_index_map[{lr_time_index}]",
+                hr_time_index,
+                hr_t_count,
+            )
+            return lr_time_index, hr_time_index
+
+        t_count = min(lr_t_count, hr_t_count)
+        t_index = self._resolve_single_time_index(d, t_count)
+        return t_index, t_index
+
     def _resolve_component_venc(self, d, key):
         # component venc > shared venc > 0 (auto later)
         v_comp = float(d.get(key, 0.0))
@@ -300,14 +427,21 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             return "signed"
         return "not_raw"
 
-    def _raw_to_velocity(self, arr, venc, invert_sign=False):
-        mode = self._detect_raw_mode(arr)
+    def _raw_to_velocity(self, arr, venc, invert_sign=False, force_signed: bool = False):
+        mode = "signed" if force_signed else self._detect_raw_mode(arr)
         vel = arr.astype(np.float32)
         if mode == "unsigned":
             vel = (vel - self.raw_center) / self.raw_scale * float(venc)
         elif mode == "signed":
-            max_abs = max(abs(float(np.min(vel))), abs(float(np.max(vel))))
-            scale = 4096.0 if max_abs > 3000.0 else 2048.0
+            if force_signed:
+                # When the caller guarantees raw phase data (raw_phase_input=True), always
+                # use scale=4096. The heuristic max_abs>3000 can mis-select scale=2048 on
+                # frames whose peak velocity is far below VENC (e.g. low-flow subjects),
+                # producing values slightly outside [-1, 1].
+                scale = 4096.0
+            else:
+                max_abs = max(abs(float(np.min(vel))), abs(float(np.max(vel))))
+                scale = 4096.0 if max_abs > 3000.0 else 2048.0
             vel = vel / scale * float(venc)
         else:
             # Legacy fallback: preserve previous behavior when values do not look RAW.
@@ -344,64 +478,30 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             else None
         )
 
-        # 4D NIfTI support: sample/select one time frame and continue with 3D patching.
-        if lr_u_raw.ndim == 4:
-            time_lengths = []
-            for arr in [lr_u_raw, lr_v_raw, lr_w_raw, hr_u_raw, hr_v_raw, hr_w_raw, mag_u_raw, mag_v_raw, mag_w_raw]:
-                axis = self._normalize_time_axis(arr.ndim)
-                time_lengths.append(arr.shape[axis])
-            if hr_mag_raw is not None and hr_mag_raw.ndim == 4:
-                axis = self._normalize_time_axis(hr_mag_raw.ndim)
-                time_lengths.append(hr_mag_raw.shape[axis])
-            if mask_raw is not None and mask_raw.ndim == 4:
-                axis = self._normalize_time_axis(mask_raw.ndim)
-                time_lengths.append(mask_raw.shape[axis])
-            if vesselness_raw is not None and vesselness_raw.ndim == 4:
-                axis = self._normalize_time_axis(vesselness_raw.ndim)
-                time_lengths.append(vesselness_raw.shape[axis])
+        lr_t_count = self._resolve_side_time_count([lr_u_raw, lr_v_raw, lr_w_raw, mag_u_raw, mag_v_raw, mag_w_raw])
+        hr_arrays = [hr_u_raw, hr_v_raw, hr_w_raw]
+        if hr_mag_raw is not None:
+            hr_arrays.append(hr_mag_raw)
+        if mask_raw is not None:
+            hr_arrays.append(mask_raw)
+        if vesselness_raw is not None:
+            hr_arrays.append(vesselness_raw)
+        hr_t_count = self._resolve_side_time_count(hr_arrays)
 
-            t_count = int(min(time_lengths))
-            if t_count <= 0:
-                raise ValueError("No valid time frames found in 4D NIfTI inputs.")
+        lr_t_index, hr_t_index = self._resolve_time_indices(d, lr_t_count=lr_t_count, hr_t_count=hr_t_count)
 
-            time_start = int(d.get("time_start", -1))
-            time_end = int(d.get("time_end", -1))
-            time_index = int(d.get("time_index", -1))
-
-            if time_start < 0:
-                time_start = 0
-            if time_end <= 0 or time_end > t_count:
-                time_end = t_count
-            if time_start >= time_end:
-                raise ValueError(f"Invalid time range [{time_start}, {time_end}) for {t_count} frames.")
-
-            if time_index >= 0:
-                if time_index < time_start or time_index >= time_end:
-                    raise ValueError(
-                        f"time_index={time_index} is outside selected range [{time_start}, {time_end})."
-                    )
-                t_index = time_index
-            elif self.random_time_frame:
-                t_index = int(self.R.randint(time_start, time_end))
-            else:
-                range_len = time_end - time_start
-                offset = int(np.clip(self.fixed_time_index, 0, range_len - 1))
-                t_index = time_start + offset
-        else:
-            t_index = 0
-
-        lr_u = self._select_time_frame(lr_u_raw, t_index)
-        lr_v = self._select_time_frame(lr_v_raw, t_index)
-        lr_w = self._select_time_frame(lr_w_raw, t_index)
-        hr_u = self._select_time_frame(hr_u_raw, t_index)
-        hr_v = self._select_time_frame(hr_v_raw, t_index)
-        hr_w = self._select_time_frame(hr_w_raw, t_index)
-        mag_u = self._select_time_frame(mag_u_raw, t_index)
-        mag_v = self._select_time_frame(mag_v_raw, t_index)
-        mag_w = self._select_time_frame(mag_w_raw, t_index)
-        hr_mag = self._select_time_frame(hr_mag_raw, t_index) if hr_mag_raw is not None else None
-        mask = self._select_time_frame(mask_raw, t_index) if mask_raw is not None else None
-        vesselness = self._select_time_frame(vesselness_raw, t_index) if vesselness_raw is not None else None
+        lr_u = self._select_time_frame(lr_u_raw, lr_t_index)
+        lr_v = self._select_time_frame(lr_v_raw, lr_t_index)
+        lr_w = self._select_time_frame(lr_w_raw, lr_t_index)
+        hr_u = self._select_time_frame(hr_u_raw, hr_t_index)
+        hr_v = self._select_time_frame(hr_v_raw, hr_t_index)
+        hr_w = self._select_time_frame(hr_w_raw, hr_t_index)
+        mag_u = self._select_time_frame(mag_u_raw, lr_t_index)
+        mag_v = self._select_time_frame(mag_v_raw, lr_t_index)
+        mag_w = self._select_time_frame(mag_w_raw, lr_t_index)
+        hr_mag = self._select_time_frame(hr_mag_raw, hr_t_index) if hr_mag_raw is not None else None
+        mask = self._select_time_frame(mask_raw, hr_t_index) if mask_raw is not None else None
+        vesselness = self._select_time_frame(vesselness_raw, hr_t_index) if vesselness_raw is not None else None
 
         venc_u = self._resolve_component_venc(d, "venc_u")
         venc_v = self._resolve_component_venc(d, "venc_v")
@@ -419,12 +519,12 @@ class _StackNormalizeFieldsd(RandomizableTransform):
             # Default behavior avoids double inversion when DICOM->NIfTI already
             # applied LPS->RAS sign correction to Vx/Vy. Enable legacy inversion
             # with `invert_uv_sign_on_raw=True` only for old datasets.
-            lr_u = self._raw_to_velocity(lr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw)
-            lr_v = self._raw_to_velocity(lr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw)
-            lr_w = self._raw_to_velocity(lr_w, venc=venc_w, invert_sign=False)
-            hr_u = self._raw_to_velocity(hr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw)
-            hr_v = self._raw_to_velocity(hr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw)
-            hr_w = self._raw_to_velocity(hr_w, venc=venc_w, invert_sign=False)
+            lr_u = self._raw_to_velocity(lr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw, force_signed=True)
+            lr_v = self._raw_to_velocity(lr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw, force_signed=True)
+            lr_w = self._raw_to_velocity(lr_w, venc=venc_w, invert_sign=False, force_signed=True)
+            hr_u = self._raw_to_velocity(hr_u, venc=venc_u, invert_sign=self.invert_uv_sign_on_raw, force_signed=True)
+            hr_v = self._raw_to_velocity(hr_v, venc=venc_v, invert_sign=self.invert_uv_sign_on_raw, force_signed=True)
+            hr_w = self._raw_to_velocity(hr_w, venc=venc_w, invert_sign=False, force_signed=True)
         else:
             if venc_u <= 0:
                 venc_u = float(np.max(np.abs(lr_u)))

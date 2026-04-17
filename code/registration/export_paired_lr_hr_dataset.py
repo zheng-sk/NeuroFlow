@@ -262,7 +262,8 @@ def resolve_time_end(lr_u: str, hr_u: str) -> int | None:
         return int(img.shape[-1])
 
     try:
-        return min(frame_count(lr_u), frame_count(hr_u)) - 1
+        # CSV time_end uses exclusive semantics: [time_start, time_end).
+        return min(frame_count(lr_u), frame_count(hr_u))
     except Exception:
         return None
 

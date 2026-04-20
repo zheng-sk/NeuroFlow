@@ -70,7 +70,7 @@ run_one_fold() {
   fi
 
   local model_root_dir="${ROOT}/models/${XVAL_EXPERIMENT_NAME}/${task_tag}/${fold_name}"
-  local run_name="nf_preups_cbam_${task_tag}_${fold_name}"
+  local run_name="${task_tag}_${fold_name}"
   local log_dir="${ROOT}/models/${XVAL_EXPERIMENT_NAME}/logs"
   local log_path="${log_dir}/${task_tag}_${fold_name}.log"
   local train_args=(

@@ -25,6 +25,8 @@ SR_VAL_SW_BATCH=${SR_VAL_SW_BATCH:-2}
 EPOCHS=${EPOCHS:-500}
 SEED=${SEED:-42}
 SKIP_EXISTING=${SKIP_EXISTING:-0}
+APPLY_MASK_TO_LR_INPUTS=${APPLY_MASK_TO_LR_INPUTS:-0}
+APPLY_MASK_TO_LR_MAGNITUDE=${APPLY_MASK_TO_LR_MAGNITUDE:-1}
 
 usage() {
   cat <<EOF
@@ -38,6 +40,8 @@ Optional environment variables:
   DENOISE_FOLDS_DIR=${ROOT}/data/paired_dataset/loo_trainval_hrmasked_r1
   SR_FOLDS_DIR=${ROOT}/data/paired_dataset/loo_trainval_hrmasked_x2
   NOISE_CSV=${ROOT}/output/noise_pdf/nonvascular_noise_fit_summary.csv
+  APPLY_MASK_TO_LR_INPUTS=1
+  APPLY_MASK_TO_LR_MAGNITUDE=1
   SKIP_EXISTING=1
 EOF
 }
@@ -100,6 +104,15 @@ run_one_fold() {
     --noise-aug-masked-fraction 0.1
     --model-root-dir "${model_root_dir}"
   )
+
+  if [[ "${APPLY_MASK_TO_LR_INPUTS}" == "1" ]]; then
+    train_args+=(--apply-mask-to-lr-inputs)
+    if [[ "${APPLY_MASK_TO_LR_MAGNITUDE}" == "0" ]]; then
+      train_args+=(--no-apply-mask-to-lr-magnitude)
+    else
+      train_args+=(--apply-mask-to-lr-magnitude)
+    fi
+  fi
 
   mkdir -p "${model_root_dir}" "${log_dir}"
 

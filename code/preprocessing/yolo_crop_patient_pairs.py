@@ -303,6 +303,38 @@ def run_detection_for_mag(
     return img, vol3d, used_mip, crop
 
 
+def _resolve_magnitude(folder: Path, exact_name: str) -> Path | None:
+    """Return the magnitude path for a folder.
+
+    Tries the exact name first. If not found, falls back to discovering NIfTI
+    files whose name contains 'magnitude' or 'mag' (case-insensitive) and picks
+    the one with the most time frames so that single-frame anatomical references
+    are never chosen over the actual 4D flow magnitude.
+    """
+    import nibabel as nib
+
+    exact = folder / exact_name
+    if exact.exists():
+        return exact
+
+    candidates = [
+        p for p in sorted(folder.glob("*.nii.gz"))
+        if any(tok in p.name.lower() for tok in ("magnitude", "mag"))
+        and not any(tok in p.name.lower() for tok in ("phase", "vx", "vy", "vz"))
+    ]
+    if not candidates:
+        return None
+
+    def _nframes(p: Path) -> int:
+        shape = nib.load(str(p)).shape
+        return int(shape[3]) if len(shape) == 4 else 1
+
+    candidates.sort(key=_nframes, reverse=True)
+    chosen = candidates[0]
+    print(f"  [auto-mag] {folder.name}: using {chosen.name}")
+    return chosen
+
+
 def main() -> None:
     args = parse_args()
 
@@ -331,16 +363,16 @@ def main() -> None:
     summary: list[dict[str, object]] = []
 
     for pair in pairs:
-        fixed_mag = pair.fixed_dir / args.magnitude_name
-        moving_mag = pair.moving_dir / args.magnitude_name
-        if not fixed_mag.exists() or not moving_mag.exists():
+        fixed_mag = _resolve_magnitude(pair.fixed_dir, args.magnitude_name)
+        moving_mag = _resolve_magnitude(pair.moving_dir, args.magnitude_name)
+        if fixed_mag is None or moving_mag is None:
             print(f"[SKIP] {pair.case_key}: missing magnitude file(s).")
             summary.append(
                 {
                     "case_key": pair.case_key,
                     "status": "skipped_missing_magnitude",
-                    "fixed_magnitude": str(fixed_mag),
-                    "moving_magnitude": str(moving_mag),
+                    "fixed_magnitude": str(pair.fixed_dir / args.magnitude_name),
+                    "moving_magnitude": str(pair.moving_dir / args.magnitude_name),
                 }
             )
             continue

@@ -1,0 +1,78 @@
+FIGURE 5 — LOSS PARTITION AND EVALUATION REGIONS
+================================================
+LaTeX label: fig:loss
+Status: schematic + small qualitative panel.
+Recommended size: 2-column, ≈1800 × 800 px, 300 dpi.
+Placement: after the loss-function and evaluation-metric equations.
+
+PURPOSE
+-------
+Visualise where each loss term is evaluated and where each reported
+metric is computed. The figure justifies the mask-aware split of
+L_vel (fluid vs background), L_mag (inside the mask only), L_TV
+(outside the mask only) — and then shows the predicted-vs-reference
+surfaces that produce Dice, sMSD and HD.
+
+LAYOUT — TWO PANELS SIDE BY SIDE
+--------------------------------
+Panel (a) "Loss partition" (left, ~55 % width):
+  A representative axial slice from one subject (post-registration 3T
+  magnitude) in grayscale. Overlay the binary CoW mask M(x) as a
+  semi-transparent blue region (interior) and the complementary
+  outside region as a semi-transparent grey wash. Annotate with:
+    - Blue interior  →  arrow labelled "L_vel (fluid)  ·  L_mag"
+                        leading to a small equation card showing
+                        the masked fluid MSE expression.
+    - Grey exterior  →  arrow labelled "λ_bg · L_vel (bg)  +  L_TV"
+                        leading to a second card showing the TV
+                        expression with the joint-outside indicator
+                        Ω(x, d).
+  In a corner of the panel, list the loss weights as a tiny inset
+  table: λ_bg = 0.1, λ_M = 1, λ_TV = 1e-5.
+
+Panel (b) "Evaluation regions" (right, ~45 % width):
+  A small 3D rendering of the CoW vasculature for the SAME subject.
+  Show two surfaces in close-up around the MCA bifurcation:
+    - S_R (7T reference surface) drawn in solid grey.
+    - S_P (predicted surface obtained by re-segmenting the network
+      output with the ResEnc-M ensemble) drawn in translucent red.
+  Add three small graphical annotations:
+    - A green double-headed arrow between the surfaces labelled
+      "Dice (volumetric overlap)".
+    - A blue arrow at a typical boundary location labelled
+      "d(p, S_R) → sMSD".
+    - A bold red arrow at the locus of the largest local disagreement
+      labelled "max d(·) → HD".
+  Beneath panel (b), a compact legend strip with the three metric
+  symbols (Dice ↑, sMSD ↓, HD ↓) and their units.
+
+CAPTION DRAFT
+-------------
+"Loss partition and evaluation regions. (a) The CoW mask M separates
+fluid voxels — where L_vel(fluid) and L_mag drive learning and where
+the intraluminal MSE is later reported — from extraluminal voxels,
+where the background velocity term λ_bg · L_vel(bg) and the
+total-variation penalty L_TV act. (b) Vascular geometry is evaluated
+by re-segmenting the predicted velocity volume with the same
+ResEnc-M ensemble (Fig. 3) and comparing the resulting surface S_P
+to the 7T reference surface S_R, yielding Dice, sMSD and HD."
+
+TYPOGRAPHY & PALETTE
+--------------------
+Sans-serif. Blue (#4F7AA8) for the fluid region, grey for background;
+red (#B85C6B) for predicted surfaces, neutral grey for reference;
+green (#5C9E7E) and blue accents for Dice / sMSD arrows, deep red for
+the HD arrow.
+
+DATA NEEDED
+-----------
+- One axial slice + its CoW mask for panel (a). Reuse the subject
+  from Figs. 1–3 for continuity.
+- A small 3D zoom around the MCA showing both the 7T reference
+  surface and the re-segmented predicted surface for the SAME subject
+  (one of the LOOCV held-out cases).
+
+NOT TO INCLUDE
+--------------
+No raw equations as image-embedded LaTeX (keep them in vector text
+boxes so they remain editable). No patient identifiers.

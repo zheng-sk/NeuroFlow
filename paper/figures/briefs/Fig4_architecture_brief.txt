@@ -1,0 +1,131 @@
+FIGURE 4 — NETWORK ARCHITECTURE (CBAM-DNS / CBAM-SupRes)
+========================================================
+LaTeX label: fig:architecture
+Status: pure schematic — no data needed.
+Recommended size: 2-column, ≈1800 × 750 px, 300 dpi.
+Style: clean "distill"-style — white background, coloured blocks,
+thin black arrows, minimal text on blocks. Similar visual density to
+the original SR4DFlowNet figure.
+
+PURPOSE
+-------
+Show the main forward pass in a single horizontal flow, with the CBAM
+block explained in a dashed inset box (same style as the Residual
+Block inset in the original figure). Add a small bottom strip
+distinguishing the two task variants.
+
+═══════════════════════════════════════════════════════════════════
+MAIN FLOW (left to right, white background)
+═══════════════════════════════════════════════════════════════════
+
+LEFT — Two input stacks (gold/orange, like the original):
+
+  Top stack:   label "PC-MRA, Mag, Speed"
+               size annotation  D×D×D×3
+               (D = 48 for CBAM-DNS | D = 24 for CBAM-SupRes)
+
+  Bottom stack: label "Velocity  Vx, Vy, Vz"
+                size annotation  D×D×D×3
+
+  Arrow note next to inputs (small italic):
+    "Speed = √(Vx²+Vy²+Vz²)
+     PCMRA = Mag × Speed"
+
+TWO ENCODER PATHS → CONCAT:
+
+  Top path:    Conv  →  Conv        (blue blocks, label k3n64s1)
+  Bottom path: Conv  →  Conv        (blue blocks, same labels)
+  Both feed a circle labelled "+ concat" (same as original)
+  After concat: Conv  →  Conv       (blue blocks, k1n64s1, k3n64s1)
+
+RESIDUAL BLOCKS:
+
+  "8× RB" group  (green blocks + brace, label "8x residual blocks")
+  — same compact notation as original (show 2 green RB blocks with
+  "......" between them and a brace on top)
+
+CBAM BLOCK  ← key addition, shown between the 8× RB and Upsample:
+
+  One distinctly coloured block (red/coral #B85C6B), slightly taller
+  than the RB blocks.
+  Label on block: "CBAM"
+  A dashed curved arrow or bracket from this block points DOWN to
+  the CBAM inset box (see INSET section below).
+
+UPSAMPLE:
+
+  One purple block labelled "Upsample ×r"
+  Small annotation: "r=1 (DNS)  |  r=2 (SupRes)"
+
+MORE RESIDUAL BLOCKS:
+
+  "4× RB" group  (lighter green, same compact notation)
+
+OUTPUT HEADS (right side, three rows):
+
+  Each row: Conv → Conv → gold output block
+  Labels: V'x, V'y, V'z   with size  (r·D)×(r·D)×(r·D)
+  Right-side label: "SR Output"
+  (Optional M̂ head in grey, greyed out)
+
+═══════════════════════════════════════════════════════════════════
+INSET BOX — CBAM BLOCK  (dashed border, below or beside main flow)
+═══════════════════════════════════════════════════════════════════
+Same visual treatment as the "Residual Block (RB)" inset in the
+original figure: dashed rectangle, white/light background inside.
+
+Label at top: "CBAM Attention Block"
+
+Inside, show two sequential sub-modules side by side with an arrow:
+
+  ┌──────────────────────────┐    ┌──────────────────────────┐
+  │   Channel Attention      │ →  │   Spatial Attention      │
+  │  GAP ──┐                 │    │  Avg pool (ch-wise) ──┐  │
+  │  GMP ──┴─► MLP ─► σ ─► ⊗│    │  Max pool (ch-wise) ──┴─►│
+  │           (64→8→64)      │    │  Conv 7×7×7 ─► σ ─► ⊗   │
+  └──────────────────────────┘    └──────────────────────────┘
+
+MLP = two 1×1 Conv layers with reduction ratio 8 (64 → 8 → 64).
+σ = sigmoid gate multiplied element-wise (⊗) with the feature map.
+GAP = global average pool; GMP = global max pool.
+Keep this inset compact — icons/small boxes only, no equations needed.
+
+═══════════════════════════════════════════════════════════════════
+BOTTOM STRIP (two small labelled boxes)
+═══════════════════════════════════════════════════════════════════
+  Left  box (blue border):  "CBAM-DNS    r = 1  ·  D = 48"
+  Right box (teal border):  "CBAM-SupRes r = 2  ·  D = 24 → 48"
+
+═══════════════════════════════════════════════════════════════════
+CAPTION DRAFT
+═══════════════════════════════════════════════════════════════════
+"Network architecture shared by CBAM-DNS (r = 1) and CBAM-SupRes
+(r = 2). The phase-contrast stream (PC-MRA, magnitude, speed) and
+the velocity stream (Vx, Vy, Vz) are each encoded by two
+convolutional layers, concatenated, and refined by eight low-
+resolution residual blocks. A CBAM attention module applies
+sequential channel re-weighting (GAP + GMP, MLP with reduction 8)
+and spatial re-weighting (7×7×7 convolution) before trilinear
+upsampling by factor r and four high-resolution residual blocks.
+Three convolutional heads emit the reconstructed velocity components."
+
+═══════════════════════════════════════════════════════════════════
+PALETTE  (distill style — white background)
+═══════════════════════════════════════════════════════════════════
+Background:          white
+Input stacks:        gold/orange  #D08A4E   (same as original)
+Conv blocks:         blue         #4F7AA8
+Residual blocks:     green        #5C9E7E
+CBAM block:          coral/red    #B85C6B   ← make it stand out
+Upsample block:      purple       #7E5BA6
+Output blocks:       gold/orange  #D08A4E
+Arrows:              dark grey or black, thin
+Inset border:        black dashed
+All text:            dark grey, sans-serif, small
+
+NOT TO INCLUDE
+--------------
+No batch-norm (not used). No bias annotations on ResBlocks.
+No inference patch sizes (those are training details, not architecture).
+Keep block labels minimal — k3n64s1 style annotations are fine but
+optional; the priority is clarity over exhaustiveness.

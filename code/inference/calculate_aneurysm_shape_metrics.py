@@ -6,7 +6,7 @@ Workflow
 1. Load binary NIfTI segmentation.
 2. Extract the largest connected component (drops isolated noise voxels).
 3. Run marching cubes → write VTK legacy surface PolyData (.vtk).
-4. Write a VTK UnstructuredGrid volume mesh (voxels as hexahedral cells, .vtu text).
+4. Write a VTK UnstructuredGrid volume mesh (voxels as hexahedral cells, .vtk text).
 5. Compute morphological metrics and save to CSV / JSON.
 
 Metrics
@@ -23,6 +23,8 @@ Metrics
 - undulation_index         : 1 - V / V_convex_hull
 - neck_width_mm            : narrowest cross-sectional diameter along the major axis
 - max_cross_section_diam_mm: widest cross-sectional diameter along the major axis
+- aspect_ratio_approx     : axis_major_mm / neck_width_mm
+- bottleneck_factor_approx: max_cross_section_diam_mm / neck_width_mm
 - num_connected_components : total blobs before filtering (noise indicator)
 - centroid_x/y/z_mm        : physical centroid in mm from image origin
 """
@@ -56,7 +58,12 @@ def _parse_args() -> argparse.Namespace:
         "--convex-hull-subsample",
         type=int,
         default=10,
-        help="Subsample stride for surface vertices when computing convex hull (speeds up large meshes, default 10)",
+        help="Subsample stride for foreground voxel corners when computing convex hull (speeds up large meshes, default 10)",
+    )
+    p.add_argument(
+        "--neck-json",
+        default="",
+        help="Optional manual neck JSON from select_aneurysm_neck.py. Adds manual neck/height ratios.",
     )
     return p.parse_args()
 
@@ -66,14 +73,43 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 def _load_binary_mask(path: Path, threshold: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (binary_mask, zooms_mm, affine)."""
+    """Return (binary_mask, voxel_axis_lengths_mm, affine)."""
     img = nib.load(str(path))
     data = np.asarray(img.dataobj, dtype=np.float32)
     if data.ndim == 4:
         data = data[..., 0]
     mask = (data >= threshold).astype(np.uint8)
-    zooms = np.array(img.header.get_zooms()[:3], dtype=float)
+    affine = np.array(img.affine, dtype=float)
+    zooms = np.linalg.norm(affine[:3, :3], axis=0)
     return mask, zooms, np.array(img.affine, dtype=float)
+
+
+def _voxel_to_world(points_ijk: np.ndarray, affine: np.ndarray) -> np.ndarray:
+    """Map Nx3 voxel coordinates to world/mm coordinates using the NIfTI affine."""
+    points = np.asarray(points_ijk, dtype=np.float64)
+    ones = np.ones((points.shape[0], 1), dtype=np.float64)
+    return (np.concatenate([points, ones], axis=1) @ affine.T)[:, :3]
+
+
+def _foreground_voxel_corners_world(mask: np.ndarray, affine: np.ndarray) -> np.ndarray:
+    """Return world-space corners of occupied voxels for convex-hull volume."""
+    coords = np.argwhere(mask > 0).astype(np.float64)
+    offsets = np.array(
+        [
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+            [1, 1, 0],
+            [0, 0, 1],
+            [1, 0, 1],
+            [0, 1, 1],
+            [1, 1, 1],
+        ],
+        dtype=np.float64,
+    )
+    corners = (coords[:, None, :] + offsets[None, :, :]).reshape(-1, 3)
+    corners = np.unique(corners, axis=0)
+    return _voxel_to_world(corners, affine)
 
 
 # ---------------------------------------------------------------------------
@@ -103,23 +139,22 @@ def _write_vtk_surface(verts: np.ndarray, faces: np.ndarray, path: Path) -> None
 # VTK volume mesh export (legacy ASCII UnstructuredGrid, hex voxels)
 # ---------------------------------------------------------------------------
 
-def _write_vtk_volume_mesh(mask: np.ndarray, zooms: np.ndarray, path: Path) -> None:
+def _write_vtk_volume_mesh(mask: np.ndarray, affine: np.ndarray, path: Path) -> None:
     """Write occupied voxels as VTK legacy ASCII UnstructuredGrid (hexahedral cells)."""
     coords = np.argwhere(mask > 0).astype(float)  # (N, 3) in voxel index space
     n_cells = len(coords)
-    # 8 corners per voxel, but we'll store just centroid-based hex points for simplicity
-    # VTK_VOXEL (type 11) expects 8 corner points in a specific order.
-    # corners relative to voxel index (i,j,k) in mm:
+    # VTK_VOXEL (type 11) expects 8 corner points in this order.
     offsets = np.array([
         [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0],
         [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1],
-    ], dtype=float)  # VTK_VOXEL corner order
+    ], dtype=float)
 
     all_points = []
     for c in coords:
         for off in offsets:
-            all_points.append((c + off) * zooms)
+            all_points.append(c + off)
     all_points_arr = np.array(all_points)  # (N*8, 3)
+    all_points_arr = _voxel_to_world(all_points_arr, affine)
     n_points = len(all_points_arr)
 
     lines = [
@@ -153,8 +188,8 @@ def _compute_shape_metrics(
     zooms: np.ndarray,
     affine: np.ndarray,
     convex_hull_subsample: int,
-) -> dict[str, Any]:
-    voxel_vol_mm3 = float(np.prod(zooms))
+) -> tuple[dict[str, Any], np.ndarray, np.ndarray, np.ndarray]:
+    voxel_vol_mm3 = float(abs(np.linalg.det(affine[:3, :3])))
 
     # --- connected components ---
     labeled = label(mask)
@@ -169,9 +204,8 @@ def _compute_shape_metrics(
     volume_mm3 = float(main.area) * voxel_vol_mm3
 
     # --- surface area via marching cubes ---
-    verts, faces, normals, _ = marching_cubes(
-        main_mask.astype(float), level=0.5, spacing=tuple(float(z) for z in zooms)
-    )
+    verts_vox, faces, normals, _ = marching_cubes(main_mask.astype(float), level=0.5)
+    verts = _voxel_to_world(verts_vox, affine)
     surface_area_mm2 = float(mesh_surface_area(verts, faces))
 
     # --- bounding box ---
@@ -209,9 +243,16 @@ def _compute_shape_metrics(
     nsi = 1.0 - (18.0 * math.pi) ** (1.0 / 3.0) * volume_mm3 ** (2.0 / 3.0) / surface_area_mm2
 
     # --- Undulation Index (UI): 1 - V / V_convex ---
+    # Use foreground voxel corners, not sparse surface vertices. This makes the
+    # convex hull contain the voxelized sac volume used for volume_mm3.
     ui = float("nan")
     try:
-        sub = verts[::convex_hull_subsample]
+        hull_points = _foreground_voxel_corners_world(main_mask, affine)
+        stride = max(1, int(convex_hull_subsample))
+        if len(hull_points) <= 50000:
+            sub = hull_points
+        else:
+            sub = hull_points[::stride]
         if len(sub) >= 4:
             hull = ConvexHull(sub)
             vol_convex = hull.volume
@@ -226,34 +267,80 @@ def _compute_shape_metrics(
     # max_cross_section_diam_mm = diameter of the widest slice
     neck_width_mm: float = float("nan")
     max_cross_section_diam_mm: float = float("nan")
+    auto_neck: dict[str, Any] = {}
     try:
-        eig_vals, eig_vecs = np.linalg.eigh(main.inertia_tensor)
-        major_dir = eig_vecs[:, np.argmin(eig_vals)]
-        major_dir = major_dir / np.linalg.norm(major_dir)
-
-        coords_mm = np.argwhere(main_mask).astype(float) * zooms
-        projections = coords_mm @ major_dir
+        coords_ijk = np.argwhere(main_mask).astype(float)
+        coords_mm = _voxel_to_world(coords_ijk, affine)
+        coords_centered = coords_mm - coords_mm.mean(axis=0, keepdims=True)
+        _, _, vh = np.linalg.svd(coords_centered, full_matrices=False)
+        major_dir_world = vh[0]
+        projections = coords_centered @ major_dir_world
 
         step = float(zooms.min())
         voxel_cross_area = step ** 2  # footprint of one voxel in the perpendicular plane
         bins = np.arange(projections.min(), projections.max() + step, step)
 
-        slice_diams: list[float] = []
+        slice_infos: list[dict[str, Any]] = []
+        total_voxels = int(coords_ijk.shape[0])
+        min_side_count = max(20, int(round(0.03 * total_voxels)))
         for lo, hi in zip(bins[:-1], bins[1:]):
-            n = int(((projections >= lo) & (projections < hi)).sum())
+            in_slice = (projections >= lo) & (projections < hi)
+            n = int(in_slice.sum())
             if n < 4:   # skip fringe slices with only 1-3 voxels
                 continue
-            slice_diams.append(2.0 * math.sqrt(n * voxel_cross_area / math.pi))
+            below = int((projections < lo).sum())
+            above = int((projections >= hi).sum())
+            if min(below, above) < min_side_count:
+                continue
+            diameter = 2.0 * math.sqrt(n * voxel_cross_area / math.pi)
+            slice_infos.append(
+                {
+                    "lo": float(lo),
+                    "hi": float(hi),
+                    "n": n,
+                    "below_count": below,
+                    "above_count": above,
+                    "diameter": float(diameter),
+                    "indices": np.flatnonzero(in_slice),
+                }
+            )
 
-        if slice_diams:
-            neck_width_mm = float(min(slice_diams))
-            max_cross_section_diam_mm = float(max(slice_diams))
+        if slice_infos:
+            neck_info = min(slice_infos, key=lambda item: item["diameter"])
+            max_info = max(slice_infos, key=lambda item: item["diameter"])
+            neck_width_mm = float(neck_info["diameter"])
+            max_cross_section_diam_mm = float(max_info["diameter"])
+            neck_indices = np.asarray(neck_info["indices"], dtype=int)
+            neck_voxels = coords_ijk[neck_indices].astype(int)
+            neck_world = coords_mm[neck_indices]
+            neck_center = neck_world.mean(axis=0)
+            auto_neck = {
+                "automatic_neck_method": "narrowest cross-section perpendicular to longest PCA axis",
+                "automatic_neck_voxel_count": int(neck_info["n"]),
+                "automatic_neck_side_counts": [int(neck_info["below_count"]), int(neck_info["above_count"])],
+                "automatic_neck_area_mm2": round(float(neck_info["n"] * voxel_cross_area), 6),
+                "automatic_neck_equivalent_diameter_mm": round(neck_width_mm, 6),
+                "automatic_neck_center_world_mm": [round(float(v), 6) for v in neck_center],
+                "automatic_neck_axis_world": [round(float(v), 8) for v in major_dir_world],
+                "automatic_neck_projection_range_mm": [round(float(neck_info["lo"]), 6), round(float(neck_info["hi"]), 6)],
+                "automatic_neck_voxels_ijk": neck_voxels.tolist(),
+            }
     except Exception:
         pass
 
+    aspect_ratio_approx = (
+        axis_major_mm / neck_width_mm
+        if math.isfinite(neck_width_mm) and neck_width_mm > 0
+        else float("nan")
+    )
+    bottleneck_factor_approx = (
+        max_cross_section_diam_mm / neck_width_mm
+        if math.isfinite(neck_width_mm) and neck_width_mm > 0 and math.isfinite(max_cross_section_diam_mm)
+        else float("nan")
+    )
+
     # --- centroid in physical mm (using affine) ---
-    centroid_vox = np.array([main.centroid[0], main.centroid[1], main.centroid[2], 1.0])
-    centroid_phys = affine @ centroid_vox
+    centroid_phys = _voxel_to_world(np.array(main.centroid, dtype=float)[None, :], affine)[0]
     centroid_x_mm, centroid_y_mm, centroid_z_mm = float(centroid_phys[0]), float(centroid_phys[1]), float(centroid_phys[2])
 
     return {
@@ -273,11 +360,51 @@ def _compute_shape_metrics(
         "undulation_index": round(ui, 6) if math.isfinite(ui) else None,
         "neck_width_mm": round(neck_width_mm, 4) if math.isfinite(neck_width_mm) else None,
         "max_cross_section_diam_mm": round(max_cross_section_diam_mm, 4) if math.isfinite(max_cross_section_diam_mm) else None,
+        "aspect_ratio_approx": round(aspect_ratio_approx, 6) if math.isfinite(aspect_ratio_approx) else None,
+        "bottleneck_factor_approx": round(bottleneck_factor_approx, 6) if math.isfinite(bottleneck_factor_approx) else None,
         "num_connected_components": num_cc,
         "centroid_x_mm": round(centroid_x_mm, 4),
         "centroid_y_mm": round(centroid_y_mm, 4),
         "centroid_z_mm": round(centroid_z_mm, 4),
-    }, verts, faces
+        **auto_neck,
+    }, verts, faces, main_mask
+
+
+def _add_manual_neck_metrics(metrics: dict[str, Any], main_mask: np.ndarray, affine: np.ndarray, neck_json: Path) -> dict[str, Any]:
+    neck = json.loads(neck_json.read_text(encoding="utf-8"))
+    neck_width = neck.get("manual_neck_width_mm")
+    plane_point = neck.get("neck_plane_point_world_mm")
+    plane_normal = neck.get("neck_plane_normal_world")
+
+    if neck_width is None or plane_point is None or plane_normal is None:
+        raise ValueError(f"Neck JSON is missing required manual neck fields: {neck_json}")
+
+    neck_width = float(neck_width)
+    p0 = np.asarray(plane_point, dtype=np.float64)
+    n = np.asarray(plane_normal, dtype=np.float64)
+    n = n / max(float(np.linalg.norm(n)), 1e-12)
+
+    coords_world = _voxel_to_world(np.argwhere(main_mask > 0).astype(float), affine)
+    signed = (coords_world - p0[None, :]) @ n
+    positive = signed[signed >= 0]
+    if positive.size == 0:
+        height = float(np.max(np.abs(signed))) if signed.size else float("nan")
+    else:
+        height = float(np.max(positive))
+
+    max_cross = metrics.get("max_cross_section_diam_mm")
+    axis_major = metrics.get("axis_major_mm")
+    metrics["manual_neck_width_mm"] = round(neck_width, 4)
+    metrics["height_from_neck_plane_mm"] = round(height, 4) if math.isfinite(height) else None
+    metrics["aspect_ratio_manual"] = round(height / neck_width, 6) if neck_width > 0 and math.isfinite(height) else None
+    if max_cross is not None and neck_width > 0:
+        metrics["bottleneck_factor_manual"] = round(float(max_cross) / neck_width, 6)
+    elif axis_major is not None and neck_width > 0:
+        metrics["bottleneck_factor_manual"] = round(float(axis_major) / neck_width, 6)
+    else:
+        metrics["bottleneck_factor_manual"] = None
+    metrics["manual_neck_json"] = str(neck_json)
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +425,12 @@ def main() -> None:
     if mask.sum() == 0:
         raise ValueError("Segmentation mask is empty after thresholding.")
 
-    metrics, verts, faces = _compute_shape_metrics(mask, zooms, affine, args.convex_hull_subsample)
+    metrics, verts, faces, main_mask = _compute_shape_metrics(mask, zooms, affine, args.convex_hull_subsample)
+    if str(args.neck_json).strip():
+        neck_json = Path(args.neck_json).expanduser().resolve()
+        if not neck_json.is_file():
+            raise FileNotFoundError(f"Manual neck JSON not found: {neck_json}")
+        metrics = _add_manual_neck_metrics(metrics, main_mask, affine, neck_json)
 
     # write VTK surface
     vtk_surface_path = out_dir / "surface.vtk"
@@ -307,7 +439,7 @@ def main() -> None:
 
     # write VTK volume mesh
     vtk_volume_path = out_dir / "volume_mesh.vtk"
-    _write_vtk_volume_mesh(mask, zooms, vtk_volume_path)
+    _write_vtk_volume_mesh(main_mask, affine, vtk_volume_path)
     print(f"VTK volume mesh written: {vtk_volume_path}")
 
     # save metrics CSV

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Interactive PyVista aneurysm sphere selector for CoW segmentations.
+"""Interactive PyVista aneurysm box selector for CoW segmentations.
 
-Displays the vessel surface in a 2×2 layout (3D view + three orthogonal
-slices).  Left-click anywhere on the 3D surface to set the sphere centre;
-use keyboard shortcuts to adjust the radius; press  s  to save the result.
+Displays a large 3D vessel surface with an interactive box widget and three
+smaller orthogonal slices on the right. Drag the box handles around the
+aneurysm; press  s  to save the selected mask.
 
 Usage
 -----
@@ -14,10 +14,8 @@ Usage
 
 Keys
 ----
-  left-click          pick sphere centre on the vessel surface
-  = / +               grow sphere radius +1 mm
-  - (minus)           shrink sphere radius -1 mm
-  ] / [               grow / shrink radius by 0.5 mm
+  drag box handles    move/resize selected aneurysm ROI
+  u                   update slice previews after moving the box
   s                   save aneurysm mask to --out (prints JSON summary)
   r                   reset camera (3D view only)
   h                   toggle HUD
@@ -28,13 +26,39 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import nibabel as nib
 import numpy as np
-import pyvista as pv
+
+
+def _configure_pyvista_env() -> None:
+    """Set environment variables before importing PyVista for desktop selection."""
+    os.environ["PYVISTA_OFF_SCREEN"] = "false"
+    os.environ.pop("VTK_DEFAULT_RENDER_WINDOW_OFFSCREEN", None)
+    os.environ.setdefault("PYVISTA_TRAME_SERVER_PROXY_PREFIX", "")
+    os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/neuroflow_matplotlib")
+
+
+_configure_pyvista_env()
+
+try:
+    import pyvista as pv
+except Exception as exc:
+    raise RuntimeError(
+        "select_aneurysm_roi.py requires pyvista. Install it in the active environment "
+        "(for this repo, usually: .venv_neuroflow/bin/python -m pip install pyvista)."
+    ) from exc
+
+pv.OFF_SCREEN = False
+if hasattr(pv, "set_jupyter_backend"):
+    try:
+        pv.set_jupyter_backend(None)
+    except Exception:
+        pass
 
 # flowviz lives in the sibling visualization package
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "visualization"))
@@ -47,7 +71,7 @@ from flowviz.common import build_structured_grid, fit_camera_to_bounds, load_ras
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Interactively select an aneurysm ROI sphere from a CoW segmentation."
+        description="Interactively select an aneurysm ROI box from a CoW segmentation."
     )
     p.add_argument("--seg", required=True, help="Binary segmentation NIfTI (cow_seg_final.nii.gz).")
     p.add_argument("--bg", default="", help="Optional background magnitude NIfTI for slice textures.")
@@ -55,10 +79,9 @@ def _parse_args() -> argparse.Namespace:
         "--out", default="",
         help="Output path for aneurysm mask.  Default: <seg_dir>/aneurysm_roi.nii.gz.",
     )
-    p.add_argument("--radius", type=float, default=5.0, help="Initial sphere radius in mm (default 5.0).")
-    p.add_argument("--radius-step", type=float, default=1.0, help="Radius step per = / - key press (default 1.0 mm).")
+    p.add_argument("--box-size", type=float, default=10.0, help="Initial cubic box side length in mm (default 10.0).")
     p.add_argument("--vessel-opacity", type=float, default=0.55)
-    p.add_argument("--sphere-opacity", type=float, default=0.30)
+    p.add_argument("--roi-opacity", type=float, default=0.92)
     p.add_argument("--background", type=str, default="white")
     p.add_argument("--window-width", type=int, default=1600)
     p.add_argument("--window-height", type=int, default=900)
@@ -93,15 +116,17 @@ def _load_seg(path: Path) -> tuple[np.ndarray, np.ndarray, nib.Nifti1Image]:
 
 
 def _load_bg(path: Path, target_shape: tuple[int, int, int]) -> np.ndarray:
-    """Load background magnitude as float32, crop to target_shape if needed."""
+    """Load background magnitude as float32, crop/pad to target_shape if needed."""
     data, _ = load_ras_canonical(path)
     if data.ndim == 4:
         data = data[..., 0]
     if data.shape[:3] != target_shape:
-        tx = min(int(data.shape[0]), target_shape[0])
-        ty = min(int(data.shape[1]), target_shape[1])
-        tz = min(int(data.shape[2]), target_shape[2])
-        data = data[:tx, :ty, :tz]
+        out = np.zeros(target_shape, dtype=np.float32)
+        tx = min(int(data.shape[0]), int(target_shape[0]))
+        ty = min(int(data.shape[1]), int(target_shape[1]))
+        tz = min(int(data.shape[2]), int(target_shape[2]))
+        out[:tx, :ty, :tz] = data[:tx, :ty, :tz]
+        data = out
     return data.astype(np.float32)
 
 
@@ -113,35 +138,65 @@ def _build_grid(
     return build_structured_grid(mag, zeros, zeros, zeros, affine, mask_t=seg_mask)
 
 
-def _make_ring(center: np.ndarray, radius: float, axis: str, n_pts: int = 72) -> pv.PolyData:
-    """Circle ring in world space perpendicular to the given axis."""
-    t = np.linspace(0.0, 2.0 * np.pi, n_pts, endpoint=False)
-    c0, c1, c2 = float(center[0]), float(center[1]), float(center[2])
-    if axis == "x":
-        pts = np.stack([np.full_like(t, c0), c1 + radius * np.cos(t), c2 + radius * np.sin(t)], axis=1)
-    elif axis == "y":
-        pts = np.stack([c0 + radius * np.cos(t), np.full_like(t, c1), c2 + radius * np.sin(t)], axis=1)
-    else:
-        pts = np.stack([c0 + radius * np.cos(t), c1 + radius * np.sin(t), np.full_like(t, c2)], axis=1)
-    pd = pv.PolyData()
-    pd.points = pts.astype(np.float32)
-    n = len(pts)
-    pd.lines = np.array([[2, i, (i + 1) % n] for i in range(n)], dtype=np.intp).ravel()
-    return pd
+def _center_from_bounds(bounds: tuple[float, float, float, float, float, float]) -> np.ndarray:
+    return np.array(
+        [
+            0.5 * (bounds[0] + bounds[1]),
+            0.5 * (bounds[2] + bounds[3]),
+            0.5 * (bounds[4] + bounds[5]),
+        ],
+        dtype=np.float64,
+    )
+
+
+def _clip_bounds_to_grid(
+    bounds: tuple[float, float, float, float, float, float],
+    grid_bounds: tuple[float, float, float, float, float, float],
+) -> tuple[float, float, float, float, float, float]:
+    x0, x1, y0, y1, z0, z1 = [float(v) for v in bounds]
+    if x0 > x1:
+        x0, x1 = x1, x0
+    if y0 > y1:
+        y0, y1 = y1, y0
+    if z0 > z1:
+        z0, z1 = z1, z0
+    return (
+        max(grid_bounds[0], min(grid_bounds[1], x0)),
+        max(grid_bounds[0], min(grid_bounds[1], x1)),
+        max(grid_bounds[2], min(grid_bounds[3], y0)),
+        max(grid_bounds[2], min(grid_bounds[3], y1)),
+        max(grid_bounds[4], min(grid_bounds[5], z0)),
+        max(grid_bounds[4], min(grid_bounds[5], z1)),
+    )
 
 
 def _compute_aneurysm_mask(
     seg_mask: np.ndarray,
     affine: np.ndarray,
-    center_world: np.ndarray,
-    radius_mm: float,
+    bounds_world: tuple[float, float, float, float, float, float],
 ) -> np.ndarray:
     nx, ny, nz = seg_mask.shape
     i, j, k = np.mgrid[:nx, :ny, :nz]
     ijk1 = np.stack([i, j, k, np.ones_like(i)], axis=-1).astype(np.float64)
     xyz = (ijk1 @ affine.T)[..., :3]
-    dist_sq = ((xyz - center_world) ** 2).sum(axis=-1)
-    return np.logical_and(seg_mask > 0, dist_sq <= radius_mm ** 2).astype(np.uint8)
+    x0, x1, y0, y1, z0, z1 = bounds_world
+    inside = (
+        (xyz[..., 0] >= x0)
+        & (xyz[..., 0] <= x1)
+        & (xyz[..., 1] >= y0)
+        & (xyz[..., 1] <= y1)
+        & (xyz[..., 2] >= z0)
+        & (xyz[..., 2] <= z1)
+    )
+    return np.logical_and(seg_mask > 0, inside).astype(np.uint8)
+
+
+def _mask_centroid_world(seg_mask: np.ndarray, affine: np.ndarray) -> np.ndarray:
+    coords = np.argwhere(seg_mask > 0)
+    if coords.size == 0:
+        raise ValueError("Cannot compute centroid of an empty segmentation.")
+    centroid_ijk = coords.astype(np.float64).mean(axis=0)
+    return (np.append(centroid_ijk, 1.0) @ affine.T)[:3].astype(np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +205,7 @@ def _compute_aneurysm_mask(
 
 @dataclass
 class _State:
-    center_world: np.ndarray
-    radius_mm: float
+    bounds_world: tuple[float, float, float, float, float, float]
     show_hud: bool = True
     camera_initialized: bool = False
     note: str = ""
@@ -185,14 +239,24 @@ class AneurysmSelector:
             raise ValueError("Mask contour is empty — check segmentation threshold.")
         self.vessel_surface = vessel
 
-        self.state = _State(
-            center_world=np.array(vessel.center, dtype=np.float64),
-            radius_mm=float(args.radius),
+        center = _mask_centroid_world(seg_mask, affine)
+        half = 0.5 * max(float(args.box_size), 0.5)
+        initial_bounds = (
+            center[0] - half,
+            center[0] + half,
+            center[1] - half,
+            center[1] + half,
+            center[2] - half,
+            center[2] + half,
         )
+        self.state = _State(bounds_world=_clip_bounds_to_grid(initial_bounds, grid.bounds))
         self.actors: dict[str, object] = {}
+        self.box_widget = None
 
         self.plotter = pv.Plotter(
-            shape=(2, 2),
+            shape="1|3",
+            notebook=False,
+            off_screen=False,
             window_size=(int(args.window_width), int(args.window_height)),
         )
         self.plotter.set_background(args.background)
@@ -207,13 +271,9 @@ class AneurysmSelector:
         if actor is not None:
             self.plotter.remove_actor(actor, reset_camera=False)
 
-    def _sphere_bounds(self) -> tuple[float, float, float, float, float, float]:
-        c, r = self.state.center_world, self.state.radius_mm
-        return (c[0] - r, c[0] + r, c[1] - r, c[1] + r, c[2] - r, c[2] + r)
-
     def _safe_origin(self) -> list[float]:
-        """Clip sphere centre to grid bounds so slice() always intersects."""
-        c = self.state.center_world
+        """Clip box centre to grid bounds so slice() always intersects."""
+        c = _center_from_bounds(self.state.bounds_world)
         b = self.grid.bounds
         return [
             float(max(b[0], min(b[1], c[0]))),
@@ -226,18 +286,20 @@ class AneurysmSelector:
     # -----------------------------------------------------------------------
 
     def _add_hud(self) -> None:
-        self.plotter.subplot(0, 0)
+        self.plotter.subplot(0)
         if not self.state.show_hud:
             self.plotter.add_text("", name="hud", position="upper_left")
             return
-        c = self.state.center_world
-        n_vox = int(_compute_aneurysm_mask(self.seg_mask, self.affine, c, self.state.radius_mm).sum())
+        b = self.state.bounds_world
+        c = _center_from_bounds(b)
+        n_vox = int(_compute_aneurysm_mask(self.seg_mask, self.affine, b).sum())
+        dims = (b[1] - b[0], b[3] - b[2], b[5] - b[4])
         lines = [
             "Aneurysm ROI Selector",
             f"centre  ({c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f}) mm",
-            f"radius  {self.state.radius_mm:.1f} mm   voxels {n_vox}",
+            f"box mm  ({dims[0]:.1f}, {dims[1]:.1f}, {dims[2]:.1f})   voxels {n_vox}",
             f"out  {self.out_path.name}",
-            "left-click: centre  |  = / - : radius  |  s: save  |  r: camera  |  h: HUD",
+            "drag box handles  |  u: update views  |  s: save  |  h: HUD  |  q: quit",
         ]
         if self.state.note:
             lines.append(self.state.note)
@@ -250,8 +312,8 @@ class AneurysmSelector:
     # -----------------------------------------------------------------------
 
     def _update_3d(self) -> None:
-        self.plotter.subplot(0, 0)
-        for key in ("vessel_ctx", "sphere", "roi_hl"):
+        self.plotter.subplot(0)
+        for key in ("vessel_ctx", "roi_hl"):
             self._remove_actor(key)
 
         self.actors["vessel_ctx"] = self.plotter.add_mesh(
@@ -261,27 +323,14 @@ class AneurysmSelector:
             smooth_shading=True,
         )
 
-        sphere_poly = pv.Sphere(
-            center=self.state.center_world.tolist(),
-            radius=self.state.radius_mm,
-            theta_resolution=30,
-            phi_resolution=30,
-        )
-        self.actors["sphere"] = self.plotter.add_mesh(
-            sphere_poly,
-            color="orange",
-            opacity=float(self.args.sphere_opacity),
-            smooth_shading=True,
-        )
-
-        roi_clip = self.vessel_surface.clip_box(bounds=self._sphere_bounds(), invert=False)
+        roi_clip = self.vessel_surface.clip_box(bounds=self.state.bounds_world, invert=False)
         if roi_clip.n_points > 0:
             self.actors["roi_hl"] = self.plotter.add_mesh(
-                roi_clip, color="tomato", opacity=0.92, smooth_shading=True
+                roi_clip, color="tomato", opacity=float(self.args.roi_opacity), smooth_shading=True
             )
 
         self.plotter.add_text(
-            "3D – Aneurysm ROI  (left-click to set centre)",
+            "3D Aneurysm ROI Box",
             position="upper_edge", font_size=10, name="title_3d", color=self.ui_color,
         )
         self.plotter.add_axes()
@@ -299,10 +348,10 @@ class AneurysmSelector:
 
         self._add_hud()
 
-    def _update_slice(self, subplot_rc: tuple[int, int], axis: str, label: str) -> None:
-        self.plotter.subplot(subplot_rc[0], subplot_rc[1])
+    def _update_slice(self, subplot_idx: int, axis: str, label: str) -> None:
+        self.plotter.subplot(subplot_idx)
         self._remove_actor(f"slice_{axis}")
-        self._remove_actor(f"ring_{axis}")
+        self._remove_actor(f"slice_roi_{axis}")
 
         origin = self._safe_origin()
         slc = self.grid.slice(normal=axis, origin=origin)
@@ -313,10 +362,11 @@ class AneurysmSelector:
                 slc, scalars=scalar, cmap=cmap, show_scalar_bar=False, opacity=0.9,
             )
 
-        ring = _make_ring(self.state.center_world, self.state.radius_mm, axis)
-        self.actors[f"ring_{axis}"] = self.plotter.add_mesh(
-            ring, color="orange", line_width=3, style="wireframe",
-        )
+            roi_slc = slc.clip_box(bounds=self.state.bounds_world, invert=False)
+            if roi_slc.n_points > 0:
+                self.actors[f"slice_roi_{axis}"] = self.plotter.add_mesh(
+                    roi_slc, color="tomato", opacity=0.55, show_scalar_bar=False,
+                )
 
         self.plotter.add_text(label, position="upper_edge", font_size=10, name=f"title_{axis}", color=self.ui_color)
         self.plotter.add_axes()
@@ -338,83 +388,92 @@ class AneurysmSelector:
             self.state.camera_initialized = False
         self.state.note = note
         self._update_3d()
-        self._update_slice((0, 1), "x", "Slice YZ  (Sagittal)")
-        self._update_slice((1, 0), "y", "Slice XZ  (Coronal)")
-        self._update_slice((1, 1), "z", "Slice XY  (Axial)")
+        self._update_slice(1, "x", "Slice YZ  (Sagittal)")
+        self._update_slice(2, "y", "Slice XZ  (Coronal)")
+        self._update_slice(3, "z", "Slice XY  (Axial)")
+        self.plotter.render()
+
+    def _refresh_previews(self, note: str = "") -> None:
+        self.state.note = note
+        self._add_hud()
+        self._update_slice(1, "x", "Slice YZ  (Sagittal)")
+        self._update_slice(2, "y", "Slice XZ  (Coronal)")
+        self._update_slice(3, "z", "Slice XY  (Axial)")
+        self.plotter.render()
+
+    def _reset_3d_camera(self) -> None:
+        self.plotter.subplot(0)
+        fit_camera_to_bounds(
+            plotter=self.plotter,
+            bounds=self.vessel_surface.bounds,
+            azimuth_deg=self.args.camera_azimuth,
+            elevation_deg=self.args.camera_elevation,
+            distance_scale=self.args.camera_distance_scale,
+            zoom=self.args.camera_zoom,
+        )
+        self.state.note = "camera reset"
+        self._add_hud()
         self.plotter.render()
 
     # -----------------------------------------------------------------------
     # Interactions
     # -----------------------------------------------------------------------
 
-    def _on_pick(self, *args) -> None:
-        """Accept both (ndarray,) and (PolyData,) callback signatures."""
-        pt = None
-        for arg in args:
-            if isinstance(arg, np.ndarray) and arg.ndim == 1 and len(arg) >= 3:
-                pt = arg[:3].astype(np.float64)
-                break
-            if hasattr(arg, "points") and hasattr(arg, "n_points") and arg.n_points > 0:
-                pt = np.asarray(arg.points[0], dtype=np.float64)
-                break
-            if isinstance(arg, (list, tuple)) and len(arg) >= 3:
-                try:
-                    pt = np.array(arg[:3], dtype=np.float64)
-                    break
-                except Exception:
-                    pass
-        if pt is None:
-            return
-        self.state.center_world = pt
-        self._rebuild(note=f"centre → ({pt[0]:.1f}, {pt[1]:.1f}, {pt[2]:.1f})")
-
-    def _adjust_radius(self, delta: float) -> None:
-        self.state.radius_mm = max(0.5, self.state.radius_mm + delta)
-        self._rebuild(note=f"radius → {self.state.radius_mm:.1f} mm")
+    def _on_box_updated(self, poly: pv.PolyData) -> None:
+        self.state.bounds_world = _clip_bounds_to_grid(tuple(float(v) for v in poly.bounds), self.grid.bounds)
+        self.state.note = "ROI box updated - press u to refresh slice previews or s to save"
 
     def _save(self) -> None:
-        aneurysm = _compute_aneurysm_mask(
-            self.seg_mask, self.affine, self.state.center_world, self.state.radius_mm
-        )
+        aneurysm = _compute_aneurysm_mask(self.seg_mask, self.affine, self.state.bounds_world)
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         out_img = nib.Nifti1Image(aneurysm, self.ref_img.affine, self.ref_img.header)
         nib.save(out_img, str(self.out_path))
-        c = self.state.center_world
+        b = self.state.bounds_world
+        c = _center_from_bounds(b)
         info = {
             "out_path": str(self.out_path),
+            "source_seg_path": str(Path(self.args.seg).expanduser().resolve()),
             "center_world_mm": [round(float(c[0]), 3), round(float(c[1]), 3), round(float(c[2]), 3)],
-            "radius_mm": round(float(self.state.radius_mm), 3),
+            "bounds_world_mm": [round(float(v), 3) for v in b],
+            "box_size_mm": [round(float(b[1] - b[0]), 3), round(float(b[3] - b[2]), 3), round(float(b[5] - b[4]), 3)],
             "foreground_voxels": int(aneurysm.sum()),
         }
+        sidecar_path = self.out_path.with_suffix("")
+        if sidecar_path.suffix == ".nii":
+            sidecar_path = sidecar_path.with_suffix("")
+        sidecar_path = sidecar_path.with_name(sidecar_path.name + "_selection.json")
+        sidecar_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
+        info["selection_json"] = str(sidecar_path)
         print(json.dumps(info, indent=2))
-        self._rebuild(note=f"SAVED  ({info['foreground_voxels']} voxels)")
+        self.state.note = f"SAVED  ({info['foreground_voxels']} voxels)"
 
     def _toggle_hud(self) -> None:
         self.state.show_hud = not self.state.show_hud
-        self._rebuild(note="")
+        self._add_hud()
+        self.plotter.render()
 
     def _register_interactions(self) -> None:
-        self.plotter.subplot(0, 0)
-        self.plotter.enable_point_picking(
-            callback=self._on_pick,
-            use_mesh=False,
-            show_message=True,
-            left_clicking=True,
+        self.plotter.subplot(0)
+        self.box_widget = self.plotter.add_box_widget(
+            callback=self._on_box_updated,
+            bounds=self.state.bounds_world,
+            factor=1.0,
+            rotation_enabled=False,
+            color="yellow",
+            use_planes=False,
+            outline_translation=True,
+            interaction_event="end",
         )
-
-        step = float(self.args.radius_step)
-        self.plotter.add_key_event("=", lambda: self._adjust_radius(+step))
-        self.plotter.add_key_event("+", lambda: self._adjust_radius(+step))
-        self.plotter.add_key_event("-", lambda: self._adjust_radius(-step))
-        self.plotter.add_key_event("]", lambda: self._adjust_radius(+0.5))
-        self.plotter.add_key_event("[", lambda: self._adjust_radius(-0.5))
         self.plotter.add_key_event("s", self._save)
-        self.plotter.add_key_event("r", lambda: self._rebuild(reset_camera=True, note="camera reset"))
+        self.plotter.add_key_event("u", lambda: self._refresh_previews(note="views refreshed"))
+        self.plotter.add_key_event("r", self._reset_3d_camera)
         self.plotter.add_key_event("h", self._toggle_hud)
+        self.plotter.add_key_event("q", lambda: self.plotter.iren.terminate_app())
+        self.plotter.add_key_event("Escape", lambda: self.plotter.iren.terminate_app())
 
     def show(self) -> None:
+        self._rebuild(reset_camera=True, note="ready - drag the yellow box around the aneurysm")
         self._register_interactions()
-        self._rebuild(reset_camera=True, note="ready — left-click to set centre")
         self.plotter.show()
 
 

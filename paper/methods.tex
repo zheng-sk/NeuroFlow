@@ -1,0 +1,543 @@
+% =====================================================================
+%  METHODOLOGY — NeuroFlow
+%  Journal-style replacement section. Few subsections, no code refs.
+%  Covers every step required by the current Results:
+%    - VENC-normalised intraluminal MSE (total + per component)
+%    - Background MSE
+%    - Geometry metrics: Dice, sMSD, HD
+%    - Two input strategies: synthetic-noise and masked-input
+%    - Leave-One-Out Cross-Validation (n=7)
+%  Required preamble packages: amsmath, amssymb, graphicx, booktabs.
+% =====================================================================
+
+\section*{Methodology}
+
+\subsection*{Study population and 4D Flow MRI acquisition}
+
+Seven patients with cerebrovascular pathology were prospectively
+enrolled and scanned on two MRI platforms within a single imaging
+session: a clinical 3\,T Siemens system and an investigational 7\,T
+Siemens system. For each subject, paired 4D Flow MRI studies were
+acquired on both scanners to minimise inter-session physiological
+variability. Each acquisition produced four co-registered volumetric
+time series --- a magnitude image and three directional phase-contrast
+velocity maps encoding velocity along the feet--head ($u$),
+left--right ($v$), and anterior--posterior ($w$) axes
+\cite{markl2012,dyverfeldt2015}. The 3\,T series covered between nine
+and fourteen cardiac frames, while the 7\,T series spanned ten to
+fifteen frames, all encoded with a common velocity-encoding sensitivity
+of $\mathrm{VENC} = 0.9$\,\textnormal{m/s} across both field strengths
+\cite{bock2010}. Raw data were converted from DICOM to NIfTI, preserving
+the original phase representation and applying the LPS\,$\rightarrow$\,RAS
+sign convention so that the three velocity components retained their
+physical orientation in the scanner frame.
+
+% FIGURE — Acquisition and pairing overview.
+% Place a multi-panel figure illustrating the dual-field-strength
+% acquisition protocol: representative axial slices of the paired 3T and
+% 7T magnitude (same anatomical location), sagittal MIPs of each
+% acquisition to convey 3D coverage, and a schematic of the within-session
+% pairing.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Acquisition and pairing overview. Paired 3\,T and 7\,T 4D
+    Flow MRI acquired within a single imaging session for each subject.}
+    \label{fig:acquisition}
+\end{figure}
+
+\subsection*{Motion correction and multi-field-strength registration}
+
+Cardiac-gated 4D Flow MRI is intrinsically sensitive to bulk motion
+between cardiac phases. Intra-scan motion was corrected by estimating
+rigid-body transformations $\{\mathbf{T}_t^{\text{rigid}}\}_{t=1}^{T}$
+from the magnitude time series relative to a reference frame using
+normalised mutual information \cite{maes1997}, and applying each
+transformation consistently to the paired velocity volume,
+\begin{equation}
+    \mathbf{V}_t^{\text{corr}}
+    = \mathbf{T}_t^{\text{rigid}} \circ \mathbf{V}_t^{\text{raw}},
+    \qquad t = 1, \ldots, T,
+\end{equation}
+followed by a vector-aware reorientation of the velocity components. To
+bring the 7\,T volumes into the geometric space of the 3\,T
+acquisitions, a temporal maximum-intensity projection
+$\mathrm{MIP}(\mathbf{x}) = \max_t M_t(\mathbf{x})$ was first computed
+for each magnitude series to obtain a static, high-contrast angiographic
+representation. A rigid alignment followed by an affine refinement,
+both optimised with normalised mutual information, defined the
+composite transformation $\mathbf{T}^{\text{affine}}_{7T \to 3T}$, which
+was then applied to the full 4D velocity volume so that
+\begin{equation}
+    \mathbf{V}_{7T \to 3T}^{\text{reg}}(\mathbf{x}, t)
+    = \mathbf{T}^{\text{affine}}_{7T \to 3T} \circ
+      \mathbf{V}_{7T}^{\text{corr}}(\mathbf{x}, t),
+\end{equation}
+establishing voxel-level correspondence between the paired 3\,T and
+7\,T data as required for supervised learning.
+
+% FIGURE — Registration pipeline.
+% Multi-panel figure: (a) temporal MIP of a 3T magnitude image; (b)
+% temporal MIP of the corresponding 7T magnitude image before
+% registration; (c) 7T MIP after rigid + affine registration into 3T
+% space, with a checkerboard or difference overlay to demonstrate
+% alignment quality; (d) optional displacement-magnitude field.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Registration pipeline. Temporal MIPs of the paired 3\,T and
+    7\,T magnitude before and after the rigid + affine inter-scan
+    registration; the checkerboard overlay illustrates the resulting
+    voxel-level alignment.}
+    \label{fig:registration}
+\end{figure}
+
+\subsection*{Angiographic volume synthesis and vascular masking}
+
+A voxel-level vascular probability map was constructed by combining
+two complementary contrast sources. A 4D speed image was obtained from
+the VENC-scaled velocity vector,
+\begin{equation}
+    S(\mathbf{x}, t) = \sqrt{
+        \left(\tfrac{u(\mathbf{x},t)}{\mathrm{VENC}}\right)^2 +
+        \left(\tfrac{v(\mathbf{x},t)}{\mathrm{VENC}}\right)^2 +
+        \left(\tfrac{w(\mathbf{x},t)}{\mathrm{VENC}}\right)^2},
+\end{equation}
+and projected over the cardiac cycle as
+$\bar{S}(\mathbf{x}) = \max_t S(\mathbf{x},t)$. The temporal MIP of the
+magnitude and $\bar{S}$ were each min--max normalised and their
+voxel-wise product
+$\mathcal{A}(\mathbf{x}) = \hat{\mathrm{MIP}}(\mathbf{x}) \cdot
+\hat{S}(\mathbf{x})$ defined a synthetic angiographic volume in which
+voxels that are both bright in magnitude and fast in flow are reinforced
+while static tissue and background noise are suppressed.
+
+The Circle-of-Willis (CoW) mask used throughout this work was generated
+on the 7\,T magnitude data, taking advantage of their substantially
+higher signal-to-noise ratio. For every subject, an initial foreground
+estimate was obtained by adaptive intensity thresholding of the 7\,T
+maximum-intensity projection with connected-component cleanup, then
+refined by an ensemble nnU-Net inference and finally corrected by an
+expert reviewer on a slice-by-slice basis. The resulting manually
+corrected mask defined the gold-standard CoW segmentation in the 7\,T
+geometry; transferring it to the 3\,T frame via the registration above
+yielded the binary mask $\mathcal{M}(\mathbf{x})$ used as the
+supervision and evaluation region.
+
+Two nnU-Net models with the residual-encoder \emph{ResEnc-M} backbone
+\cite{isensee2021nnunet} were then trained on these corrected labels
+with the skeleton-recall loss formulation introduced by the
+TopCoW-2024 winning solution \cite{yang2023topcow,aydin2024topcow}.
+The objective combined Dice, skeleton-recall, and cross-entropy terms,
+\begin{equation}
+    \mathcal{L}_{\text{seg}}
+    = w_{D}\,\mathcal{L}_{\text{Dice}}
+    + w_{S}\,\mathcal{L}_{\text{SkelRec}}
+    + w_{C}\,\mathcal{L}_{\text{CE}},
+    \qquad w_{D}=w_{S}=w_{C}=1,
+\end{equation}
+where the skeleton-recall term is computed on the fly from a
+differentiable topological skeletonisation of the ground-truth mask.
+Both 2D and 3D-full-resolution configurations were trained over five
+cross-validation folds and combined as a 2D\,$+$\,3D ensemble at
+inference. The first model operates on the temporal maximum projection
+of the native 3\,T magnitude (mean cross-validated Dice~$0.83$), and a
+second model was trained on the same projection after isotropic
+$0.5{\times}$ downsampling (mean Dice~$0.76$), matching the input
+geometry of the super-resolution task introduced below. The same
+ensemble is used twice in this work: first, at training time, to
+propagate the 7\,T-derived gold-standard mask through the 3\,T,
+$0.5{\times}$\,3\,T, and 7\,T-in-3\,T volumes that form the supervised
+pairs; and second, at evaluation time, to re-segment each predicted
+4D Flow volume so that its CoW geometry can be compared against the
+subject-specific 7\,T reference mask.
+
+% FIGURE — Angiographic synthesis and vascular masking.
+% Two-row composite: top row shows axial and coronal views of (a)
+% normalised temporal MIP of the magnitude, (b) normalised temporal speed
+% projection, and (c) the synthesised angiographic product A(x); bottom
+% row shows the ground-truth provenance pipeline on a single 7T MIP slice
+% (hybrid threshold -> bootstrap nnU-Net -> manually corrected mask) and
+% a small donut chart with the 5-fold cross-validated Dice for both
+% segmentation models (3T and 0.5 x 3T).
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Angiographic volume synthesis and vascular masking. The
+    synthesised angiographic field $\mathcal{A}(\mathbf{x})$ combines
+    magnitude and speed evidence; the gold-standard CoW mask is derived
+    from the 7\,T magnitude via a hybrid threshold, bootstrap nnU-Net,
+    and manual correction, and a ResEnc-M U-Net trained with the
+    skeleton-recall loss propagates this mask to the 3\,T and
+    $0.5{\times}3$\,T inputs and to the predicted volumes used in
+    evaluation.}
+    \label{fig:segmentation}
+\end{figure}
+
+\subsection*{Network architecture: CBAM-DNS and CBAM-SupRes}
+
+The core predictive backbone is an adapted SR4DFlowNet
+\cite{ferdian2020,elahmar2023}, a 3D fully convolutional residual
+network inspired by enhanced residual architectures for super-resolution
+\cite{lim2017edsr}, augmented with a Convolutional Block Attention
+Module (CBAM) \cite{woo2018cbam} inserted between the low-resolution
+residual stack and the upsampling stage. We instantiate the same
+backbone in two task-specific forms used throughout the results:
+\textbf{CBAM-DNS} for same-resolution 3\,T$\to$7\,T domain translation
+($r=1$) and \textbf{CBAM-SupRes} for joint domain translation and
+twofold super-resolution ($r=2$).
+
+The model accepts six scalar input channels per voxel --- the three
+VENC-normalised velocity components $(u, v, w)$ and their
+magnitude-weighted counterparts $(u_m, v_m, w_m)$ --- and internally
+derives three auxiliary fields that summarise the local kinematics and
+phase-contrast signal:
+\begin{equation}
+    S = \sqrt{u^{2}+v^{2}+w^{2}},
+    \qquad
+    M = \sqrt{u_m^{2}+v_m^{2}+w_m^{2}},
+    \qquad
+    \mathrm{PCMR} = M \cdot S.
+\end{equation}
+Velocity and physical channels are processed in two dedicated
+convolutional streams of two $3{\times}3{\times}3$ layers with 64
+feature maps, symmetric padding, and ReLU activation: a phase stream
+operating on $(u,v,w)$ to extract flow-kinematic features, and a
+phase-contrast stream operating on $(\mathrm{PCMR}, M, S)$ to extract
+signal-intensity features. Their feature maps are concatenated and
+fused by a $1{\times}1{\times}1$ projection followed by a
+$3{\times}3{\times}3$ refinement convolution.
+
+The fused representation is propagated through $N_{LR}=8$ pre-activation
+residual blocks at the input resolution \cite{he2016resnet},
+\begin{equation}
+    \mathbf{F}^{(l+1)} = \mathbf{F}^{(l)}
+        + f\!\left(\mathbf{F}^{(l)};\, \Theta^{(l)}\right),
+\end{equation}
+after which the CBAM module sequentially applies channel and spatial
+attention to re-weight feature responses before upsampling. Channel
+attention is obtained from global average- and max-pooled descriptors
+processed by a shared two-layer multilayer perceptron, while spatial
+attention is computed from the channel-wise pooled feature maps and a
+$7{\times}7{\times}7$ convolution; the two attention maps are applied
+multiplicatively in sequence. Spatial upsampling is then performed by
+trilinear interpolation with scale factor $r$, followed by $N_{HR}=4$
+high-resolution residual blocks operating at the target resolution. The
+network terminates in three independent two-layer convolutional heads
+that emit the reconstructed velocity components
+$(\hat{u}, \hat{v}, \hat{w})$, together with an additional head that
+predicts the reconstructed magnitude $\hat{M}$. Within this common
+backbone, CBAM-DNS uses $r=1$ and trains under the same-resolution
+domain-translation setting, whereas CBAM-SupRes uses $r=2$ and absorbs
+both the cross-field-strength translation and the spatial upsampling
+into a single forward pass.
+
+% FIGURE — Network architecture diagram.
+% Full architectural diagram of CBAM-DNS / CBAM-SupRes: dual-stream
+% input (phase and PC paths), feature concatenation and 1x1 fusion, the
+% low-resolution residual stack, the CBAM channel + spatial attention
+% block, the trilinear upsampling block (r = 1 or 2), the high-resolution
+% residual stack, and the velocity and magnitude output heads. Inset
+% showing the CBAM module structure.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Network architecture underlying CBAM-DNS ($r=1$) and
+    CBAM-SupRes ($r=2$). The phase and phase-contrast streams are fused,
+    refined by $N_{LR}=8$ residual blocks, re-weighted by a CBAM
+    channel-and-spatial attention module, upsampled by trilinear
+    interpolation with factor $r$, and refined again by $N_{HR}=4$
+    high-resolution residual blocks before three velocity heads and an
+    optional magnitude head emit the reconstructed volume.}
+    \label{fig:architecture}
+\end{figure}
+
+\subsection*{Loss function and evaluation metrics}
+
+Training minimises a composite, mask-aware loss that jointly penalises
+intraluminal velocity error, magnitude error, and texture irregularity
+in the extraluminal background,
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{vel}}
+                + \lambda_{M}\,\mathcal{L}_{\text{mag}}
+                + \lambda_{\text{TV}}\,\mathcal{L}_{\text{TV}}.
+\end{equation}
+For each predicted velocity component
+$\hat{q}\in\{\hat{u},\hat{v},\hat{w}\}$ and its VENC-normalised target
+$q^{*}=q/\mathrm{VENC}$, the per-voxel squared error
+$\epsilon_q(\mathbf{x})=(\hat{q}(\mathbf{x})-q^{*}(\mathbf{x}))^{2}$ is
+split into a masked fluid term and a complementary background term,
+\begin{equation}
+    \mathcal{L}^{q}_{\text{fluid}}
+    = \frac{\sum_{\mathbf{x}} \epsilon_q(\mathbf{x})\,\mathcal{M}(\mathbf{x})}
+           {\sum_{\mathbf{x}} \mathcal{M}(\mathbf{x}) + \varepsilon},
+    \qquad
+    \mathcal{L}^{q}_{\text{bg}}
+    = \frac{\sum_{\mathbf{x}} \epsilon_q(\mathbf{x})\,(1-\mathcal{M}(\mathbf{x}))}
+           {\sum_{\mathbf{x}} (1-\mathcal{M}(\mathbf{x})) + \varepsilon},
+\end{equation}
+and aggregated as
+$\mathcal{L}_{\text{vel}}
+ = \sum_{q\in\{u,v,w\}}
+   (\mathcal{L}^{q}_{\text{fluid}}+\lambda_{\text{bg}}\,\mathcal{L}^{q}_{\text{bg}})$
+with background weight $\lambda_{\text{bg}}=0.1$, reflecting the
+clinical priority of accurate intraluminal velocity quantification.
+$\mathcal{L}_{\text{mag}}$ is the analogous masked mean-squared error on
+the per-frame min--max-normalised magnitude with magnitude weight
+$\lambda_{M}=1$. To suppress spurious high-frequency texture in
+extraluminal regions, an isotropic total-variation penalty
+\cite{rudin1992tv} is applied exclusively to voxel pairs that lie
+outside the mask along each Cartesian axis,
+\begin{equation}
+    \mathcal{L}_{\text{TV}}
+    = \sum_{q}\sum_{d\in\{x,y,z\}}
+      \frac{\sum_{\mathbf{x}} \lvert
+      \hat{q}(\mathbf{x}+\mathbf{e}_d)-\hat{q}(\mathbf{x}) \rvert\,
+      \Omega(\mathbf{x},d)}
+           {\sum_{\mathbf{x}} \Omega(\mathbf{x},d) + \varepsilon},
+\end{equation}
+where
+$\Omega(\mathbf{x},d) =
+ (1-\mathcal{M}(\mathbf{x}))\,(1-\mathcal{M}(\mathbf{x}+\mathbf{e}_d))$
+is the joint outside indicator and
+$\lambda_{\text{TV}}=10^{-5}$ provides a gentle smoothness prior
+without over-regularising the extraluminal signal.
+
+Image-reconstruction quality was assessed by VENC-normalised
+mean-squared error (MSE) of the predicted velocity field. The
+intraluminal velocity error was computed inside the CoW mask both
+as a total
+\begin{equation}
+    \mathrm{MSE}_{\text{vel}}
+    = \frac{\sum_{\mathbf{x}}
+            \sum_{q\in\{u,v,w\}}\!\!
+            (\hat{q}(\mathbf{x})-q^{*}(\mathbf{x}))^{2}\,
+            \mathcal{M}(\mathbf{x})}
+           {\sum_{\mathbf{x}}\mathcal{M}(\mathbf{x}) + \varepsilon}
+\end{equation}
+and per component
+\begin{equation}
+    \mathrm{MSE}_{q}
+    = \frac{\sum_{\mathbf{x}}
+            (\hat{q}(\mathbf{x})-q^{*}(\mathbf{x}))^{2}\,
+            \mathcal{M}(\mathbf{x})}
+           {\sum_{\mathbf{x}}\mathcal{M}(\mathbf{x}) + \varepsilon},
+    \qquad q \in \{u,v,w\},
+\end{equation}
+and an analogous extraluminal quantity --- the background MSE
+$\mathrm{MSE}_{\text{bg}}$ --- was obtained by substituting
+$\mathcal{M}$ with $1-\mathcal{M}$ in the numerator and denominator.
+Both metrics are reported in units of $10^{-3}$ in the
+VENC-normalised range.
+
+Vascular-geometry fidelity was evaluated by re-segmenting each
+predicted 4D Flow volume with the same ResEnc-M ensemble described
+above and comparing the resulting binary CoW mask $P$ to the
+subject-specific 7\,T reference mask $R$ in the 3\,T geometry. Volumetric
+overlap was quantified by the Dice score,
+\begin{equation}
+    \mathrm{Dice}(P,R)
+    = \frac{2\lvert P \cap R \rvert}{\lvert P \rvert + \lvert R \rvert}.
+\end{equation}
+Boundary agreement was quantified in physical units from
+triangulated surfaces $S_P$ and $S_R$ extracted by marching cubes.
+Letting
+$d(p,S_R) = \min_{r \in S_R} \lVert p - r \rVert_{2}$ denote the
+directed point-to-surface distance, the symmetric mean surface
+distance is
+\begin{equation}
+    \mathrm{sMSD}(P,R)
+    = \tfrac{1}{2}\!\left(
+        \frac{1}{|S_P|}\sum_{p\in S_P} d(p,S_R)
+        + \frac{1}{|S_R|}\sum_{r\in S_R} d(r,S_P)
+      \right),
+\end{equation}
+and the worst-case boundary mismatch is captured by the Hausdorff
+distance,
+\begin{equation}
+    \mathrm{HD}(P,R)
+    = \max\!\left(
+        \max_{p\in S_P} d(p,S_R),\;
+        \max_{r\in S_R} d(r,S_P)
+      \right).
+\end{equation}
+Dice is reported as higher-is-better in $[0,1]$; sMSD and HD are
+reported in millimetres and lower-is-better. Together, these metrics
+quantify both the volumetric overlap and the boundary fidelity of the
+reconstructed vascular geometry that the velocity field implies.
+
+% FIGURE — Loss partition and evaluation regions.
+% Conceptual diagram: a representative axial slice with the binary mask
+% M partitioning the volume into a fluid (intraluminal) region and an
+% extraluminal background; arrows pointing from each region to the
+% corresponding loss term (L_vel inside M, L_TV outside M, L_mag inside
+% M for the magnitude channel). A second small panel shows the
+% prediction-vs-reference surfaces S_P and S_R schematically with arrows
+% illustrating sMSD and HD.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Loss partition and evaluation regions. The CoW mask
+    $\mathcal{M}$ separates fluid voxels (where
+    $\mathcal{L}_{\text{vel}}$ and $\mathcal{L}_{\text{mag}}$ are
+    evaluated and intraluminal MSE is reported) from extraluminal voxels
+    (where $\mathcal{L}_{\text{TV}}$ and background MSE are computed).
+    Geometry metrics are obtained from the predicted and reference
+    surfaces $S_P$ and $S_R$.}
+    \label{fig:loss}
+\end{figure}
+
+\subsection*{Data preparation, training, and inference}
+
+Prior to network input, all velocity components were normalised by the
+global VENC,
+\begin{equation}
+    \tilde{q} = q/\mathrm{VENC}_{\text{global}},
+    \qquad
+    \mathrm{VENC}_{\text{global}}
+    = \max(\mathrm{VENC}_u,\mathrm{VENC}_v,\mathrm{VENC}_w),
+\end{equation}
+yielding values approximately in $[-1,1]$, and magnitude images were
+rescaled to $[0,1]$ by per-frame min--max scaling
+\cite{cardoso2022monai}. In both task configurations the reconstruction
+target was the registered 7\,T velocity and magnitude volume after
+masking by $\mathcal{M}$,
+$\mathbf{V}^{*}(\mathbf{x},t)=\mathbf{V}^{\text{reg}}_{7T}(\mathbf{x},t)\,
+\mathcal{M}(\mathbf{x})$, confining supervision to the haemodynamically
+relevant intraluminal region. CBAM-DNS was trained at native 3\,T
+resolution ($r=1$), with $\mathbf{V}^{\text{reg}}_{3T}$ as input and
+$\mathbf{V}^{*}$ as target, so that the network simultaneously bridges
+the SNR gap between the two field strengths, corrects residual contrast
+differences arising from distinct hardware and reconstruction chains,
+and recovers finer vascular detail visible only at 7\,T. CBAM-SupRes
+was trained with a spatially downsampled input
+$\mathbf{V}^{\mathrm{LR}}_{3T}(\mathbf{x},t)
+ = \mathcal{Z}_{0.5}[\mathbf{V}^{\text{reg}}_{3T}(\mathbf{x},t)]$,
+obtained by isotropic trilinear downsampling, and the same masked
+7\,T target, combining $r=2$ upsampling and domain translation in a
+single end-to-end pass.
+
+Each task was trained in two complementary input strategies that are
+reported side by side in the results. In the \emph{synthetic-noise}
+strategy, the network sees the original 3\,T (or downsampled 3\,T)
+volume with synthetic non-vascular noise injected into the extraluminal
+region during training, and operates without a mask at inference time.
+In the \emph{masked-input} strategy, the predicted CoW segmentation is
+used to zero the extravascular signal of the 3\,T input prior to the
+network for both training and inference; no noise augmentation is then
+applied. The synthetic-noise strategy targets mask-free deployment and
+emphasises robustness to background patterns, whereas the masked-input
+strategy emphasises geometric fidelity by removing the extraluminal
+domain shift altogether.
+
+Two augmentation strategies were applied online. Vector-aware geometric
+augmentation drew random 90\textdegree{} rotations from the planes
+$\{xy,xz,yz\}$ with multiplicities $\{1,2,3\}$ at probability $0.5$,
+and the three velocity components were permuted and sign-corrected as
+a proper vector field while the mask and magnitude were rotated as
+scalar fields. Synthetic non-vascular noise augmentation (used in the
+synthetic-noise strategy only) injected per-batch amplitudes drawn
+from one of several statistical distributions (zero-mean normal,
+Student-$t$, Laplace, skew-normal, or generalised normal) into the
+extraluminal region of the input,
+\begin{equation}
+    \tilde{\mathbf{V}}^{\mathrm{LR}}(\mathbf{x})
+    = \mathbf{V}^{\mathrm{LR}}(\mathbf{x})
+      + \eta(\mathbf{x})\,(1-\mathcal{M}(\mathbf{x})),
+\end{equation}
+encouraging mask-focused learning and preventing the network from
+overfitting to specific noise patterns in the background.
+
+Training was conducted on three-dimensional patches of size $16^{3}$
+voxels in the input space, which corresponded to $32^{3}$ voxels in
+the output space for the $\times 2$ configuration
+\cite{peiffer2024patch}. For each case, 64 patches were drawn per epoch
+with one cardiac frame selected uniformly at random per sample; 16
+deterministic centre patches were used for validation, and an optional
+minimum-mask-coverage criterion ensured that each sampled patch
+contained a sufficient proportion of vascular voxels. Optimisation used
+Adam \cite{kingma2015adam} with an initial learning rate of
+$2{\times}10^{-4}$ and weight decay $5{\times}10^{-7}$. A
+ReduceLROnPlateau scheduler monitored the validation loss with a
+patience of ten epochs and halved the learning rate (floor
+$10^{-6}$), and an early-stopping criterion with patience twenty
+epochs, complemented by an overfitting detector that terminated
+training when the training loss kept decreasing while the validation
+loss increased for fifteen consecutive epochs, prevented over-fitting.
+Models were trained with mini-batches of four samples; the checkpoint
+attaining the lowest validation loss was retained for inference.
+
+All results are reported under \emph{leave-one-out cross-validation}
+(LOOCV) at the patient level. With $n=7$ subjects, seven independent
+folds were trained: in each fold, one subject was held out as the test
+case and the remaining six formed the training set; no subject
+appeared in both subsets. The metrics reported in the results are
+mean $\pm$ standard deviation across the seven held-out subjects.
+
+% FIGURE — Task configurations and LOOCV.
+% Two-panel schematic. (a) The two task configurations: x1 maps the
+% registered 3T volume to the masked 7T target at the same resolution;
+% x2 first downsamples the 3T input by a factor of 0.5 with trilinear
+% interpolation and then maps it to the masked 7T target at full
+% resolution via the r = 2 network. (b) A 7-row LOOCV chart: in each row
+% one subject is highlighted red (test), one yellow (validation), and
+% five blue (training).
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Task configurations and patient-level leave-one-out
+    cross-validation. (a)~$\times 1$ domain translation and $\times 2$
+    joint domain translation and super-resolution share the same
+    backbone and target. (b)~Seven LOOCV folds; one subject is held out
+    as test and the remaining six train the model in every fold.}
+    \label{fig:tasks_loocv}
+\end{figure}
+
+At inference time, full 4D volumes were reconstructed with an
+overlap-aware sliding-window strategy
+\cite{cardoso2022monai,ronneberger2015unet}. For each time frame the
+volume was partitioned into overlapping $16^{3}$ patches with $25\%$
+overlap, and predicted patches were recombined by Gaussian-weighted
+blending at overlapping boundaries,
+\begin{equation}
+    \hat{\mathbf{V}}(\mathbf{x})
+    = \frac{\sum_{k} w_{k}(\mathbf{x})\,\hat{\mathbf{V}}_{k}(\mathbf{x})}
+           {\sum_{k} w_{k}(\mathbf{x})},
+\end{equation}
+where $w_k(\mathbf{x})$ is a Gaussian window centred on patch $k$,
+eliminating patch-edge discontinuities. The reconstructed volumes were
+masked by $\mathcal{M}$ to constrain the output to the CoW region for
+the intraluminal metrics, and the predicted velocity components were
+finally rescaled to physical units via
+$\hat{q}_{\text{phys}} = \hat{q}\cdot\mathrm{VENC}$. For the geometry
+evaluation, the reconstructed magnitude (and, when unavailable, the
+synthesised angiographic volume of Figure~\ref{fig:segmentation}) was passed
+through the ResEnc-M segmentation ensemble to produce the predicted
+binary CoW mask $P$ that was subsequently compared against the
+subject-specific 7\,T reference $R$ to obtain Dice, sMSD, and HD.
+
+% FIGURE — Inference and qualitative reconstruction.
+% Comprehensive figure showing, on a representative held-out subject:
+% (a) velocity vector maps (mid-systolic frame) for the 3T input, the 7T
+% reference, and the network prediction for the x1 and x2 configurations
+% on axial slices through the Circle of Willis; (b) voxel-wise relative
+% speed error maps overlaid on the angiographic volume; (c) 3D
+% streamline plots of the reconstructed velocity field within the CoW
+% mask; (d) the re-segmented predicted CoW surface (S_P) overlaid on the
+% reference surface (S_R) for the same subject. Zoomed inset on the MCA
+% bifurcation recommended.
+\begin{figure}[!htbp]
+    \centering
+    % Insert figure here
+    \caption{Inference and qualitative reconstruction on a
+    representative held-out subject. Velocity vector maps, voxel-wise
+    error maps, and 3D streamlines for the $\times 1$ and $\times 2$
+    configurations, together with the re-segmented predicted CoW
+    surface overlaid on the 7\,T reference surface used to compute
+    Dice, sMSD, and HD.}
+    \label{fig:inference}
+\end{figure}
+
+% =====================================================================
+%  END OF METHODOLOGY SECTION
+% =====================================================================

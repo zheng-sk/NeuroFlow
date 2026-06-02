@@ -1,0 +1,102 @@
+FIGURE 7 — INFERENCE AND QUALITATIVE RECONSTRUCTION
+===================================================
+LaTeX label: fig:inference
+Status: designer-only (built from real LOOCV predictions).
+Recommended size: full-page, ≈1800 × 2200 px, 300 dpi.
+Placement: at the end of the Methodology, immediately before the
+Results section.
+
+PURPOSE
+-------
+Make the reconstruction quality tangible. On a single held-out
+subject from the LOOCV protocol, show side-by-side velocity maps,
+voxel-wise error maps, 3D streamlines, and the re-segmented
+predicted CoW surface overlaid on the 7T reference surface used to
+compute Dice / sMSD / HD. The figure connects the methodology to
+every metric in the Results tables.
+
+LAYOUT — FOUR SUB-PANELS
+------------------------
+Panel (a) — Velocity vector maps at mid-systole (top row, ~40 %
+height):
+  Three columns × three rows: rows are axial, coronal, sagittal
+  through the same anatomical landmark (e.g. the MCA bifurcation);
+  columns are
+    Col 1 "3T input" — velocity vectors drawn as small arrows
+    coloured by speed (viridis colormap) overlaid on the grayscale
+    magnitude.
+    Col 2 "Network prediction" — same visualisation for the CBAM-DNS
+    (× 1) AND a small inset showing CBAM-SupRes (× 2) so that both
+    task configurations are represented.
+    Col 3 "7T reference" — same visualisation for the registered
+    7T volume.
+  Shared horizontal colorbar showing speed range in cm/s. Yellow
+  arrows on Col 2 pointing to a small vessel that is correctly
+  recovered.
+
+Panel (b) — Voxel-wise relative speed error maps (middle row,
+~20 % height):
+  Two columns showing |Prediction − Reference| / |Reference| inside
+  the CoW mask for the × 1 (CBAM-DNS) and × 2 (CBAM-SupRes) outputs,
+  overlaid on the angiographic volume A(x). Shared colorbar in the
+  range [0, 1] (clipped per voxel as described in the Methods).
+
+Panel (c) — 3D streamline rendering (bottom-left, ~25 % width,
+~40 % height):
+  Streamlines of the predicted velocity field within the CoW mask,
+  coloured by speed, integrated from seed points distributed along
+  the proximal MCA and ACA. A second smaller streamline render
+  immediately below shows the 7T reference streamlines for the same
+  seed set. Camera pose identical between the two renders.
+
+Panel (d) — Re-segmented predicted vs reference CoW surface
+(bottom-right, ~75 % width, ~40 % height):
+  3D rendering of two overlaid surfaces for the SAME subject:
+    - The 7T reference surface S_R in solid neutral grey.
+    - The predicted surface S_P (obtained by passing the predicted
+      magnitude through the ResEnc-M ensemble) in translucent red.
+  A zoomed inset focuses on the MCA bifurcation. Annotate the sub-
+  panel with the actual Dice, sMSD (mm) and HD (mm) for that
+  subject as a small white-on-dark text card in the corner so the
+  reader can map the visualisation directly onto the corresponding
+  Results-table row.
+
+CAPTION DRAFT
+-------------
+"Inference and qualitative reconstruction on a representative
+held-out subject from the LOOCV protocol. (a) Mid-systolic velocity
+vector maps for the 3T input, the CBAM-DNS / CBAM-SupRes prediction,
+and the 7T reference in three orthogonal planes through the MCA
+bifurcation. (b) Voxel-wise relative-speed error inside the CoW
+mask for the × 1 and × 2 outputs, overlaid on the angiographic
+volume. (c) 3D streamlines of the reconstructed velocity field
+compared against the 7T reference. (d) The re-segmented predicted
+CoW surface (red) overlaid on the 7T reference surface (grey);
+per-subject Dice, sMSD and HD are reported on the inset card and
+match the corresponding Results-table row."
+
+TYPOGRAPHY & PALETTE
+--------------------
+Sans-serif. Velocity colormap: viridis. Error map: magma or inferno.
+Streamlines coloured by speed (viridis). Surfaces: neutral grey
+reference, red (#B85C6B) prediction. Yellow arrows for callouts.
+
+DATA NEEDED
+-----------
+- One representative LOOCV held-out subject's:
+  · 3T input volume,
+  · CBAM-DNS (× 1) prediction,
+  · CBAM-SupRes (× 2) prediction,
+  · Registered 7T reference,
+  · Angiographic volume A(x),
+  · CoW mask M,
+  · Re-segmented predicted CoW surface S_P,
+  · 7T reference surface S_R,
+  · The per-subject Dice, sMSD and HD values from the LOOCV table.
+
+NOT TO INCLUDE
+--------------
+No patient identifiers, no scanner serials. Pick a subject for which
+the per-metric values fall near the cohort mean so the figure is
+qualitatively representative rather than cherry-picked; note that
+selection criterion in the figure caption draft if needed.

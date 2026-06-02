@@ -1,0 +1,76 @@
+FIGURE 6 — TASK CONFIGURATIONS AND LEAVE-ONE-OUT CROSS-VALIDATION
+=================================================================
+LaTeX label: fig:tasks_loocv
+Status: pure schematic.
+Recommended size: 2-column, ≈1800 × 1000 px, 300 dpi.
+Placement: after the data-preparation / training paragraphs.
+
+PURPOSE
+-------
+Explain in a single figure (i) the two task configurations that share
+the same backbone — same-resolution domain translation (×1) and
+joint domain translation + super-resolution (×2) — and (ii) the
+patient-level leave-one-out cross-validation protocol that produced
+the n = 7 numbers reported in the Results.
+
+LAYOUT — TWO STACKED PANELS
+---------------------------
+Panel (a) — Task configurations (top, ~55 % height):
+  Two horizontal "lanes" stacked vertically; both share the same
+  start (3T input) and target (masked 7T).
+  Upper lane labelled "× 1 — CBAM-DNS (same resolution)":
+    Flow: NIfTI cube "V^reg_3T" → arrow into a CBAM network icon
+    "CBAM-DNS  r = 1" → arrow into NIfTI cube "V̂"; arrow from V̂
+    to a comparison icon (≈) versus a NIfTI cube "V*  =  V^reg_7T · M".
+    Add tiny tensor-size annotations: input 64³, output 64³.
+  Lower lane labelled "× 2 — CBAM-SupRes (joint translation + SR)":
+    Flow: NIfTI cube "V^reg_3T" → arrow with a small "× 0.5
+    trilinear" callout → NIfTI cube "V^LR_3T" (half the original
+    grid) → arrow into a CBAM network icon "CBAM-SupRes  r = 2"
+    with an explicit upsample triangle inside → output NIfTI cube
+    "V̂" → comparison with "V* = V^reg_7T · M". Add tensor sizes:
+    input 32³, output 64³.
+  A thin caption strip below the panel reads:
+    "Both tasks use the same backbone and the same masked 7T target;
+     they differ only in the input resolution and in the upsampling
+     factor r."
+
+Panel (b) — Patient-level LOOCV (bottom, ~45 % height):
+  A 7-row × 7-column grid of small coloured squares. Columns are
+  patient IDs P1–P7 across the top; rows are folds (Fold 0 – Fold 6)
+  on the left. In each row exactly one cell is RED (test), one is
+  YELLOW (validation), and the remaining five are BLUE (training).
+  Make the diagonal red-test placement so the chart is easy to read.
+  To the right of the grid, a stacked horizontal bar shows the
+  per-fold counts: blue (5) + yellow (1) + red (1).
+  Below the grid: legend with three swatches —
+    "Train (n = 5) · Validation (n = 1) · Test (n = 1, held-out
+    subject)" — and a small note: "Mean ± SD across the 7 held-out
+    test subjects is reported in all results tables."
+
+CAPTION DRAFT
+-------------
+"Task configurations and patient-level leave-one-out
+cross-validation. (a) CBAM-DNS (× 1) maps the registered 3T volume
+to the masked 7T target at native resolution, while CBAM-SupRes (× 2)
+maps a trilinearly downsampled 3T input to the same full-resolution
+masked 7T target. (b) Across the n = 7 subjects, seven independent
+LOOCV folds were trained, with one subject held out as test, one as
+validation, and the remaining five used for training; all results
+are reported as the mean ± standard deviation over the seven
+held-out test subjects."
+
+TYPOGRAPHY & PALETTE
+--------------------
+Sans-serif. Network icons and lane backgrounds in two distinct hues
+(orange #D08A4E for × 1, red #B85C6B for × 2). LOOCV grid: blue
+#4F7AA8 (train), yellow #E6B23A (validation), red #B85C6B (test).
+
+DATA NEEDED
+-----------
+- None — pure schematic.
+
+NOT TO INCLUDE
+--------------
+No real patient identifiers in the LOOCV grid (P1–P7 are anonymised
+labels). No implementation references.

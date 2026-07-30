@@ -210,11 +210,13 @@ This installs:
 - base project dependencies (PyTorch + MONAI),
 - YOLO dependencies (`ultralytics`, `opencv-python-headless`),
 - morphology/classic branch deps (`scikit-image`, `SimpleITK`, `batchgenerators`),
-- local nnU-Net v2 package vendored in this repo (`topcow-2024-nnunet`).
+- nnU-Net v2, installed as a pinned dependency: `pip install -e ".[segmentation]"`.
 
 Note:
 
-- segmentation scripts also support fallback import directly from `topcow-2024-nnunet/` if the folder exists in repo root.
+- nnU-Net is used for inference only (`nnUNetPredictor`, `ensemble_folders`).
+  Retraining the segmentation models on an older torch additionally needs
+  `patches/nnunetv2-2.5.1-polylr-torch-compat.diff`.
 - editable install is still recommended for reproducibility.
 
 

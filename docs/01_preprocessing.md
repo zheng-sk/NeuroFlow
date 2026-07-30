@@ -135,7 +135,7 @@ Scripts:
 - `neuroflow/segmentation/segment_cow_patient_pipeline.py` when building angiography from MAG + Vx/Vy/Vz first.
 
 Libraries:
-- `torch`, `nnunetv2` (vendored in `topcow-2024-nnunet`)
+- `torch`, `nnunetv2` (pinned dependency, `nnunetv2==2.5.1`)
 - `nibabel`, `numpy`
 - `scipy.ndimage` (morphology/components)
 - optional `scikit-image` (Frangi/Sato branch)

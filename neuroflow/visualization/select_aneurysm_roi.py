@@ -48,8 +48,8 @@ try:
     import pyvista as pv
 except Exception as exc:
     raise RuntimeError(
-        "select_aneurysm_roi.py requires pyvista. Install it in the active environment "
-        "(for this repo, usually: .venv_neuroflow/bin/python -m pip install pyvista)."
+        "select_aneurysm_roi requires pyvista. Install the visualization extra "
+        'with:  pip install -e ".[viz]"'
     ) from exc
 
 pv.OFF_SCREEN = False

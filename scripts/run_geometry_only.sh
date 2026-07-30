@@ -11,8 +11,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-PYTHON_BIN=${ROOT}/.venv_neuroflow/bin/python
-[[ -x "${PYTHON_BIN}" ]] || PYTHON_BIN=python
+PYTHON_BIN=${PYTHON_BIN:-python}
 
 XVAL_EXPERIMENT_NAME=${XVAL_EXPERIMENT_NAME:-xval_cbam_preups_unmasked}
 EXP_PREFIX=${EXP_PREFIX-nf_preups_cbam_}

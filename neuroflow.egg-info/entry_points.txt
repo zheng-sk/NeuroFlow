@@ -1,0 +1,5 @@
+[console_scripts]
+neuroflow-dicom2nifti = neuroflow.conversion.dicom_to_nifti:main
+neuroflow-predict = neuroflow.inference.predict_nifti:main
+neuroflow-segment-cow = neuroflow.segmentation.segment_cow_crops:main
+neuroflow-train = neuroflow.training.trainer_nifti:main

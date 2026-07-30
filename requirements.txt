@@ -1,34 +1,54 @@
-# 4DFlowNet main environment (PyTorch + MONAI + CoW segmentation)
+# NeuroFlow — runtime dependencies
+#
+# Prefer the packaged install, which also provides the console entry points:
+#     pip install -e ".[viz,segmentation]"
+# This file is the flat equivalent for environments that cannot use pyproject.toml.
+#
+# Versions are pinned to major.minor. The exact reference environment used to
+# produce the manuscript results is captured on the `neuroflow_dev` branch in
+# requirements_last.txt.
 
-# Core deep learning stack
-# NOTE: install PyTorch matching your platform/CUDA from official wheels if needed.
-torch
-torchvision
-torchaudio
-monai
-tensorboard
+# --- Core deep learning -----------------------------------------------------
+# NOTE: install PyTorch matching your platform/CUDA from the official wheels
+# first if the default index does not resolve a suitable build.
+torch==2.10.*
+torchvision==0.25.*
+torchaudio==2.10.*
+monai==1.5.*
+tensorboard==2.20.*
 
-# Medical imaging + data IO
-antspyx
-h5py
-nibabel
-pydicom
-SimpleITK>=2.2.1
+# --- Medical imaging and data IO -------------------------------------------
+antspyx==0.6.*
+nibabel==5.3.*
+pydicom==3.0.*
+dicom2nifti==2.6.*
+SimpleITK==2.5.*
+h5py==3.15.*
 
-# Scientific Python
-numpy
-scipy
-pandas
-scikit-learn
-statsmodels
-matplotlib
-PyYAML
+# --- Scientific Python ------------------------------------------------------
+numpy==2.3.*
+scipy==1.15.*
+pandas==3.0.*
+scikit-learn==1.8.*
+scikit-image==0.26.*
+statsmodels==0.14.*
+matplotlib==3.10.*
+PyYAML==6.0.*
 
-# CoW segmentation dependencies
-ultralytics
-opencv-python-headless
-scikit-image>=0.19.3
-batchgenerators>=0.25
+# --- Circle-of-Willis segmentation -----------------------------------------
+# nnU-Net is used for inference only (nnUNetPredictor, ensemble_folders).
+# Retraining the CoW models on an older torch additionally needs
+# patches/nnunetv2-2.5.1-polylr-torch-compat.diff.
+nnunetv2==2.5.1
+batchgenerators==0.25.*
+ultralytics==8.4.*
+opencv-python-headless==4.13.*
 
-# Local nnU-Net v2 package vendored in this repository
--e ./topcow-2024-nnunet
+# --- Visualization and aneurysm geometry -----------------------------------
+# Required by neuroflow.visualization.* and the aneurysm shape metrics; these
+# were missing from the manifest entirely before this revision. Left as floors
+# rather than exact pins because they were absent from the reference
+# environment freeze, so no single known-good version can be asserted.
+pyvista>=0.44
+vtk>=9.3
+imageio>=2.37

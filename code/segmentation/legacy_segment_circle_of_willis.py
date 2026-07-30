@@ -2,7 +2,6 @@ import shutil
 import numpy as np
 import SimpleITK as sitk
 import os
-import sys
 import torch
 import nibabel as nib
 from batchgenerators.utilities.file_and_folder_operations import join
@@ -12,7 +11,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_NNUNET_RAW = REPO_ROOT / "nnUNet_raw"
 DEFAULT_NNUNET_PREPROCESSED = REPO_ROOT / "nnUNet_preprocessed"
 DEFAULT_NNUNET_RESULTS = REPO_ROOT / "models"
-LOCAL_NNUNET_REPO = REPO_ROOT / "topcow-2024-nnunet"
 
 # Define nnU-Net paths for inference-only use before importing nnunetv2.
 os.environ.setdefault("nnUNet_raw", str(DEFAULT_NNUNET_RAW))
@@ -23,17 +21,12 @@ try:
     from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
     from nnunetv2.imageio.simpleitk_reader_writer import SimpleITKIO
     from nnunetv2.ensembling.ensemble import ensemble_folders
-except ModuleNotFoundError:
-    if (LOCAL_NNUNET_REPO / "nnunetv2").exists():
-        sys.path.insert(0, str(LOCAL_NNUNET_REPO))
-        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-        from nnunetv2.imageio.simpleitk_reader_writer import SimpleITKIO
-        from nnunetv2.ensembling.ensemble import ensemble_folders
-    else:
-        raise ModuleNotFoundError(
-            "nnunetv2 not found. Install with: pip install -e ./topcow-2024-nnunet "
-            "or keep topcow-2024-nnunet/ in the repository root."
-        )
+except ModuleNotFoundError as exc:  # pragma: no cover - install-time guard
+    raise ModuleNotFoundError(
+        "nnunetv2 is required for Circle-of-Willis segmentation. Install the "
+        'pinned version with:  pip install -e ".[segmentation]"  (or '
+        "pip install nnunetv2==2.5.1). See requirements.txt."
+    ) from exc
 import glob
 
 from ultralytics import YOLO

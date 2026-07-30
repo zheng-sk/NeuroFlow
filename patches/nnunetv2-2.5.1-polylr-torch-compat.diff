@@ -1,0 +1,35 @@
+# nnU-Net v2.5.1 — PolyLRScheduler backward compatibility with older torch
+#
+# SCOPE: this patch is needed ONLY to *retrain* the Circle-of-Willis
+# segmentation models from scratch on a torch build whose
+# torch.optim.lr_scheduler._LRScheduler still takes a positional `verbose`
+# argument. It is NOT needed to reproduce any NeuroFlow result: the published
+# pipeline uses nnU-Net exclusively for inference (nnUNetPredictor and
+# ensemble_folders), which never constructs a PolyLRScheduler.
+#
+# Apply with:
+#   pip download --no-deps --no-binary :all: nnunetv2==2.5.1
+#   # unpack, then from the nnunetv2 source root:
+#   patch -p2 < patches/nnunetv2-2.5.1-polylr-torch-compat.diff
+#
+# Upstream origin: commit a6fd4a4 of this repository, made against the
+# vendored copy of nnU-Net v2.5.1 that used to live in topcow-2024-nnunet/.
+
+diff --git a/topcow-2024-nnunet/nnunetv2/training/lr_scheduler/polylr.py b/topcow-2024-nnunet/nnunetv2/training/lr_scheduler/polylr.py
+index 44857b5..d9f69c7 100644
+--- a/topcow-2024-nnunet/nnunetv2/training/lr_scheduler/polylr.py
++++ b/topcow-2024-nnunet/nnunetv2/training/lr_scheduler/polylr.py
+@@ -8,7 +8,12 @@ class PolyLRScheduler(_LRScheduler):
+         self.max_steps = max_steps
+         self.exponent = exponent
+         self.ctr = 0
+-        super().__init__(optimizer, current_step if current_step is not None else -1, False)
++        last_epoch = current_step if current_step is not None else -1
++        try:
++            super().__init__(optimizer, last_epoch)
++        except TypeError:
++            # Older torch versions accepted a third verbose positional argument.
++            super().__init__(optimizer, last_epoch, False)
+ 
+     def step(self, current_step=None):
+         if current_step is None or current_step == -1:

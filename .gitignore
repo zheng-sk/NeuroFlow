@@ -64,3 +64,6 @@ deliverables/
 .DS_Store
 .idea/
 .vscode/
+
+# Legacy per-task requirement files (tracked on neuroflow_dev)
+/requirements/

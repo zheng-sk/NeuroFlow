@@ -17,3 +17,6 @@ pytorch_venv/
 output/
 deliverables/
 LaTex/
+
+# OS cruft
+.DS_Store

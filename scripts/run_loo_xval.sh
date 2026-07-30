@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-ROOT=${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}
+ROOT=${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 PYTHON_BIN=${PYTHON_BIN:-python}
 XVAL_EXPERIMENT_NAME=${XVAL_EXPERIMENT_NAME:-}
 MODE=${MODE:-both}                      # both | denoise | sr
@@ -130,7 +130,7 @@ run_one_fold() {
 
   CUDA_VISIBLE_DEVICES="${gpu}" \
     PYTHONUNBUFFERED=1 \
-    "${PYTHON_BIN}" -u "${ROOT}/src/trainer_nifti.py" \
+    "${PYTHON_BIN}" -u -m neuroflow.training.trainer_nifti \
     "${train_args[@]}" \
     2>&1 | tee "${log_path}"
 }

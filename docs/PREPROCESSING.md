@@ -36,8 +36,8 @@ Example:
 
 ```text
 data/sorted_patients/
-  001_20240313_3T/
-  001_20240313_7T/
+  subject_001_3T/
+  subject_001_7T/
 ```
 
 Key checks:

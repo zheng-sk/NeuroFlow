@@ -1,23 +1,19 @@
 import csv
-import sys
 import unittest
 from pathlib import Path
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
-sys.path.insert(0, str(REPO_ROOT / "code" / "registration"))
-
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 try:
-    from Network.NiftiPatchDataset import _StackNormalizeFieldsd, load_nifti_case_table
+    from neuroflow.data.NiftiPatchDataset import _StackNormalizeFieldsd, load_nifti_case_table
 except Exception:  # pragma: no cover - environment guard
     _StackNormalizeFieldsd = None
     load_nifti_case_table = None
 
-import export_paired_lr_hr_dataset as export_paired_lr_hr_dataset
-import generate_trigger_time_frame_pairs as generate_trigger_time_frame_pairs
+from neuroflow.registration import export_paired_lr_hr_dataset
+from neuroflow.registration import generate_trigger_time_frame_pairs
 
 
 def make_4d_channel(values):
@@ -294,8 +290,8 @@ class TriggerTimePairingHelperTests(unittest.TestCase):
 
     def test_case_map_row_resets_time_range_and_serializes_mapping(self):
         row = {
-            "lr_u": "data/paired_dataset/lr_3t/001_20240313/Vx.nii.gz",
-            "hr_u": "data/paired_dataset/hr_7t_in_3t_masked/001_20240313/Vx.nii.gz",
+            "lr_u": "data/paired_dataset/lr_3t/subject_001/Vx.nii.gz",
+            "hr_u": "data/paired_dataset/hr_7t_in_3t_masked/subject_001/Vx.nii.gz",
             "time_start": "0",
             "time_end": "8",
             "time_index": "",
@@ -306,14 +302,30 @@ class TriggerTimePairingHelperTests(unittest.TestCase):
         self.assertEqual(mapped["time_start"], "0")
         self.assertEqual(mapped["time_end"], "3")
         self.assertEqual(mapped["time_index"], "")
-        self.assertEqual(mapped["hr_time_index_map"], "0;2;3")
+        # normalize_trigger_times() maps each sequence onto [0, 1] relative to its
+        # OWN length, so a truncated 3-LR/4-HR pair does not reproduce the first
+        # three entries of the full 9-LR/14-HR case (which are 0;2;3). Here the LR
+        # phases are 0, 0.5, 1.0 and the HR phases 0, 0.33, 0.67, 1.0, giving 0;1;3.
+        self.assertEqual(mapped["hr_time_index_map"], "0;1;3")
         self.assertEqual(mapped["pairing_method"], "trigger_time_nearest")
 
 
 class ExporterTimeRangeTests(unittest.TestCase):
+    """Exercises resolve_time_end against a real paired case.
+
+    The cohort is not redistributed with this repository, so this test skips
+    unless a locally exported paired dataset is present. Point CASE_DIR_LR /
+    CASE_DIR_HR at one of your own exported cases to run it.
+    """
+
+    CASE_DIR_LR = REPO_ROOT / "data" / "paired_dataset" / "lr_3t" / "subject_001"
+    CASE_DIR_HR = REPO_ROOT / "data" / "paired_dataset" / "hr_7t_in_3t" / "subject_001"
+
     def test_resolve_time_end_uses_exclusive_semantics(self):
-        lr_path = REPO_ROOT / "data" / "paired_dataset" / "lr_3t" / "001_20240313" / "Vx.nii.gz"
-        hr_path = REPO_ROOT / "data" / "paired_dataset" / "hr_7t_in_3t" / "001_20240313" / "Vx.nii.gz"
+        lr_path = self.CASE_DIR_LR / "Vx.nii.gz"
+        hr_path = self.CASE_DIR_HR / "Vx.nii.gz"
+        if not (lr_path.exists() and hr_path.exists()):
+            self.skipTest(f"paired case volumes not available at {lr_path} / {hr_path}")
         self.assertEqual(export_paired_lr_hr_dataset.resolve_time_end(str(lr_path), str(hr_path)), 9)
 
 

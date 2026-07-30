@@ -15,17 +15,17 @@ The recommended workflow is:
 Example case used below:
 
 ```text
-001_20240313
+subject_001
 ```
 
 Main inputs:
 
 ```text
 3D/4D magnitude image:
-data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz
+data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz
 
 CoW segmentation:
-data/paired_dataset/cow_segmentation_ens301_current/001_20240313/cow_seg_final.nii.gz
+data/paired_dataset/cow_segmentation_ens301_current/subject_001/cow_seg_final.nii.gz
 ```
 
 The segmentation should be binary or thresholdable:
@@ -165,8 +165,8 @@ Command:
 
 ```bash
 .venv_neuroflow/bin/python code/inference/select_aneurysm_roi.py \
-  --seg data/paired_dataset/cow_segmentation_ens301_current/001_20240313/cow_seg_final.nii.gz \
-  --bg data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz \
+  --seg data/paired_dataset/cow_segmentation_ens301_current/subject_001/cow_seg_final.nii.gz \
+  --bg data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz \
   --out output/aneurysm_rois/001_aneurysm_roi_with_connection.nii.gz \
   --box-size 10
 ```
@@ -186,7 +186,7 @@ Command:
 ```bash
 .venv_neuroflow/bin/python code/inference/select_aneurysm_neck.py \
   --roi output/aneurysm_rois/001_aneurysm_roi_with_connection.nii.gz \
-  --bg data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz \
+  --bg data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz \
   --out output/aneurysm_rois/001_aneurysm_sac_manual.nii.gz
 ```
 
@@ -228,7 +228,7 @@ Command:
 ```bash
 .venv_neuroflow/bin/python code/inference/select_aneurysm_neck.py \
   --roi output/aneurysm_rois/001_aneurysm_roi_with_connection.nii.gz \
-  --bg data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz \
+  --bg data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz \
   --out output/aneurysm_rois/001_aneurysm_sac_auto.nii.gz
 ```
 
@@ -265,7 +265,7 @@ Command:
 ```bash
 .venv_neuroflow/bin/python code/inference/select_aneurysm_neck_plane.py \
   --roi output/aneurysm_rois/001_aneurysm_roi_with_connection.nii.gz \
-  --bg data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz \
+  --bg data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz \
   --out output/aneurysm_rois/001_aneurysm_sac_plane.nii.gz
 ```
 
@@ -340,7 +340,7 @@ Manual-neck example:
 ```bash
 .venv_neuroflow/bin/python code/inference/visualize_aneurysm_measurements.py \
   --roi output/aneurysm_rois/001_aneurysm_sac_manual.nii.gz \
-  --bg data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz \
+  --bg data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz \
   --metrics-json output/aneurysm_shape_metrics/001_sac_manual/shape_metrics.json \
   --out output/aneurysm_shape_metrics/001_sac_manual/measurement_overlay.png
 ```
@@ -350,7 +350,7 @@ Automatic-neck example:
 ```bash
 .venv_neuroflow/bin/python code/inference/visualize_aneurysm_measurements.py \
   --roi output/aneurysm_rois/001_aneurysm_sac_auto.nii.gz \
-  --bg data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz \
+  --bg data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz \
   --metrics-json output/aneurysm_shape_metrics/001_sac_auto/shape_metrics.json \
   --out output/aneurysm_shape_metrics/001_sac_auto/measurement_overlay.png
 ```
@@ -373,7 +373,7 @@ Manual-neck example:
 ```bash
 .venv_neuroflow/bin/python code/inference/plot_aneurysm_paper_summary.py \
   --roi output/aneurysm_rois/001_aneurysm_sac_manual.nii.gz \
-  --bg data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz \
+  --bg data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz \
   --metrics-json output/aneurysm_shape_metrics/001_sac_manual/shape_metrics.json \
   --out output/aneurysm_shape_metrics/001_sac_manual/paper_style_summary.png
 ```
@@ -383,7 +383,7 @@ Automatic-neck example:
 ```bash
 .venv_neuroflow/bin/python code/inference/plot_aneurysm_paper_summary.py \
   --roi output/aneurysm_rois/001_aneurysm_sac_auto.nii.gz \
-  --bg data/paired_dataset/hr_7t_in_3t/001_20240313/input_mag_raw.nii.gz \
+  --bg data/paired_dataset/hr_7t_in_3t/subject_001/input_mag_raw.nii.gz \
   --metrics-json output/aneurysm_shape_metrics/001_sac_auto/shape_metrics.json \
   --out output/aneurysm_shape_metrics/001_sac_auto/paper_style_summary.png
 ```

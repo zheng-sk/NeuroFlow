@@ -57,7 +57,7 @@ Use this command when each input `.nii.gz` is already a CoW crop in final regist
 
 ```bash
 python code/segmentation/segment_cow_crops.py \
-  --input data/registered_7T_in_3T_cow_crop/001_20240313 \
+  --input data/registered_7T_in_3T_cow_crop/subject_001 \
   --model-dir models/topcow-claim-models \
   --output-dir data/cow_segmentation
 ```

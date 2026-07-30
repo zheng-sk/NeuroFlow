@@ -1,2 +1,0 @@
-Modified by Charité Lab for AI in Medicine on 20.11.2024.
-Changes include the addition of a custom nnUnetTrainer that adds the Skeleton Recall Loss under "nnunetv2/training/nnUNetTrainer/variants/loss"

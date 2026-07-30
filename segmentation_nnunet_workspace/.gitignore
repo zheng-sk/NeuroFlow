@@ -1,8 +1,0 @@
-nnUNet_raw/
-nnUNet_preprocessed/
-nnUNet_results/
-logs/
-.venv*/
-nnUNet/
-topcow-2024-nnunet/
-__pycache__/

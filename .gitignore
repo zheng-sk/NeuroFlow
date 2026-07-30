@@ -1,19 +1,66 @@
-# Byte-compiled / optimized / DLL files
+# ---------------------------------------------------------------------------
+# NeuroFlow — publication branch (`main`)
+#
+# Everything ignored here is preserved on the `neuroflow_dev` branch, which is
+# the archive of record for the research tree. Switching branches restores it.
+# ---------------------------------------------------------------------------
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.log
-models/
-.vscode/
-result/
-data/
-pytorch_venv/
-*.sh
-!run_loo_xval.sh
-!segmentation_nnunet_workspace/*.sh
-*.out
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
 .venv*
 *.venv*
-output/
-deliverables/
+pytorch_venv/
+
+# Manuscript sources (tracked on neuroflow_dev)
+paper/
 LaTex/
+*.tex
+*.aux
+*.bib
+
+# Exploratory notebooks (tracked on neuroflow_dev)
+notebooks/
+
+# Cohort manifests — case IDs embed acquisition dates, do not publish
+*_trigger_pairs.csv
+paired_nifti_cases*.csv
+
+# Operational and one-off shell scripts stay on neuroflow_dev.
+# Published, sanitized scripts live in scripts/ and are tracked.
+/*.sh
+
+# Post-manuscript 7T-Den / 7T-SR exploration (tracked on neuroflow_dev)
+code/scripts/
+
+# Root-level working files (tracked on neuroflow_dev). Figures published in the
+# README are rendered into assets/, which no rule here matches.
+/*.pdf
+/*.svg
+/WARP.md
+/requirements_last.txt
+.python-version
+
+# Third-party, installed via requirements.txt (nnunetv2==2.5.1)
+topcow-2024-nnunet/
+segmentation_nnunet_workspace/
+
+# Data, weights, and run outputs — never committed
+data/
+models/
+output/
+result/
+deliverables/
+*.log
+*.out
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,86 @@
+NeuroFlow
+=========
+
+This product includes software developed by third parties, listed below with
+their respective licenses. NeuroFlow itself is distributed under the MIT
+License; see LICENSE.
+
+
+1. 4DFlowNet
+------------
+NeuroFlow is derived from 4DFlowNet, from which it inherits the SR4DFlowNet
+architecture, the patch-based training strategy, and the loss formulation.
+
+    Copyright (c) 2020 Edward Ferdian
+    License: MIT
+    Source:  https://github.com/EdwardFerdian/4DFlowNet
+
+    Ferdian E., Suinesiaputra A., Dubowitz D.J., Zhao D., Wang A., Cowan B.,
+    Young A.A. "4DFlowNet: Super-Resolution 4D Flow MRI Using Deep Learning and
+    Computational Fluid Dynamics." Frontiers in Physics, 8:138, 2020.
+
+Subsequent cerebrovascular adaptations follow:
+
+    Ferdian E. et al. "Cerebrovascular Super-Resolution 4D Flow MRI."
+    bioRxiv 2021.08.25.457611.
+
+
+2. nnU-Net v2
+-------------
+Used for Circle-of-Willis segmentation. NeuroFlow calls it for inference only
+(nnUNetPredictor, ensemble_folders). It was previously vendored into this
+repository; it is now a pinned dependency (nnunetv2==2.5.1).
+
+    Copyright (c) German Cancer Research Center (DKFZ), Division of Medical
+    Image Computing
+    License: Apache License 2.0
+    Source:  https://github.com/MIC-DKFZ/nnUNet
+
+    Isensee F., Jaeger P.F., Kohl S.A.A., Petersen J., Maier-Hein K.H.
+    "nnU-Net: a self-configuring method for deep learning-based biomedical
+    image segmentation." Nature Methods, 18:203-211, 2021.
+
+The single local modification retained from the vendored copy is recorded in
+patches/nnunetv2-2.5.1-polylr-torch-compat.diff. It is required only to retrain
+the segmentation models, not to reproduce NeuroFlow results.
+
+
+3. TopCoW challenge models
+--------------------------
+The Circle-of-Willis segmentation ensemble weights originate from the TopCoW
+challenge. They are not redistributed in this repository and must be obtained
+from the challenge organisers.
+
+    Source: https://topcow23.grand-challenge.org/
+
+    Yang K. et al. "TopCoW: Benchmarking Topology-Aware Anatomical
+    Segmentation of the Circle of Willis for CTA and MRA." 2023.
+
+
+4. MONAI
+--------
+Data pipeline, transforms, and sliding-window inference.
+
+    Copyright (c) MONAI Consortium
+    License: Apache License 2.0
+    Source:  https://github.com/Project-MONAI/MONAI
+
+
+5. Ultralytics YOLO
+-------------------
+Circle-of-Willis ROI detection on 2D slices.
+
+    License: AGPL-3.0
+    Source:  https://github.com/ultralytics/ultralytics
+
+    Note: Ultralytics is AGPL-3.0 licensed. It is an optional dependency, used
+    only by the ROI-detection stage of the preprocessing pipeline. Consider its
+    terms before redistributing a combined work.
+
+
+6. ANTsPy
+---------
+Rigid and affine registration.
+
+    License: Apache License 2.0
+    Source:  https://github.com/ANTsX/ANTsPy

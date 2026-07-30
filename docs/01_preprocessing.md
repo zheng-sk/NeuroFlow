@@ -14,19 +14,19 @@ Pipeline order:
 
 ```mermaid
 flowchart TD
-    A["Phase 0: Study organization<br/>data/sorted_patients/&lt;CASE&gt;_3T and &lt;CASE&gt;_7T"] --> B["Phase 1: DICOM to NIfTI<br/>code/conversion/dicom_to_nifti.py"]
-    B --> C["Phase 2: Temporal motion correction<br/>code/registration/batch_register_magnitude.py"]
-    C --> D["Phase 3: CoW ROI detection (YOLO) + paired crop<br/>code/preprocessing/yolo_crop_patient_pairs.py"]
-    D --> E["Phase 4: Inter-scan registration 7T to 3T<br/>code/registration/batch_register_7T_to_3T.py"]
-    E --> F["Phase 5: CoW semantic segmentation<br/>code/segmentation/segment_cow_crops.py or batch_segment_cow_magnitude.py"]
+    A["Phase 0: Study organization<br/>data/sorted_patients/&lt;CASE&gt;_3T and &lt;CASE&gt;_7T"] --> B["Phase 1: DICOM to NIfTI<br/>neuroflow/conversion/dicom_to_nifti.py"]
+    B --> C["Phase 2: Temporal motion correction<br/>neuroflow/registration/batch_register_magnitude.py"]
+    C --> D["Phase 3: CoW ROI detection (YOLO) + paired crop<br/>neuroflow/preprocessing/yolo_crop_patient_pairs.py"]
+    D --> E["Phase 4: Inter-scan registration 7T to 3T<br/>neuroflow/registration/batch_register_7T_to_3T.py"]
+    E --> F["Phase 5: CoW semantic segmentation<br/>neuroflow/segmentation/segment_cow_crops.py or batch_segment_cow_magnitude.py"]
     F --> G["Outputs: final CoW masks<br/>data/cow_segmentation*"]
 ```
 
 ## Phase 0: Study Organization
 
 Relevant files:
-- `code/registration/batch_register_magnitude.py`
-- `code/registration/batch_register_7T_to_3T.py`
+- `neuroflow/registration/batch_register_magnitude.py`
+- `neuroflow/registration/batch_register_7T_to_3T.py`
 
 Expected naming convention:
 - `<CASE>_3T` for fixed studies.
@@ -47,7 +47,7 @@ Key checks:
 ## Phase 1: DICOM -> NIfTI
 
 Main script:
-- `code/conversion/dicom_to_nifti.py`
+- `neuroflow/conversion/dicom_to_nifti.py`
 
 Libraries:
 - `pydicom`, `nibabel`, `numpy`, `tqdm`
@@ -66,9 +66,9 @@ Important:
 ## Phase 2: Temporal Motion Correction (Intra-scan)
 
 Scripts:
-- `code/registration/batch_register_magnitude.py`
-- `code/registration/core.py`
-- `code/registration/temporal_register_to_t0.py`
+- `neuroflow/registration/batch_register_magnitude.py`
+- `neuroflow/registration/core.py`
+- `neuroflow/registration/temporal_register_to_t0.py`
 
 Libraries:
 - `antspyx` (`ants`), `numpy`, `matplotlib` (QC outputs)
@@ -88,7 +88,7 @@ Important:
 ## Phase 3: CoW ROI Detection with YOLO + Paired Crop
 
 Script:
-- `code/preprocessing/yolo_crop_patient_pairs.py`
+- `neuroflow/preprocessing/yolo_crop_patient_pairs.py`
 
 Libraries:
 - `ultralytics` (YOLO), `nibabel`, `numpy`
@@ -106,8 +106,8 @@ Important:
 ## Phase 4: Inter-scan Registration (7T -> 3T)
 
 Scripts:
-- `code/registration/batch_register_7T_to_3T.py`
-- `code/registration/register_7T_to_3T_with_qc.py`
+- `neuroflow/registration/batch_register_7T_to_3T.py`
+- `neuroflow/registration/register_7T_to_3T_with_qc.py`
 
 Libraries:
 - `antspyx`, `numpy`, `matplotlib`
@@ -130,9 +130,9 @@ Important:
 ## Phase 5: Final CoW Semantic Segmentation
 
 Scripts:
-- `code/segmentation/segment_cow_crops.py` for already cropped and registered inputs.
-- `code/segmentation/batch_segment_cow_magnitude.py` for batch processing.
-- `code/segmentation/segment_cow_patient_pipeline.py` when building angiography from MAG + Vx/Vy/Vz first.
+- `neuroflow/segmentation/segment_cow_crops.py` for already cropped and registered inputs.
+- `neuroflow/segmentation/batch_segment_cow_magnitude.py` for batch processing.
+- `neuroflow/segmentation/segment_cow_patient_pipeline.py` when building angiography from MAG + Vx/Vy/Vz first.
 
 Libraries:
 - `torch`, `nnunetv2` (vendored in `topcow-2024-nnunet`)
@@ -183,19 +183,19 @@ QC checks:
 
 ```bash
 # 1) DICOM -> NIfTI
-python code/conversion/dicom_to_nifti.py \
+neuroflow-dicom2nifti \
   --input-root data/sorted_patients \
   --output-root data/nifti_patients \
   --canonicalize
 
 # 2) Temporal motion correction
-python code/registration/batch_register_magnitude.py \
+python -m neuroflow.registration.batch_register_magnitude \
   --input-dir data/nifti_patients \
   --output-dir data/temporal_registered \
   --reg-type Rigid
 
 # 3) YOLO CoW ROI crop
-python code/preprocessing/yolo_crop_patient_pairs.py \
+python -m neuroflow.preprocessing.yolo_crop_patient_pairs \
   --input-dir data/temporal_registered \
   --output-dir data/temporal_registered_cow_crop \
   --yolo-model models/yolo-cow-detection.pt \
@@ -203,7 +203,7 @@ python code/preprocessing/yolo_crop_patient_pairs.py \
   --moving-suffix _7T
 
 # 4) Inter-scan registration 7T -> 3T
-python code/registration/batch_register_7T_to_3T.py \
+python -m neuroflow.registration.batch_register_7T_to_3T \
   --input-dir data/temporal_registered_cow_crop \
   --output-dir data/registered_7T_in_3T_cow_crop \
   --mask-method none \
@@ -211,7 +211,7 @@ python code/registration/batch_register_7T_to_3T.py \
   --interpolator-phase nearestNeighbor
 
 # 5) Final CoW semantic segmentation
-python code/segmentation/batch_segment_cow_magnitude.py \
+python -m neuroflow.segmentation.batch_segment_cow_magnitude \
   --input-root data/registered_7T_in_3T_cow_crop \
   --recursive \
   --mag-pattern "mag_7T_in_3T.nii.gz" \

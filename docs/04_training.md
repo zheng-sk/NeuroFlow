@@ -4,11 +4,11 @@
 
 Training script:
 
-- `src/trainer_nifti.py`
+- `neuroflow/training/trainer_nifti.py`
 
 Dataset loader and transforms:
 
-- `src/Network/NiftiPatchDataset.py`
+- `neuroflow/data/NiftiPatchDataset.py`
 
 Required CSV columns:
 
@@ -51,7 +51,7 @@ Practical recommendation:
 Populate `mask` column from CoW segmentations:
 
 ```bash
-python code/registration/attach_cow_masks_to_csv.py \
+python -m neuroflow.registration.attach_cow_masks_to_csv \
   --csv-in data/paired_dataset/paired_nifti_cases.csv \
   --csv-out data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
   --masks-root data/cow_segmentation_patient_batch \
@@ -127,7 +127,7 @@ When 3T and 7T have different numbers of cardiac frames, you can expand a case-l
 into one row per paired frame without temporal resampling:
 
 ```bash
-python code/registration/generate_trigger_time_frame_pairs.py \
+python -m neuroflow.registration.generate_trigger_time_frame_pairs \
   --input-csv data/paired_dataset/train_random_1_src.csv \
   --output-csv data/paired_dataset/train_random_1_src_trigger_pairs.csv \
   --sorted-patients-root data/sorted_patients
@@ -153,7 +153,7 @@ For training, a case-level TriggerTime mapping is usually a better fit because i
 old "one row per patient" dataset size while still sampling the correct paired 7T frame:
 
 ```bash
-python code/registration/generate_trigger_time_frame_pairs.py \
+python -m neuroflow.registration.generate_trigger_time_frame_pairs \
   --input-csv data/paired_dataset/paired_nifti_cases_hrmasked_with_cow_mask.csv \
   --output-csv data/paired_dataset/paired_nifti_cases_hrmasked_with_cow_mask_trigger_map.csv \
   --sorted-patients-root data/sorted_patients \
@@ -210,7 +210,7 @@ Mask and magnitude are rotated as scalar fields.
 
 Trainer:
 
-- `src/Network/TrainerController.py`
+- `neuroflow/training/TrainerController.py`
 
 Per-voxel speed-MSE term:
 
@@ -243,8 +243,8 @@ Goal:
 
 Tools:
 
-- `code/preprocessing/downsample_nifti_tree.py`
-- `code/preprocessing/remap_case_csv_for_x2.py`
+- `neuroflow/preprocessing/downsample_nifti_tree.py`
+- `neuroflow/preprocessing/remap_case_csv_for_x2.py`
 
 ### 8.1 Option A (recommended): downsample 7T to create LR
 
@@ -253,7 +253,7 @@ Use this when you want a clean synthetic-LR setup where target HR stays in 7T sp
 1) Downsample 7T tree:
 
 ```bash
-python code/preprocessing/downsample_nifti_tree.py \
+python -m neuroflow.preprocessing.downsample_nifti_tree \
   --input-root data/paired_dataset/hr_7t_in_3t \
   --output-root data/paired_dataset/lr_from_7t_x05 \
   --scale 0.5 \
@@ -263,7 +263,7 @@ python code/preprocessing/downsample_nifti_tree.py \
 2) Build a new paired CSV where `lr_*` points to the downsampled 7T tree:
 
 ```bash
-python code/preprocessing/remap_case_csv_for_x2.py \
+python -m neuroflow.preprocessing.remap_case_csv_for_x2 \
   --in-csv data/paired_dataset/train_random_1_src.csv \
   --out-csv data/paired_dataset/train_random_1_x2_from7t.csv \
   --mode lr_from_hr \
@@ -278,7 +278,7 @@ Use this when you want to test robustness from a more degraded clinical-like inp
 1) Downsample 3T tree:
 
 ```bash
-python code/preprocessing/downsample_nifti_tree.py \
+python -m neuroflow.preprocessing.downsample_nifti_tree \
   --input-root data/paired_dataset/lr_3t \
   --output-root data/paired_dataset/lr_3t_x05 \
   --scale 0.5 \
@@ -288,7 +288,7 @@ python code/preprocessing/downsample_nifti_tree.py \
 2) Build a new paired CSV where `lr_*` points to the downsampled 3T tree:
 
 ```bash
-python code/preprocessing/remap_case_csv_for_x2.py \
+python -m neuroflow.preprocessing.remap_case_csv_for_x2 \
   --in-csv data/paired_dataset/train_random_1_src.csv \
   --out-csv data/paired_dataset/train_random_1_x2_from3t.csv \
   --mode lr_from_lr \
@@ -306,8 +306,7 @@ Important:
 ## 9) Training Command
 
 ```bash
-cd src
-python trainer_nifti.py \
+neuroflow-train \
   --train-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
   --val-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
   --patch-size 16 \
@@ -332,8 +331,7 @@ Use legacy U/V inversion only for old datasets:
 Train with 4 outputs (`u,v,w,mag`):
 
 ```bash
-cd src
-python trainer_nifti.py \
+neuroflow-train \
   --train-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
   --val-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
   --patch-size 16 \
@@ -348,8 +346,7 @@ python trainer_nifti.py \
 Train with fitted + exaggerated noise augmentation (plateau-like profile):
 
 ```bash
-cd src
-python trainer_nifti.py \
+neuroflow-train \
   --train-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
   --val-csv ../data/paired_dataset/paired_nifti_cases_with_cow_mask.csv \
   --patch-size 16 \
@@ -430,7 +427,7 @@ Notes:
 Complete example command (x2 SR + 4-channel output + reproducibility + scheduler + early stop):
 
 ```bash
-python src/trainer_nifti.py \
+neuroflow-train \
   --train-csv data/paired_dataset/train_random_1_x2_from7t.csv \
   --val-csv data/paired_dataset/val_random_1_x2_from7t.csv \
   --network-name 4DFlowNet_x2_uq \

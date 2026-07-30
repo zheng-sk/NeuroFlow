@@ -1,0 +1,69 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "NeuroFlow: joint 3T-to-7T domain translation and super-resolution of cerebrovascular 4D Flow MRI"
+abstract: >-
+  Supervised deep learning for cerebrovascular 4D Flow MRI. NeuroFlow provides
+  CBAM-DNS for same-resolution 3T-to-7T domain translation and CBAM-SupRes for
+  joint domain translation and 2x super-resolution, together with the full
+  preprocessing, Circle-of-Willis segmentation, and evaluation pipeline.
+type: software
+license: MIT
+repository-code: "https://github.com/zheng-sk/NeuroFlow"
+version: "1.0.0"
+date-released: "2026-07-30"
+keywords:
+  - 4D Flow MRI
+  - super-resolution
+  - domain translation
+  - deep learning
+  - Circle of Willis
+  - cerebrovascular imaging
+
+# NOTE: the manuscript author block is still empty in paper/main.tex. Complete
+# this list, with ORCIDs and affiliations, before submission or public release.
+authors:
+  - family-names: "Alzate"
+    given-names: "Jesús"
+
+references:
+  - type: article
+    title: "4DFlowNet: Super-Resolution 4D Flow MRI Using Deep Learning and Computational Fluid Dynamics"
+    authors:
+      - family-names: "Ferdian"
+        given-names: "Edward"
+      - family-names: "Suinesiaputra"
+        given-names: "Avan"
+      - family-names: "Dubowitz"
+        given-names: "David J."
+      - family-names: "Zhao"
+        given-names: "Debbie"
+      - family-names: "Wang"
+        given-names: "Alan"
+      - family-names: "Cowan"
+        given-names: "Brett"
+      - family-names: "Young"
+        given-names: "Alistair A."
+    journal: "Frontiers in Physics"
+    volume: 8
+    start: 138
+    year: 2020
+    doi: "10.3389/fphy.2020.00138"
+  - type: article
+    title: "nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation"
+    authors:
+      - family-names: "Isensee"
+        given-names: "Fabian"
+      - family-names: "Jaeger"
+        given-names: "Paul F."
+      - family-names: "Kohl"
+        given-names: "Simon A. A."
+      - family-names: "Petersen"
+        given-names: "Jens"
+      - family-names: "Maier-Hein"
+        given-names: "Klaus H."
+    journal: "Nature Methods"
+    volume: 18
+    start: 203
+    end: 211
+    year: 2021
+    doi: "10.1038/s41592-020-01008-z"

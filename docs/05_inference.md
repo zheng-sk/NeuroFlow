@@ -2,7 +2,7 @@
 
 Prediction script:
 
-- `code/predict_nifti.py`
+- `neuroflow/inference/predict_nifti.py`
 
 ## 1) Inputs
 
@@ -66,7 +66,7 @@ Legacy reconstruction option:
 ## 4) Command
 
 ```bash
-python code/predict_nifti.py \
+neuroflow-predict \
   --u /path/lr_u.nii.gz \
   --v /path/lr_v.nii.gz \
   --w /path/lr_w.nii.gz \
@@ -110,7 +110,7 @@ Only for old datasets that need legacy correction:
 If you only have predicted NIfTI outputs (without baseline/reference), use:
 
 ```bash
-python code/inference/generate_pred_only_uq_report.py \
+python -m neuroflow.evaluation.generate_pred_only_uq_report \
   --u-path /path/pred_u.nii.gz \
   --v-path /path/pred_v.nii.gz \
   --w-path /path/pred_w.nii.gz \
@@ -134,7 +134,7 @@ If you already have:
 you can build `analysis_payload.npz` and run the same comparative report as the default SR/UQ flow:
 
 ```bash
-python code/inference/build_uq_payload_from_nifti.py \
+python -m neuroflow.evaluation.build_uq_payload_from_nifti \
   --pred-u /path/pred_u.nii.gz \
   --pred-v /path/pred_v.nii.gz \
   --pred-w /path/pred_w.nii.gz \

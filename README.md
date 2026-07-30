@@ -1,357 +1,485 @@
-# 4DFlowNet
-Super Resolution 4D Flow MRI using Residual Neural Network
+# NeuroFlow
 
-This is an implementation of the paper [4DFlowNet: Super-Resolution 4D Flow MRI](https://www.frontiersin.org/articles/10.3389/fphy.2020.00138/full).
+**Joint 3T → 7T domain translation and super-resolution of cerebrovascular 4D Flow MRI.**
 
-## Framework migration status
+Ultra-high-field 7T 4D Flow MRI resolves the Circle of Willis with a
+signal-to-noise ratio and spatial detail that clinical 3T systems cannot reach,
+but 7T scanners are rare. NeuroFlow learns the 3T → 7T mapping directly from
+paired acquisitions of the same subjects, acquired in a single session on both
+scanners, and applies it to clinical 3T data. Two task-specific models are
+released:
 
-- Legacy branch implementation: TensorFlow/Keras.
-- Current migration branch implementation: PyTorch + MONAI (`requirements.txt`).
+- **CBAM-DNS** (×1) — same-resolution domain translation: 3T input, 7T-quality output.
+- **CBAM-SupRes** (×2) — joint domain translation and 2× super-resolution.
 
-Install dependencies for this branch:
+Both extend the SR4DFlowNet residual architecture with a CBAM attention block
+placed before upsampling. The repository contains the complete pipeline: DICOM
+conversion, motion correction, Circle-of-Willis detection and segmentation,
+paired-dataset construction, training, inference, and the evaluation code behind
+every table in the manuscript.
+
+<p align="center">
+  <img src="assets/results_reconstruction.gif" width="640" alt="3T input, NeuroFlow reconstruction, and 7T reference">
+</p>
+
+---
+
+## Key results
+
+Leave-one-out cross-validation, n = 7 subjects, mean ± SD, VENC = 0.9 m/s.
+Intraluminal velocity MSE, ×10⁻³ (lower is better).
+
+| Task | Model | Input | Total MSE ↓ |
+| --- | --- | --- | --- |
+| Denoising (×1) | Original baseline | Synthetic noise | 35.9 ± 11.5 |
+| Denoising (×1) | **CBAM-DNS** | **Masked** | **34.5 ± 11.6** |
+| Super-resolution (×2) | Original baseline | Synthetic noise | 41.5 ± 15.1 |
+| Super-resolution (×2) | **CBAM-SupRes** | Synthetic noise | **40.1 ± 14.3** |
+| Super-resolution (×2) | Stock 4DFlowNet | Original | 62.1 ± 21.4 |
+
+CBAM-DNS with masked input improves on the Original baseline by 3.9%.
+CBAM-SupRes reduces error by 35% relative to stock 4DFlowNet at ×2.
+
+<p align="center">
+  <img src="assets/results_velocity_geometry.png" width="820" alt="Velocity and geometry results">
+  <img src="assets/results_background.png" width="820" alt="Background suppression results">
+</p>
+
+---
+
+## Method overview
+
+<p align="center"><img src="assets/fig1_acquisition_pairing.png" width="760" alt="Acquisition and pairing"></p>
+
+**1. Acquisition and pairing.** Each subject is scanned on a clinical 3T and an
+investigational 7T system in the same session. Cardiac frames are paired across
+scanners by nearest normalised trigger time.
+
+<p align="center"><img src="assets/fig2_registration.png" width="820" alt="Registration"></p>
+
+**2. Motion correction and registration.** Rigid intra-scan correction aligns
+every cardiac frame to t₀; a rigid + affine inter-scan step brings the 7T volume
+into the 3T frame so that voxels correspond.
+
+<p align="center"><img src="assets/fig3_segmentation.png" width="760" alt="Segmentation"></p>
+
+**3. Angiographic synthesis and vascular masking.** A PC-MRA volume is
+synthesised from magnitude and speed, then segmented with a TopCoW nnU-Net
+ensemble and manually corrected to give the Circle-of-Willis mask that defines
+the intraluminal loss region.
+
+<p align="center"><img src="assets/fig4_architecture.png" width="900" alt="CBAM-DNS / CBAM-SupRes architecture"></p>
+
+**4. Architecture.** Two encoder paths (speed/PC-MRA/magnitude and velocity)
+feed a residual trunk. A CBAM block applies channel-then-spatial attention
+before the upsampling stage — identity for CBAM-DNS (r=1), ×2 for CBAM-SupRes.
+
+---
+
+## Installation
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/zheng-sk/NeuroFlow.git
+cd NeuroFlow
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[viz,segmentation]"
 ```
 
-If your environment is offline and editable install of `topcow-2024-nnunet` fails, segmentation scripts can still import `nnunetv2` directly from the vendored `topcow-2024-nnunet/` folder in repo root.
+Python ≥ 3.11. Install PyTorch matching your platform and CUDA build from the
+official wheels first if the default index does not resolve one. Extras:
+`viz` (PyVista/VTK visualisation and aneurysm geometry), `segmentation`
+(nnU-Net + YOLO), `dev` (pytest, pymupdf).
 
-Previous requirements files were moved to `requirements/legacy/`.
+This installs four console entry points, so no command needs `cd` or a
+`PYTHONPATH`:
 
-## Updates 4DFlowNet v2.0
-- Loss function has been updated (MSE fluid + MSE non fluid)
-- L2 regularization added
-- Divergence loss turned off
-- Evaluation metrics updated
-- Final activation layer switch to linear to allow phase aliasing
+```
+neuroflow-dicom2nifti   neuroflow-train   neuroflow-predict   neuroflow-segment-cow
+```
 
-These changes are implemented for [Cerebrovascular super-resolution 4D Flow MRI](https://www.biorxiv.org/content/10.1101/2021.08.25.457611v1.full)
+Every other module runs as `python -m neuroflow.<subpackage>.<module>`.
 
-## Manuscript version
+### External model weights
 
-Original network implementation from the manuscript can be found under the following branches:
-- release/manuscript_version (for TF2.0)
-- tf1.8 (for Tensorflow 1.8.0)
+`models/` is not tracked. Populate it before running the segmentation or
+inference stages:
 
-The pre-trained networks weights can be found here:
+| Path | What | Where from |
+| --- | --- | --- |
+| `models/topcow-claim-models/` | nnU-Net CoW segmentation ensemble (5 folds) | [TopCoW challenge](https://topcow23.grand-challenge.org/) |
+| `models/yolo-cow-detection.pt` | YOLO Circle-of-Willis ROI detector | trained in-house; available on request |
+| `models/<experiment>/…` | NeuroFlow LOOCV checkpoints | available on request |
 
-- [Original 4DFlowNet pre-trained weights](https://auckland.figshare.com/articles/Super_Resolution_4DFlow_MRI/12253424)
+---
 
-- [Cerebrovascular 4DFlowNet weights](https://auckland.figshare.com/articles/software/Cerebrovascular_4DFlowNet_-_Super_Resolution_4D_Flow_MRI/19158122)
+## Pipeline
 
-Training dataset is available for download from:
-- [Aortic CFD dataset](https://auckland.figshare.com/articles/dataset/4DFlowNet_-_high_resolution_aortic_CFD_dataset/24424888)
+Each stage lists its inputs, the command, its outputs, and a QC check.
+Stage-by-stage detail lives in [`docs/`](docs/README.md).
 
-# Example results
+```mermaid
+flowchart TD
+    A["1. Organize studies<br/>&lt;CASE&gt;_3T / &lt;CASE&gt;_7T"] --> B["2. DICOM to NIfTI<br/>LPS to RAS, RAW phase"]
+    B --> C["3. Magnitude / speed / PC-MRA"]
+    C --> D["4. Temporal motion correction to t0"]
+    D --> E["5. CoW ROI detection + paired crop"]
+    E --> F["6. Inter-scan registration 7T to 3T"]
+    F --> G["7. CoW segmentation"]
+    G --> H["8. Export paired LR/HR + manifest"]
+    H --> I["9. x2 LR generation"]
+    I --> J["10. LOOCV splits"]
+    J --> K["11. Train CBAM-DNS / CBAM-SupRes"]
+    K --> L["12. Inference"]
+    L --> M["13. Evaluation"]
+```
 
-Below are the example prediction results from an actual 4D Flow MRI of a bifurcation phantom dataset. 
+| # | Stage | Entry point |
+| --- | --- | --- |
+| 1 | Organize studies | convention only |
+| 2 | DICOM → NIfTI | `neuroflow-dicom2nifti` |
+| 3 | Magnitude / speed / PC-MRA | `neuroflow.preprocessing.calculate_mag` |
+| 4 | Temporal motion correction | `neuroflow.registration.batch_register_magnitude` |
+| 5 | CoW ROI detection + paired crop | `neuroflow.preprocessing.yolo_crop_patient_pairs` |
+| 6 | Inter-scan registration 7T → 3T | `neuroflow.registration.batch_register_7T_to_3T` |
+| 7 | CoW segmentation | `neuroflow-segment-cow` |
+| 8 | Export paired dataset | `neuroflow.registration.export_paired_lr_hr_dataset` |
+| 9 | ×2 LR generation | `neuroflow.preprocessing.downsample_nifti_tree` |
+| 10 | LOOCV splits | `neuroflow.registration.generate_loo_cv_csv` |
+| 11 | Training | `scripts/run_loo_xval.sh` |
+| 12 | Inference | `neuroflow-predict` |
+| 13 | Evaluation | `scripts/run_xval_eval.sh` |
 
-LowRes input (voxel size 4mm)
-<p align="left">
-    <img src="https://i.imgur.com/O48FbAh.gif" width="330">
-</p>
+### 1. Organize studies
 
-High Res Ground Truth vs noise-free Super Resolution (2mm)
-<p align="left">
-    <img src="https://i.imgur.com/67CRdGn.gif" width="350">
-</p>
+Two directories per subject, distinguished by field-strength suffix:
 
-High Res Ground Truth vs noise-free Super Resolution (1mm)
-<p align="left">
-    <img src="https://i.imgur.com/DMQa2Lr.gif" width="350">
-</p>
+```
+data/sorted_patients/
+  subject_001_3T/
+  subject_001_7T/
+```
 
+### 2. DICOM → NIfTI
 
-# Recommended workflow (PyTorch + MONAI, no HDF5)
-
-Use direct NIfTI training/inference in this migration branch.  
-The old HDF5 patch-index workflow is still available as a legacy option, but it is no longer the recommended default.
-
-Documentation index (recommended entrypoint):
-
-- [`docs/README.md`](docs/README.md)
-
-Task-specific guides:
-
-- Preprocessing: [`docs/PREPROCESSING.md`](docs/PREPROCESSING.md)
-- Training: [`docs/TRAINING_WORKFLOW.md`](docs/TRAINING_WORKFLOW.md)
-- CoW segmentation: [`docs/SEGMENTATION_COW_WORKFLOW.md`](docs/SEGMENTATION_COW_WORKFLOW.md)
-- Inference: [`docs/INFERENCE_WORKFLOW.md`](docs/INFERENCE_WORKFLOW.md)
-
-Quick command (cropped + interscan-registered inputs):
+Converts RAW phase without rescaling and applies the LPS → RAS sign convention,
+so velocity components keep their physical orientation.
 
 ```bash
-python code/segmentation/segment_cow_crops.py \
+neuroflow-dicom2nifti \
+  --input-root data/sorted_patients \
+  --output-root data/nifti_patients \
+  --canonicalize
+```
+
+*QC:* phase volumes should be centred near 2048 (unsigned RAW) or 0 (signed).
+Check with `python -m neuroflow.registration.check_phase_ranges`.
+
+### 3. Magnitude, speed, and PC-MRA
+
+```bash
+python -m neuroflow.preprocessing.calculate_mag \
+  --input-dir data/nifti_patients \
+  --output-dir data/nifti_patients
+```
+
+*QC:* the PC-MRA maximum-intensity projection should show the Circle of Willis
+clearly against suppressed static tissue.
+
+### 4. Temporal motion correction
+
+Rigid-body alignment of every cardiac frame to t₀, estimated on magnitude by
+normalised mutual information and applied to the paired velocity volumes.
+
+```bash
+python -m neuroflow.registration.batch_register_magnitude \
+  --input-dir data/nifti_patients \
+  --output-dir data/temporal_registered \
+  --reg-type Rigid
+```
+
+*QC:* per-frame NCC against t₀ should rise after correction.
+
+### 5. CoW ROI detection and paired crop
+
+A YOLO detector localises the Circle of Willis per slice; the median box defines
+one crop applied identically to the 3T and 7T volumes.
+
+```bash
+python -m neuroflow.preprocessing.yolo_crop_patient_pairs \
+  --input-dir data/temporal_registered \
+  --output-dir data/temporal_registered_cow_crop \
+  --yolo-model models/yolo-cow-detection.pt \
+  --fixed-suffix _3T --moving-suffix _7T
+```
+
+*QC:* both crops must have identical shape and cover the full vessel extent —
+verify the left-right extent in particular.
+
+### 6. Inter-scan registration 7T → 3T
+
+```bash
+python -m neuroflow.registration.batch_register_7T_to_3T \
+  --input-dir data/temporal_registered_cow_crop \
+  --output-dir data/registered_7T_in_3T_cow_crop \
+  --mask-method none \
+  --phase-warp-mode direct \
+  --interpolator-phase nearestNeighbor
+```
+
+Phase volumes use nearest-neighbour interpolation to avoid blending across
+aliasing wraps.
+
+*QC:* a checkerboard overlay of the registered 7T magnitude on 3T should show
+continuous vessels across tile boundaries.
+
+### 7. Circle-of-Willis segmentation
+
+nnU-Net ensemble on the temporal projection, optionally unioned with a classical
+vesselness response.
+
+```bash
+neuroflow-segment-cow \
   --input data/registered_7T_in_3T_cow_crop \
   --recursive \
   --model-dir models/topcow-claim-models \
   --output-dir data/cow_segmentation
 ```
 
-## Direct NIfTI training and prediction (no HDF5)
+*QC:* Dice against manually corrected masks was 0.83 at native 3T and 0.76 at
+0.5× 3T. Inspect and correct before using a mask as a loss region.
 
-The migration branch supports an end-to-end MONAI NIfTI workflow:
-
-1. Train directly from NIfTI pairs using `src/trainer_nifti.py`
-2. Predict directly from NIfTI and save NIfTI outputs using `code/predict_nifti.py`
-
-### NIfTI training CSV format
-
-Create CSV files (train/val) with one case per row and the following headers:
-
-`lr_u,lr_v,lr_w,lr_mag_u,lr_mag_v,lr_mag_w,hr_u,hr_v,hr_w,mask,venc`
-
-Notes:
-- Paths can be absolute or relative to the CSV location.
-- `mask` is optional (empty value allowed); when missing, full-volume mask is used.
-- `venc` is optional; if omitted or `0`, it is estimated from LR velocity max absolute value.
-
-You can generate these case CSVs from existing legacy patch CSVs (`train.csv`, `validate.csv`) with:
+### 8. Export the paired dataset and manifest
 
 ```bash
-python src/prepare_data/generate_nifti_case_csv.py \
-  --legacy-train-csv data/train.csv \
-  --legacy-val-csv data/validate.csv \
-  --output-train-csv data/train_nifti.csv \
-  --output-val-csv data/validate_nifti.csv \
-  --lr-root /path/to/lr_nifti_dir \
-  --hr-root /path/to/hr_nifti_dir \
-  --strict-exists
+python -m neuroflow.registration.export_paired_lr_hr_dataset \
+  --temporal-dir data/temporal_registered_cow_crop \
+  --registered-dir data/registered_7T_in_3T_cow_crop \
+  --output-root data/paired_dataset
 ```
 
-Default filename patterns:
-- LR: `{lr_stem}_u.nii.gz`, `{lr_stem}_v.nii.gz`, `{lr_stem}_w.nii.gz`
-- LR magnitude: `{lr_stem}_mag_u.nii.gz`, `{lr_stem}_mag_v.nii.gz`, `{lr_stem}_mag_w.nii.gz`
-- HR: `{hr_stem}_u.nii.gz`, `{hr_stem}_v.nii.gz`, `{hr_stem}_w.nii.gz`
-- Mask: `{hr_stem}_mask.nii.gz`
+Produces `lr_3t/`, `hr_7t_in_3t/`, and the case manifest. Frames are paired by
+nearest normalised trigger time; see
+[`examples/manifest_template.csv`](examples/manifest_template.csv).
 
-Use `--*-pattern` flags in the generator if your naming differs.
+*QC:* `time_end` must equal the number of usable LR frames, and
+`hr_time_index_map` must have exactly that many entries.
 
-### Train from NIfTI
+### 9. ×2 low-resolution generation
 
 ```bash
-cd src
-python trainer_nifti.py \
-  --train-csv /path/to/train_nifti.csv \
-  --val-csv /path/to/val_nifti.csv \
-  --patch-size 16 \
-  --res-increase 2 \
-  --batch-size 4 \
-  --epochs 60
+python -m neuroflow.preprocessing.downsample_nifti_tree \
+  --input-root data/paired_dataset/lr_3t \
+  --output-root data/paired_dataset/lr_3t_x05 \
+  --scale 0.5 --time-axis -1
+
+python -m neuroflow.preprocessing.remap_case_csv_for_x2 \
+  --in-csv  data/paired_dataset/cases.csv \
+  --out-csv data/paired_dataset/cases_x2.csv \
+  --mode lr_from_lr \
+  --source-root  data/paired_dataset/lr_3t \
+  --new-lr-root  data/paired_dataset/lr_3t_x05
 ```
 
-By default, `trainer_nifti.py` assumes velocity inputs are raw phase-like values and converts to physical velocity.
-The conversion now auto-detects unsigned/signed RAW ranges:
-
-- unsigned RAW (centered near 2048): `vel = (raw - 2048) / 2048 * venc`
-- signed RAW (centered near 0): `vel = raw / scale * venc`, with `scale=2048` or `4096`
-- No additional U/V sign inversion (to avoid double inversion when DICOM->NIfTI already applied LPS->RAS sign correction)
-
-If your NIfTI velocity is already physical (m/s), disable this with:
+### 10. Patient-level LOOCV splits
 
 ```bash
---already-velocity-input
+python -m neuroflow.registration.generate_loo_cv_csv \
+  --csv-in  data/paired_dataset/cases.csv \
+  --out-dir data/paired_dataset/loo_trainval_hrmasked_r1 \
+  --train-val-only
 ```
 
-Only for older datasets that still need the extra legacy sign convention, enable:
+Splits are held out **by patient**, never by frame, so no subject appears in
+both train and validation.
+
+### 11. Training
 
 ```bash
---legacy-invert-uv-sign-on-raw
+XVAL_EXPERIMENT_NAME=my_run bash scripts/run_loo_xval.sh
 ```
 
-Legacy-compatible patch sampling (coverage-aware) can be enabled with:
+Manuscript settings, from [`scripts/run_loo_xval.sh`](scripts/run_loo_xval.sh):
+
+| Setting | ×1 (CBAM-DNS) | ×2 (CBAM-SupRes) |
+| --- | --- | --- |
+| `MODEL_VARIANT` | `pre_upsample_attention` | `pre_upsample_attention` |
+| LR patch size | 48 | 24 |
+| `res-increase` | 1 | 2 |
+| Batch size | 8 | 8 |
+| Epochs | 500 | 500 |
+| Seed | 42 (`--deterministic`) | 42 (`--deterministic`) |
+| Non-fluid loss weight | 0.3 | 0.3 |
+| Noise augmentation | `--noise-aug-prob 0.8`, masked fraction 0.1 | same |
+| Early stopping | patience 80 | patience 80 |
+
+Two input strategies, matching the manuscript:
 
 ```bash
-cd src
-python trainer_nifti.py \
-  --train-csv /path/to/train_nifti.csv \
-  --val-csv /path/to/val_nifti.csv \
-  --patch-size 16 \
-  --res-increase 2 \
-  --legacy-minimum-coverage 0.2 \
-  --legacy-max-sampling-attempts 100
+# Synthetic-noise input (configs A-D, G) - the default
+XVAL_EXPERIMENT_NAME=synth bash scripts/run_loo_xval.sh
+
+# Masked input (configs E, F)
+XVAL_EXPERIMENT_NAME=masked \
+  APPLY_MASK_TO_LR_INPUTS=1 APPLY_MASK_TO_LR_MAGNITUDE=1 \
+  bash scripts/run_loo_xval.sh
 ```
 
-Optional strict behavior:
-- Add `--legacy-disallow-empty-fallback` to fail if no patch reaches the minimum coverage in the allowed attempts.
-- Without this flag, the sampler falls back to the best-coverage patch (legacy-friendly behavior to keep training progressing).
+`MODE=denoise|sr|both` selects the task; `GPU_DENOISE` / `GPU_SR` pin devices.
 
-### Predict from NIfTI
+### 12. Inference
 
 ```bash
-python code/predict_nifti.py \
-  --u /path/lr_u.nii.gz --v /path/lr_v.nii.gz --w /path/lr_w.nii.gz \
-  --mag-u /path/lr_mag_u.nii.gz --mag-v /path/lr_mag_v.nii.gz --mag-w /path/lr_mag_w.nii.gz \
-  --model-path /path/model-best.pt \
-  --output-prefix /path/output/pred \
-  --patch-size 16 --res-increase 2
+neuroflow-predict \
+  --u  path/lr_u.nii.gz  --v path/lr_v.nii.gz  --w path/lr_w.nii.gz \
+  --mag-u path/lr_mag_u.nii.gz --mag-v path/lr_mag_v.nii.gz --mag-w path/lr_mag_w.nii.gz \
+  --model-path models/my_run/r1_noise/fold_000_.../model-best.pt \
+  --output-prefix output/pred \
+  --patch-size 48 --res-increase 1
 ```
 
-Output files:
-- `<output-prefix>_u.nii.gz`
-- `<output-prefix>_v.nii.gz`
-- `<output-prefix>_w.nii.gz`
-- `<output-prefix>_uvw.nii.gz`
+MONAI sliding-window with 25% overlap. `--legacy-overlap-inference` switches to
+the original patch/trim reconstruction.
 
-For legacy-style patch reconstruction during prediction (similar to original `PatchGenerator` overlap/trim rules), add:
+### 13. Evaluation
 
 ```bash
---legacy-overlap-inference
+bash scripts/run_xval_eval.sh          # inference + velocity/background/geometry
+bash scripts/run_geometry_only.sh      # geometry only, for missing folds
+bash scripts/run_sr_uq_reports.sh      # per-case uncertainty reports
 ```
 
-This mode uses:
-- patch size = `patch_size`
-- effective stride = `patch_size - 4`
-- border trim = 2 LR voxels per side (scaled in HR)
-- end padding to enforce exact tiling
-- overlap crop-and-stitch back to full HR output
+Fold names are discovered from the split directories, so these run against your
+own cohort without editing. Geometry metrics re-segment each prediction with the
+TopCoW pipeline and compare against the subject-specific 7T reference mask.
 
-### Detailed transform order (NIfTI training pipeline)
+---
 
-The NIfTI training/validation dataloader in `src/Network/NiftiPatchDataset.py` applies transforms in this order:
+## Data manifest format
 
-1. `LoadImaged`  
-   - Loads `lr_u, lr_v, lr_w, lr_mag_u, lr_mag_v, lr_mag_w, hr_u, hr_v, hr_w`, and optional `mask`.
+One case per row, 23 columns. See
+[`examples/manifest_template.csv`](examples/manifest_template.csv).
 
-2. `EnsureChannelFirstd`  
-   - Converts arrays to channel-first shape.
+| Group | Columns |
+| --- | --- |
+| LR velocity | `lr_u`, `lr_v`, `lr_w` |
+| LR magnitude | `lr_mag_u`, `lr_mag_v`, `lr_mag_w` |
+| HR velocity | `hr_u`, `hr_v`, `hr_w` |
+| HR magnitude | `hr_mag` |
+| Loss region | `mask` |
+| Velocity encoding | `venc`, `venc_u`, `venc_v`, `venc_w` |
+| Frame range | `time_start`, `time_end`, `time_index` |
+| Frame pairing | `lr_time_index`, `hr_time_index`, `lr_trigger_time_ms`, `hr_trigger_time_ms`, `pairing_method` |
 
-3. `_StackNormalizeFieldsd` (custom transform)  
-   - Stacks LR velocity into `lr_vel` (3 channels).  
-   - Stacks HR velocity into `hr_vel` (3 channels).  
-   - Stacks LR magnitude into `lr_mag` (3 channels).  
-   - By default, converts raw phase-like velocity to physical velocity (auto-detecting unsigned/signed RAW):
-     - unsigned RAW: `vel = (raw - 2048) / 2048 * venc`
-     - signed RAW: `vel = raw / scale * venc`, with `scale=2048` or `4096`
-     - no extra U/V inversion (LPS->RAS sign correction is expected to be baked during DICOM->NIfTI conversion)
-     - optional legacy mode: `--legacy-invert-uv-sign-on-raw`
-   - Applies normalization:
-     - velocity: divide by `venc` (CSV value, or estimated from LR velocity max abs if `venc <= 0`)
-     - magnitude: divide by `mag_scale` (default 4095)
-   - Builds binary mask (`mask >= mask_threshold`), or full-volume mask if no mask provided.
+Paths may be absolute or relative to the CSV. `mask` may be empty, in which case
+the full volume is used. `venc` ≤ 0 is estimated from the LR velocity maximum.
 
-4. `_RandomVectorRotate90d` (train only)  
-   - Random 90/180/270-degree rotation in random plane.
-   - Velocity channels use vector-aware rotation logic (axis swap + sign changes).
-   - Magnitude and mask are scalar rotations.
+---
 
-5. `_PairedRandomPatchd`  
-   - Training:
-     - random LR patch of size `patch_size`
-     - matching HR patch at scaled coordinates (`patch_size * res_increase`)
-     - optional legacy coverage filter (`legacy-minimum-coverage`)
-   - Validation:
-     - deterministic center patch (no random sampling)
+## Repository layout
 
-6. Tensor conversion  
-   - Returns tensors in the same tuple order expected by `TrainerController`:
-     - `u, v, w, u_mag, v_mag, w_mag, u_hr, v_hr, w_hr, venc, mask`
+```
+neuroflow/            Installable package
+  conversion/         DICOM to NIfTI
+  preprocessing/      Magnitude/speed/PC-MRA, YOLO ROI crop, x2 downsampling
+  registration/       Temporal and inter-scan registration, dataset export, LOOCV splits
+  segmentation/       Circle-of-Willis segmentation (nnU-Net + vesselness)
+  models/             SR4DFlowNet variants, CBAM blocks, model factory, losses
+  data/               NIfTI dataset, patch sampling, manifest generation
+  training/           Trainer and training CLI
+  inference/          Prediction and SR-UQ pipelines
+  evaluation/         Velocity, background, geometry, and aneurysm metrics
+  visualization/      PyVista/flow visualisation and interactive ROI pickers
+scripts/              The five reproducibility scripts
+docs/                 Stage-by-stage documentation
+examples/             Manifest template
+patches/              nnU-Net patch needed only to retrain segmentation
+assets/               README figures
+tests/                Unit tests
+```
 
-### Synthetic noise augmentation theory (NIfTI training)
+---
 
-Synthetic noise is added in `_AddNonvascularNoiseAugd` (`src/Network/NiftiPatchDataset.py`) after normalization and patch extraction.
+## Reproducing the manuscript
 
-1. Sample from a probability family  
-   - Draw a base random variable from the selected PDF:
-     - `z ~ p(z)` where `p` can be `normal`, `student_t`, `skew_normal`, `generalized_normal`, `hat`, etc.
-   - If `--noise-aug-fit-summary-csv` is provided, the best-fit family per channel is loaded once from CSV and reused during training.
+Configurations reported in the main text:
 
-2. Apply shape exaggeration (optional)  
-   - `z1 = z * side_expand`
-   - `z2 = z1 + sign(z1) * edge_boost * |z1|^(edge_power)`
-   - `z_tilde = clip(z2, -35, 35)`
-   - This widens sides and/or boosts tails before final amplitude scaling.
+| ID | Task | Architecture | Input | How to run |
+| --- | --- | --- | --- | --- |
+| A | ×1 | Original | Synthetic noise | `MODE=denoise MODEL_VARIANT=original bash scripts/run_loo_xval.sh` |
+| B | ×1 | CBAM-DNS | Synthetic noise | `MODE=denoise bash scripts/run_loo_xval.sh` |
+| E | ×1 | CBAM-DNS | Masked | `MODE=denoise APPLY_MASK_TO_LR_INPUTS=1 bash scripts/run_loo_xval.sh` |
+| C | ×2 | Original | Synthetic noise | `MODE=sr MODEL_VARIANT=original bash scripts/run_loo_xval.sh` |
+| D | ×2 | CBAM-SupRes | Synthetic noise | `MODE=sr bash scripts/run_loo_xval.sh` |
+| F | ×2 | CBAM-SupRes | Masked | `MODE=sr APPLY_MASK_TO_LR_INPUTS=1 bash scripts/run_loo_xval.sh` |
+| G | ×2 | Stock 4DFlowNet | Original | pretrained 4DFlowNet weights, no retraining |
 
-3. Apply amplitude scaling  
-   - A random level is sampled each call: `level ~ Uniform(level_min, level_max)`
-   - Effective scale:
-     - `scale_eff = scale * range_mult * level`
-   - Final additive noise:
-     - `n = z_tilde * scale_eff`
+Then `bash scripts/run_xval_eval.sh` with a matching `XVAL_EXPERIMENT_NAME`.
 
-4. Apply spatial weighting with mask  
-   - `x_noisy = x + w * n`
-   - `w = 1` in non-vascular voxels.
-   - In vascular voxels, `w = noise_aug_masked_fraction` (default `0.0`, i.e., untouched).
+**Supplementary ablations.** The cascade, phase-attention, and JiT-SR
+architectures referenced as supplementary material are **not** on `main`. They
+are preserved in full on the **`neuroflow_dev`** branch, together with the
+manuscript sources, the exploratory notebooks, and the legacy HDF5 workflow:
 
-Interpretation:
-- The PDF controls the noise *shape* (Gaussian-like, heavy tails, plateau-like, skewed, etc.).
-- `scale`, `range_mult`, and `level` control the noise *amplitude*.
-- Increasing amplitude terms increases the amount of injected noise.
+```bash
+git checkout neuroflow_dev
+```
 
-### Legacy-mode knobs (what they replicate)
+---
 
-- `--legacy-minimum-coverage`  
-  Replicates the old `minimum_coverage` concept from patch CSV generation.
+## Data availability
 
-- `--legacy-max-sampling-attempts`  
-  Replicates the old retry loop behavior when searching for sufficiently covered patches.
+The paired 3T/7T cohort is **not** redistributed with this repository. The data
+are human subject acquisitions and cannot be shared publicly. Case identifiers
+used internally embed acquisition dates and have been removed here.
 
-- `--legacy-disallow-empty-fallback`  
-  If enabled, no fallback patch is accepted when threshold is not met.
+Researchers who wish to reproduce the results on the original cohort should
+contact the authors; access is subject to the governing ethics approval and a
+data-sharing agreement. The full pipeline runs on any paired 4D Flow dataset
+that can be expressed in the manifest format above.
 
-- `--legacy-overlap-inference`  
-  Uses old patch overlap/trim reconstruction logic instead of MONAI sliding-window blending.
+---
 
-### Important notes when using one magnitude image for U/V/W
+## Citation
 
-If you pass one file via `--mag`, that file is duplicated to `mag_u`, `mag_v`, `mag_w`.
-Inside the network, magnitude is computed as:
+See [`CITATION.cff`](CITATION.cff).
 
-`mag = sqrt(u_mag^2 + v_mag^2 + w_mag^2)`
+```bibtex
+@software{neuroflow2026,
+  title  = {{NeuroFlow}: joint 3T-to-7T domain translation and super-resolution
+            of cerebrovascular 4D Flow MRI},
+  year   = {2026},
+  url    = {https://github.com/zheng-sk/NeuroFlow},
+  license = {MIT}
+}
+```
 
-So if all three are identical `M`, then `mag = sqrt(3) * M`.
+If you use NeuroFlow, please also cite 4DFlowNet, from which it derives:
 
-If you want `mag` to behave like a single-channel magnitude value `M`, pre-scale input magnitude by `1/sqrt(3)` before using it for all three channels.
+```bibtex
+@article{ferdian2020,
+  title   = {{4DFlowNet}: Super-Resolution {4D} Flow {MRI} Using Deep Learning
+             and Computational Fluid Dynamics},
+  author  = {Ferdian, Edward and Suinesiaputra, Avan and Dubowitz, David J. and
+             Zhao, Debbie and Wang, Alan and Cowan, Brett and Young, Alistair A.},
+  journal = {Frontiers in Physics},
+  volume  = {8},
+  pages   = {138},
+  year    = {2020},
+  doi     = {10.3389/fphy.2020.00138}
+}
+```
 
+---
 
-### Key parameters (current NIfTI workflow)
+## Acknowledgements
 
-Training (`trainer_nifti.py`):
+NeuroFlow builds on **4DFlowNet** by Edward Ferdian and colleagues (MIT,
+Copyright © 2020 Edward Ferdian), **nnU-Net v2** by Isensee et al. (Apache-2.0),
+segmentation models from the **TopCoW** challenge, and **MONAI**. Full
+attribution is in [`NOTICE`](NOTICE).
 
-| Param | Description | Default |
-|------|-------------|--------:|
-| `patch-size` | LR training patch size (HR uses `patch_size * res_increase`) | 16 |
-| `res-increase` | Upsampling ratio | 2 |
-| `batch-size` | Training batch size | 4 |
-| `epochs` | Number of training epochs | 60 |
-| `initial-learning-rate` | Adam learning rate | 2e-4 |
-| `low-resblock` | LR residual blocks | 8 |
-| `hi-resblock` | HR residual blocks | 4 |
-| `train-samples-per-volume` | Random patch samples per train volume per epoch | 64 |
-| `val-samples-per-volume` | Patch samples per validation volume per epoch | 16 |
-| `legacy-minimum-coverage` | Optional minimum mask coverage per sampled train patch | 0.0 |
-| `legacy-max-sampling-attempts` | Max retries to find a patch matching coverage | 100 |
-| `noise-aug-masked-fraction` | Fraction of synthetic noise amplitude also applied inside vascular mask (`0..1`) | 0.0 |
-| `legacy-invert-uv-sign-on-raw` | Legacy-only extra U/V sign inversion after RAW->m/s conversion | off |
+## License
 
-Prediction (`code/predict_nifti.py`):
-
-| Param | Description | Default |
-|------|-------------|--------:|
-| `patch-size` | LR patch size for inference | 16 |
-| `res-increase` | Upsampling ratio | 2 |
-| `sw-batch-size` | Inference mini-batch size | 2 |
-| `overlap` | Sliding-window overlap ratio | 0.25 |
-| `legacy-overlap-inference` | Use legacy overlap/trim patch reconstruction | off |
-| `round-small-values` | Zero values below `venc/2048` | off |
-| `already-velocity-input` | Disable default raw phase-to-velocity conversion | off |
-| `legacy-invert-uv-sign-on-raw` | Legacy-only extra U/V sign inversion after RAW->m/s conversion | off |
-
-## Legacy HDF5 workflow (optional, not recommended)
-
-The following scripts are kept for backward compatibility with previous experiments:
-- `src/trainer.py`
-- `src/predictor.py`
-- `code/inference/batch_predict.py`
-- `src/prepare_data/prepare_mri_data.py`
-- `src/prepare_data/prepare_nifti_data.py`
-
-Use this legacy path only if you need exact compatibility with older HDF5-based pipelines/checkpoints.
-For all new work, prefer direct NIfTI training/prediction documented above.
-
-## Contact Information
-
-If you encounter any problems in using the code, please open an issue in this repository or feel free to contact me by email.
-
-Author: Edward Ferdian (edwardferdian03@gmail.com).
+MIT — see [`LICENSE`](LICENSE). The original 4DFlowNet copyright notice is
+retained as those terms require. Note that the optional `segmentation` extra
+pulls in Ultralytics YOLO, which is AGPL-3.0; see [`NOTICE`](NOTICE).
